@@ -1,0 +1,214 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select latest Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)/Contents/Developer"
+
+      - name: Validate scripts
+        run: bash -n ./release.sh
+
+      - name: Run tests
+        run: swift test
+
+      - name: Detect signing configuration
+        id: signing_config
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${MACOS_CERTIFICATE_P12}" ] && [ -n "${MACOS_CERTIFICATE_PASSWORD}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Import Developer ID certificate
+        id: signing
+        if: ${{ steps.signing_config.outputs.enabled == 'true' }}
+        env:
+          KEYCHAIN_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}-keychain
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          CERT_PATH="$RUNNER_TEMP/developer-id-application.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+
+          printf '%s' "$MACOS_CERTIFICATE_P12" | base64 -D -o "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep 'Developer ID Application' | head -n 1 | sed -E 's/.*"(.+)"/\1/')"
+
+          if [ -z "$SIGNING_IDENTITY" ]; then
+            echo "Developer ID Application identity not found in imported certificate" >&2
+            exit 1
+          fi
+
+          {
+            echo "KEYCHAIN_PATH=$KEYCHAIN_PATH"
+            echo "SIGNING_IDENTITY=$SIGNING_IDENTITY"
+          } >> "$GITHUB_ENV"
+
+      - name: Detect notarization configuration
+        id: notary_config
+        if: ${{ steps.signing.conclusion == 'success' }}
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${APPLE_ID}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD}" ] && [ -n "${APPLE_TEAM_ID}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Store notarization credentials
+        id: notary
+        if: ${{ steps.notary_config.outputs.enabled == 'true' }}
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+
+          xcrun notarytool store-credentials "ccspace-notarytool" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --keychain "$KEYCHAIN_PATH"
+
+          echo "NOTARYTOOL_PROFILE=ccspace-notarytool" >> "$GITHUB_ENV"
+
+      - name: Build universal binary and package DMG
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          APP_NAME="CCSpace"
+          DISPLAY_NAME="CCSpace"
+          BUNDLE_ID="com.ccspace.app"
+          VERSION="${TAG_NAME#v}"
+          DIST_DIR="./dist"
+
+          # Build for each architecture
+          for ARCH in arm64 x86_64; do
+            echo "==> Building for ${ARCH}..."
+            swift build -c release --product "${APP_NAME}" --arch "${ARCH}"
+            BIN_PATH="$(swift build -c release --product "${APP_NAME}" --arch "${ARCH}" --show-bin-path)/${APP_NAME}"
+            cp "${BIN_PATH}" "/tmp/${APP_NAME}-${ARCH}"
+          done
+
+          # Create universal binary with lipo
+          echo "==> Creating universal binary..."
+          mkdir -p "${DIST_DIR}"
+          lipo -create "/tmp/${APP_NAME}-arm64" "/tmp/${APP_NAME}-x86_64" -output "${DIST_DIR}/${APP_NAME}"
+
+          # Assemble app bundle
+          APP_BUNDLE="${DIST_DIR}/${DISPLAY_NAME}.app"
+          APP_MACOS="${APP_BUNDLE}/Contents/MacOS"
+          mkdir -p "${APP_MACOS}"
+          mv "${DIST_DIR}/${APP_NAME}" "${APP_MACOS}/${APP_NAME}"
+          chmod +x "${APP_MACOS}/${APP_NAME}"
+
+          # Copy app icon
+          APP_RESOURCES="${APP_BUNDLE}/Contents/Resources"
+          mkdir -p "${APP_RESOURCES}"
+          cp "Resources/AppIcon.icns" "${APP_RESOURCES}/AppIcon.icns"
+
+          /usr/libexec/PlistBuddy \
+            -c "Clear dict" \
+            -c "Add :CFBundleExecutable string ${APP_NAME}" \
+            -c "Add :CFBundleIdentifier string ${BUNDLE_ID}" \
+            -c "Add :CFBundleIconFile string AppIcon" \
+            -c "Add :CFBundleName string CCSpace" \
+            -c "Add :CFBundlePackageType string APPL" \
+            -c "Add :CFBundleShortVersionString string ${VERSION}" \
+            -c "Add :CFBundleVersion string ${VERSION}" \
+            -c "Add :LSMinimumSystemVersion string 14.0" \
+            -c "Add :NSPrincipalClass string NSApplication" \
+            "${APP_BUNDLE}/Contents/Info.plist"
+
+          # Code sign if identity is available
+          if [ -n "${SIGNING_IDENTITY:-}" ]; then
+            CODESIGN_ARGS=(--force --options runtime --timestamp --sign "${SIGNING_IDENTITY}")
+            [ -n "${KEYCHAIN_PATH:-}" ] && CODESIGN_ARGS+=(--keychain "${KEYCHAIN_PATH}")
+            echo "==> Signing app bundle..."
+            codesign "${CODESIGN_ARGS[@]}" "${APP_BUNDLE}"
+          fi
+
+          # Notarize if profile is available
+          if [ -n "${NOTARYTOOL_PROFILE:-}" ] && [ "${NOTARYTOOL_PROFILE}" != "" ]; then
+            echo "==> Notarizing..."
+            NOTARY_ZIP="${DIST_DIR}/${APP_NAME}-notarize.zip"
+            ditto -c -k --keepParent "${APP_BUNDLE}" "${NOTARY_ZIP}"
+            NOTARY_ARGS=(--keychain-profile "${NOTARYTOOL_PROFILE}" --wait)
+            [ -n "${KEYCHAIN_PATH:-}" ] && NOTARY_ARGS+=(--keychain "${KEYCHAIN_PATH}")
+            xcrun notarytool submit "${NOTARY_ZIP}" "${NOTARY_ARGS[@]}"
+            xcrun stapler staple "${APP_BUNDLE}"
+            rm -f "${NOTARY_ZIP}"
+          fi
+
+          # Create DMG with Applications symlink
+          DMG_NAME="CCSpace-${TAG_NAME}.dmg"
+          DMG_STAGING="${DIST_DIR}/dmg-staging"
+          echo "==> Creating DMG: ${DMG_NAME}..."
+          rm -rf "${DMG_STAGING}"
+          mkdir -p "${DMG_STAGING}"
+          cp -R "${APP_BUNDLE}" "${DMG_STAGING}/"
+          ln -s /Applications "${DMG_STAGING}/Applications"
+          hdiutil create -volname "CCSpace" -srcfolder "${DMG_STAGING}" -ov -format UDZO "${DIST_DIR}/${DMG_NAME}"
+          rm -rf "${DMG_STAGING}"
+          (cd "${DIST_DIR}" && shasum -a 256 "${DMG_NAME}" > "${DMG_NAME}.sha256")
+
+          echo "==> Done: ${DIST_DIR}/${DMG_NAME}"
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: CCSpace-${{ github.ref_name }}
+          path: dist/*
+
+      - name: Create GitHub release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          gh release delete "$TAG_NAME" --repo "${GITHUB_REPOSITORY}" --yes 2>/dev/null || true
+
+          gh release create "$TAG_NAME" \
+            "dist/CCSpace-${TAG_NAME}.dmg" \
+            "dist/CCSpace-${TAG_NAME}.dmg.sha256" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "CCSpace ${TAG_NAME}" \
+            --generate-notes

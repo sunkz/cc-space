@@ -1,4 +1,6 @@
 import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
 
 struct RepositorySettingsSection: View {
     @ObservedObject var repositoryStore: RepositoryStore
@@ -35,6 +37,10 @@ struct RepositorySettingsSection: View {
         )
     }
 
+    private var repositoryCountLabel: String {
+        "\(repositories.count) 个仓库"
+    }
+
     @MainActor
     private func addRepository() async {
         guard addPresentationState.canSubmit else { return }
@@ -53,46 +59,69 @@ struct RepositorySettingsSection: View {
         }
     }
 
+    private func exportRepositoriesBackup() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.title = "导出 Git 仓库备份"
+        panel.message = "请输入备份文件名并选择保存位置"
+        panel.nameFieldStringValue = RepositoryBackupExportPresentationState.defaultFileName()
+        panel.prompt = "导出"
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        do {
+            let document = try repositoryStore.exportBackup(to: url)
+            feedback = RepositoryConfigFeedbackFactory.exportSuccess(
+                repositoryCount: document.repositories.count
+            )
+        } catch {
+            feedback = CCSpaceFeedbackFactory.actionError(
+                action: "导出仓库备份",
+                error: error
+            )
+        }
+    }
+
+    private func importRepositoriesBackup() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.json]
+        panel.prompt = "导入"
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        do {
+            let result = try repositoryStore.importBackup(from: url)
+            feedback = RepositoryConfigFeedbackFactory.importResult(result)
+        } catch {
+            feedback = CCSpaceFeedbackFactory.actionError(
+                action: "导入仓库备份",
+                error: error
+            )
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            CCSpaceSectionTitle(
-                title: "Git 仓库",
-                subtitle: "",
-                titleFont: .title3,
-                titleWeight: .semibold,
-                titleColor: .primary
-            )
+            headerSection
+
+            backupActionSection
 
             if let feedback {
                 CCSpaceFeedbackBanner(feedback: feedback)
                     .ccspaceAutoDismissFeedback($feedback)
             }
 
-            HStack(alignment: .center, spacing: 8) {
-                TextField("仓库地址", text: $gitURL)
-                    .textFieldStyle(.roundedBorder)
-                    .onChange(of: gitURL) { _, _ in
-                        feedback = nil
-                    }
-                    .onSubmit {
-                        Task { await addRepository() }
-                    }
-
-                Button {
-                    Task {
-                        await addRepository()
-                    }
-                } label: {
-                    Text("新增")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.regular)
-                .disabled(!addPresentationState.canSubmit)
-            }
+            addRepositorySection
 
             if repositories.isEmpty == false {
                 TextField("搜索仓库名称或地址", text: $searchText)
                     .textFieldStyle(.roundedBorder)
+                    .padding(.top, 2)
             }
 
             if searchPresentationState.filteredRepositories.isEmpty {
@@ -134,6 +163,85 @@ struct RepositorySettingsSection: View {
         } message: {
             Text(deletePresentationState?.message ?? "")
         }
+    }
+
+    private var headerSection: some View {
+        HStack(alignment: .top, spacing: 12) {
+            CCSpaceSectionTitle(
+                title: "Git 仓库",
+                subtitle: "集中维护常用 Git URL，并支持导入导出备份。",
+                titleFont: .title3,
+                titleWeight: .semibold,
+                titleColor: .primary
+            )
+
+            Spacer(minLength: 12)
+
+            CCSpacePill(
+                title: repositoryCountLabel,
+                systemImage: "shippingbox",
+                tint: .secondary
+            )
+        }
+    }
+
+    private var backupActionSection: some View {
+        HStack(alignment: .center, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("仓库备份")
+                    .font(.subheadline.weight(.medium))
+                Text("导出为 JSON 备份文件，或从已有备份中恢复仓库配置。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 8)
+
+            Button("导入备份") {
+                importRepositoriesBackup()
+            }
+            .ccspaceSecondaryActionButton()
+
+            Button("导出备份") {
+                exportRepositoriesBackup()
+            }
+            .ccspacePrimaryActionButton()
+        }
+        .ccspaceInsetPanel(
+            background: Color.primary.opacity(0.02),
+            cornerRadius: 12,
+            padding: 10,
+            borderOpacity: 0.04
+        )
+    }
+
+    private var addRepositorySection: some View {
+        HStack(alignment: .center, spacing: 8) {
+            TextField("粘贴 Git 仓库地址（HTTPS 或 SSH）", text: $gitURL)
+                .textFieldStyle(.roundedBorder)
+                .onChange(of: gitURL) { _, _ in
+                    feedback = nil
+                }
+                .onSubmit {
+                    Task { await addRepository() }
+                }
+
+            Button {
+                Task {
+                    await addRepository()
+                }
+            } label: {
+                Text("新增仓库")
+            }
+            .ccspacePrimaryActionButton()
+            .disabled(!addPresentationState.canSubmit)
+        }
+        .ccspaceInsetPanel(
+            background: Color.primary.opacity(0.02),
+            cornerRadius: 12,
+            padding: 10,
+            borderOpacity: 0.04
+        )
     }
 
     @ViewBuilder

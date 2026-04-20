@@ -138,4 +138,92 @@ final class RepositoryStoreTests: XCTestCase {
 
         XCTAssertTrue(store.repositories.isEmpty)
     }
+
+    func test_exportBackupWritesRepositoryBackupDocument() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
+        let backupURL = root.appendingPathComponent("repositories-backup.json")
+
+        try await store.addRepository(gitURL: "git@github.com:org/api.git")
+        try await store.addRepository(gitURL: "git@github.com:org/web.git")
+
+        let document = try store.exportBackup(to: backupURL)
+        let data = try Data(contentsOf: backupURL)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(RepositoryBackupDocument.self, from: data)
+
+        XCTAssertEqual(document.version, decoded.version)
+        XCTAssertEqual(decoded.version, RepositoryBackupDocument.currentVersion)
+        XCTAssertEqual(document.repositories, decoded.repositories)
+        XCTAssertEqual(decoded.repositories, [
+            "git@github.com:org/api.git",
+            "git@github.com:org/web.git",
+        ])
+    }
+
+    func test_importBackupImportsNewRepositoriesAndSkipsDuplicates() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
+        let backupURL = root.appendingPathComponent("repositories-backup.json")
+
+        try store.addRepository(gitURL: "git@github.com:org/api.git")
+
+        let document = RepositoryBackupDocument(
+            repositories: [
+                "git@github.com:org/api.git",
+                "git@github.com:org/web.git",
+                "git@github.com:org/ios.git",
+                "git@github.com:team-b/web.git",
+            ]
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(document).write(to: backupURL, options: .atomic)
+
+        let result = try store.importBackup(from: backupURL)
+
+        XCTAssertEqual(result, RepositoryImportResult(importedCount: 2, skippedCount: 2))
+        XCTAssertEqual(
+            Set(store.repositories.map(\.gitURL)),
+            Set([
+                "git@github.com:org/api.git",
+                "git@github.com:org/web.git",
+                "git@github.com:org/ios.git",
+            ])
+        )
+    }
+
+    func test_importBackupRejectsInvalidBackupFormat() {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
+        let backupURL = root.appendingPathComponent("repositories-backup.json")
+
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try? Data("{\"repositories\":true}".utf8).write(to: backupURL, options: .atomic)
+
+        XCTAssertThrowsError(
+            try store.importBackup(from: backupURL)
+        ) { error in
+            XCTAssertEqual(error as? RepositoryStoreError, .invalidBackupFormat)
+        }
+    }
+
+    func test_importBackupRejectsEmptyRepositoryList() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
+        let backupURL = root.appendingPathComponent("repositories-backup.json")
+        let document = RepositoryBackupDocument(repositories: [])
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try encoder.encode(document).write(to: backupURL, options: .atomic)
+
+        XCTAssertThrowsError(
+            try store.importBackup(from: backupURL)
+        ) { error in
+            XCTAssertEqual(error as? RepositoryStoreError, .emptyBackup)
+        }
+    }
 }

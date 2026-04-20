@@ -53,6 +53,16 @@ struct RepositoryEditPresentationState {
     }
 }
 
+enum RepositoryBackupExportPresentationState {
+    static func defaultFileName(now: Date = .now) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return "ccspace-git-repositories-\(formatter.string(from: now)).json"
+    }
+}
+
 struct RepositoryDeletePresentationState: Equatable {
     let repositoryID: UUID
     let title: String
@@ -101,5 +111,31 @@ enum RepositoryConfigFeedbackFactory {
 
     static func deleteSuccess(repositoryName: String) -> CCSpaceFeedback {
         CCSpaceFeedbackFactory.actionSuccess("已删除 \(repositoryName)")
+    }
+
+    static func exportSuccess(repositoryCount: Int) -> CCSpaceFeedback {
+        if repositoryCount == 0 {
+            return CCSpaceFeedback(style: .info, message: "已导出空备份文件")
+        }
+        return CCSpaceFeedbackFactory.actionSuccess("已导出 \(repositoryCount) 个仓库的备份")
+    }
+
+    static func importResult(_ result: RepositoryImportResult) -> CCSpaceFeedback {
+        if result.importedCount > 0 && result.skippedCount > 0 {
+            return CCSpaceFeedback(
+                style: .info,
+                message: "已导入 \(result.importedCount) 个仓库，跳过 \(result.skippedCount) 个重复项"
+            )
+        }
+        if result.importedCount > 0 {
+            return CCSpaceFeedbackFactory.actionSuccess("已导入 \(result.importedCount) 个仓库")
+        }
+        if result.skippedCount > 0 {
+            return CCSpaceFeedback(
+                style: .info,
+                message: "备份中的仓库已全部存在，未导入新仓库"
+            )
+        }
+        return CCSpaceFeedback(style: .info, message: "未导入任何仓库")
     }
 }

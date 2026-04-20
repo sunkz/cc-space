@@ -84,6 +84,27 @@ final class RepositoryConfigPresentationStateTests: XCTestCase {
         XCTAssertFalse(nonEditingState.canSubmit)
     }
 
+    func test_backupExportStateUsesTimestampedDefaultName() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .gmt
+        let now = calendar.date(
+            from: DateComponents(
+                timeZone: TimeZone(secondsFromGMT: 0),
+                year: 2024,
+                month: 4,
+                day: 20,
+                hour: 0,
+                minute: 0,
+                second: 0
+            )
+        ) ?? .distantPast
+
+        XCTAssertEqual(
+            RepositoryBackupExportPresentationState.defaultFileName(now: now),
+            "ccspace-git-repositories-20240420-000000.json"
+        )
+    }
+
     func test_feedbackFactoryBuildsRepositorySuccessMessages() {
         XCTAssertEqual(
             RepositoryConfigFeedbackFactory.addSuccess(repositoryName: "blog"),

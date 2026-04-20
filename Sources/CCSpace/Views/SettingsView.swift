@@ -29,7 +29,7 @@ struct SettingsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 16) {
                 rootDirectorySection
                 RepositorySettingsSection(
                     repositoryStore: repositoryStore,
@@ -73,7 +73,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             CCSpaceSectionTitle(
                 title: "工作区根目录",
-                subtitle: "",
+                subtitle: "新建工作区时，会默认在这里创建本地目录。",
                 titleFont: .title3,
                 titleWeight: .semibold,
                 titleColor: .primary
@@ -94,9 +94,14 @@ struct SettingsView: View {
                 Button("选择目录") {
                     chooseDirectory()
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.regular)
+                .ccspacePrimaryActionButton()
             }
+            .ccspaceInsetPanel(
+                background: Color.primary.opacity(0.02),
+                cornerRadius: 12,
+                padding: 10,
+                borderOpacity: 0.04
+            )
 
             if let saveFeedback {
                 CCSpaceFeedbackBanner(feedback: saveFeedback)

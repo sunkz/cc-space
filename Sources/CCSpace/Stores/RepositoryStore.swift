@@ -6,6 +6,33 @@ private let repositoryStoreLog = Logger(
     category: "RepositoryStore"
 )
 
+struct RepositoryBackupDocument: Codable, Equatable {
+    static let currentVersion = 1
+
+    let version: Int
+    let exportedAt: Date
+    let repositories: [String]
+
+    init(
+        version: Int = currentVersion,
+        exportedAt: Date = .now,
+        repositories: [String]
+    ) {
+        self.version = version
+        self.exportedAt = exportedAt
+        self.repositories = repositories
+    }
+}
+
+struct RepositoryImportResult: Equatable, Sendable {
+    let importedCount: Int
+    let skippedCount: Int
+
+    var hasChanges: Bool {
+        importedCount > 0
+    }
+}
+
 struct RepositoryDeduplicationResult: Sendable {
     let repositories: [RepositoryConfig]
     let changed: Bool
@@ -17,6 +44,9 @@ enum RepositoryStoreError: LocalizedError, Equatable {
     case invalidRepoName
     case notFound
     case repoNameChangeNotSupported
+    case invalidBackupFormat
+    case unsupportedBackupVersion(Int)
+    case emptyBackup
 
     var errorDescription: String? {
         switch self {
@@ -30,6 +60,12 @@ enum RepositoryStoreError: LocalizedError, Equatable {
             return "仓库不存在"
         case .repoNameChangeNotSupported:
             return "暂不支持通过编辑修改仓库名称，请新增仓库后替换"
+        case .invalidBackupFormat:
+            return "备份文件格式无效"
+        case .unsupportedBackupVersion(let version):
+            return "暂不支持该备份文件版本：\(version)"
+        case .emptyBackup:
+            return "备份文件中没有仓库"
         }
     }
 }
@@ -60,6 +96,19 @@ final class RepositoryStore: ObservableObject {
         } catch LocalPathSafetyError.invalidComponent {
             throw RepositoryStoreError.invalidRepoName
         }
+    }
+
+    private func makeBackupEncoder() -> JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
+    }
+
+    private func makeBackupDecoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
     }
 
     func addRepository(gitURL: String) throws {
@@ -154,5 +203,79 @@ final class RepositoryStore: ObservableObject {
         updatedRepositories[index].gitURL = normalizedGitURL
         updatedRepositories[index].updatedAt = .now
         try persistRepositories(updatedRepositories)
+    }
+
+    func exportBackup(to fileURL: URL) throws -> RepositoryBackupDocument {
+        let document = RepositoryBackupDocument(
+            repositories: repositories.map(\.gitURL)
+        )
+        let encoder = makeBackupEncoder()
+        let data = try encoder.encode(document)
+        let directoryURL = fileURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        try data.write(to: fileURL, options: .atomic)
+        return document
+    }
+
+    func importBackup(from fileURL: URL) throws -> RepositoryImportResult {
+        let data = try Data(contentsOf: fileURL)
+        let decoder = makeBackupDecoder()
+
+        let document: RepositoryBackupDocument
+        do {
+            document = try decoder.decode(RepositoryBackupDocument.self, from: data)
+        } catch {
+            throw RepositoryStoreError.invalidBackupFormat
+        }
+
+        guard document.version == RepositoryBackupDocument.currentVersion else {
+            throw RepositoryStoreError.unsupportedBackupVersion(document.version)
+        }
+
+        let rawURLs = document.repositories.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter {
+            !$0.isEmpty
+        }
+        guard rawURLs.isEmpty == false else {
+            throw RepositoryStoreError.emptyBackup
+        }
+
+        var existingURLs = Set(repositories.map(\.gitURL))
+        var existingNames = Set(repositories.map(\.repoName))
+        var updatedRepositories = repositories
+        var importedCount = 0
+        var skippedCount = 0
+
+        for gitURL in rawURLs {
+            let repoName = try validatedRepositoryName(from: gitURL)
+            if existingURLs.contains(gitURL) || existingNames.contains(repoName) {
+                skippedCount += 1
+                continue
+            }
+
+            let now = Date()
+            updatedRepositories.append(
+                RepositoryConfig(
+                    id: UUID(),
+                    gitURL: gitURL,
+                    repoName: repoName,
+                    createdAt: now,
+                    updatedAt: now
+                )
+            )
+            existingURLs.insert(gitURL)
+            existingNames.insert(repoName)
+            importedCount += 1
+        }
+
+        if importedCount > 0 {
+            try persistRepositories(updatedRepositories)
+        }
+
+        return RepositoryImportResult(
+            importedCount: importedCount,
+            skippedCount: skippedCount
+        )
     }
 }

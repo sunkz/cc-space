@@ -47,6 +47,7 @@ private final class CCSpaceQuickHelpTrackingView: NSView {
 
     private var trackingArea: NSTrackingArea?
     private var pendingShowTask: Task<Void, Never>?
+    private var popoverEventMonitor: Any?
     private var notificationObservers: [NSObjectProtocol] = []
     private weak var observedWindow: NSWindow?
     private var text: String = ""
@@ -108,6 +109,7 @@ private final class CCSpaceQuickHelpTrackingView: NSView {
     func closePopover() {
         pendingShowTask?.cancel()
         pendingShowTask = nil
+        removePopoverEventMonitor()
 
         if popover.isShown {
             popover.performClose(nil)
@@ -171,16 +173,20 @@ private final class CCSpaceQuickHelpTrackingView: NSView {
             try? await Task.sleep(for: delay)
             guard Task.isCancelled == false, let self else { return }
             self.showPopover()
+            self.pendingShowTask = nil
         }
     }
 
     private func showPopover() {
-        guard text.isEmpty == false, window != nil else { return }
+        guard text.isEmpty == false, window != nil, isPointerInsideTrackedBounds() else { return }
 
         refreshPopoverContent()
 
-        guard popover.isShown == false else { return }
-        popover.show(relativeTo: bounds, of: self, preferredEdge: .minY)
+        if popover.isShown == false {
+            popover.show(relativeTo: bounds, of: self, preferredEdge: .minY)
+        }
+        configurePopoverWindow()
+        installPopoverEventMonitor()
     }
 
     private func refreshPopoverContent() {
@@ -197,6 +203,55 @@ private final class CCSpaceQuickHelpTrackingView: NSView {
         view.frame = NSRect(origin: .zero, size: size)
         popover.contentSize = size
         popover.contentViewController = controller
+    }
+
+    private func configurePopoverWindow() {
+        popover.contentViewController?.view.window?.ignoresMouseEvents = true
+    }
+
+    private func installPopoverEventMonitor() {
+        guard popoverEventMonitor == nil else { return }
+
+        popoverEventMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [
+                .mouseMoved,
+                .leftMouseDragged,
+                .rightMouseDragged,
+                .otherMouseDragged,
+                .leftMouseDown,
+                .rightMouseDown,
+                .otherMouseDown,
+                .scrollWheel,
+            ]
+        ) { [weak self] event in
+            self?.handleTrackedPointerEvent()
+            return event
+        }
+    }
+
+    private func removePopoverEventMonitor() {
+        if let popoverEventMonitor {
+            NSEvent.removeMonitor(popoverEventMonitor)
+            self.popoverEventMonitor = nil
+        }
+    }
+
+    private func handleTrackedPointerEvent() {
+        guard popover.isShown else {
+            removePopoverEventMonitor()
+            return
+        }
+
+        guard isPointerInsideTrackedBounds() else {
+            closePopover()
+            return
+        }
+    }
+
+    private func isPointerInsideTrackedBounds() -> Bool {
+        guard let window else { return false }
+        let pointerLocation = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        return CCSpaceQuickHelpPointerBounds(bounds: bounds).contains(pointerLocation)
     }
 }
 
@@ -244,6 +299,16 @@ struct CCSpaceQuickHelpLayoutMetrics {
             .paragraphStyle: paragraphStyle
         ]
     }()
+}
+
+struct CCSpaceQuickHelpPointerBounds {
+    static let exitTolerance: CGFloat = 4
+
+    let bounds: CGRect
+
+    func contains(_ point: CGPoint) -> Bool {
+        bounds.insetBy(dx: -Self.exitTolerance, dy: -Self.exitTolerance).contains(point)
+    }
 }
 
 private struct CCSpaceQuickHelpBubble: View {

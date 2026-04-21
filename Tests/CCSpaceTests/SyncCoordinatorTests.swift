@@ -44,6 +44,20 @@ actor CloneConcurrencyRecorder {
     }
 }
 
+actor PullConcurrencyRecorder {
+    private(set) var activeCount = 0
+    private(set) var maxActiveCount = 0
+
+    func begin() {
+        activeCount += 1
+        maxActiveCount = max(maxActiveCount, activeCount)
+    }
+
+    func end() {
+        activeCount -= 1
+    }
+}
+
 struct CloneConcurrencyGitServiceSpy: GitServicing {
     let recorder = CloneConcurrencyRecorder()
 
@@ -59,6 +73,42 @@ struct CloneConcurrencyGitServiceSpy: GitServicing {
     func defaultBranch(for remoteURL: String) async -> String? { "main" }
     func defaultBranch(in directory: String) async -> String? { "main" }
     func currentBranch(in directory: String) async -> String? { "main" }
+    func branchStatus(in directory: String) async -> GitBranchStatusSnapshot? { nil }
+    func branches(in directory: String) async -> [String] { [] }
+    func remoteURL(in directory: String) async -> String? { nil }
+    func checkoutBranch(_ branch: String, in directory: String) async throws {}
+    func createLocalBranch(_ branch: String, in directory: String) async throws {}
+    func remoteBranchExists(branch: String, remoteURL: String) async -> Bool { false }
+    func checkRemoteBranches(branch: String, repositories: [RepositoryConfig]) async -> [RepositoryConfig] { [] }
+    func mergeDefaultBranchIntoCurrent(in directory: String) async throws -> GitMergeDefaultBranchOutcome { .merged }
+}
+
+struct PullConcurrencyGitServiceSpy: GitServicing {
+    let recorder = PullConcurrencyRecorder()
+
+    private func simulateGitWork() async {
+        await recorder.begin()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        await recorder.end()
+    }
+
+    func clone(repositoryURL: String, into directory: String) async throws {}
+
+    func pull(in directory: String) async throws {
+        await simulateGitWork()
+    }
+
+    func push(in directory: String) async throws {}
+    func isGitAvailable() async -> Bool { true }
+    func defaultBranch(for remoteURL: String) async -> String? { "main" }
+    func defaultBranch(in directory: String) async -> String? {
+        await simulateGitWork()
+        return "main"
+    }
+    func currentBranch(in directory: String) async -> String? {
+        await simulateGitWork()
+        return "main"
+    }
     func branchStatus(in directory: String) async -> GitBranchStatusSnapshot? { nil }
     func branches(in directory: String) async -> [String] { [] }
     func remoteURL(in directory: String) async -> String? { nil }
@@ -296,6 +346,64 @@ final class SyncCoordinatorTests: XCTestCase {
 
         let maxActiveCount = await gitService.recorder.maxActiveCount
         XCTAssertLessThanOrEqual(maxActiveCount, SyncCoordinator.maxConcurrentCloneTasks)
+    }
+
+    func test_pullRepositoriesLimitsConcurrentGitOperations() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fileStore = JSONFileStore(rootDirectory: root)
+        let store = WorkplaceStore(fileStore: fileStore)
+
+        let repositories = (0..<(SyncCoordinator.maxConcurrentPullTasks + 3)).map { index in
+            RepositoryConfig(
+                id: UUID(),
+                gitURL: "git@github.com:org/repo-\(index).git",
+                repoName: "repo-\(index)",
+                createdAt: .now,
+                updatedAt: .now
+            )
+        }
+        let workplace = try store.createWorkplace(
+            name: "pull-concurrency",
+            rootPath: workspaceRoot.path,
+            selectedRepositories: repositories
+        )
+
+        for repository in repositories {
+            let localPath = URL(fileURLWithPath: workplace.path).appendingPathComponent(repository.repoName).path
+            try FileManager.default.createDirectory(
+                atPath: localPath,
+                withIntermediateDirectories: true,
+                attributes: nil
+            )
+
+            var state = try XCTUnwrap(
+                store.syncStates.first {
+                    $0.workplaceID == workplace.id && $0.repositoryID == repository.id
+                }
+            )
+            state.status = .success
+            state.localPath = localPath
+            try store.updateSyncState(state)
+        }
+
+        let gitService = PullConcurrencyGitServiceSpy()
+        let coordinator = SyncCoordinator(
+            gitService: gitService,
+            fileSystemService: FileSystemServiceSpy()
+        )
+
+        let result = await coordinator.pullRepositories(
+            syncStates: store.syncStates.filter { $0.workplaceID == workplace.id },
+            workplaceStore: store
+        )
+
+        XCTAssertEqual(
+            result,
+            RepositoryPullResult(successCount: repositories.count, failedCount: 0, skippedCount: 0)
+        )
+        let maxActiveCount = await gitService.recorder.maxActiveCount
+        XCTAssertLessThanOrEqual(maxActiveCount, SyncCoordinator.maxConcurrentPullTasks)
     }
 
     func test_pullUpdatesStatusToSuccessAndSetsLastSyncedAt() async throws {

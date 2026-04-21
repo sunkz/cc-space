@@ -268,6 +268,28 @@ struct WorkplaceRepositoryDeleteConfirmationState: Equatable {
     }
 }
 
+struct WorkplaceRepositoryBranchPillState: Equatable {
+    let title: String
+    let quickHelp: String
+    let isDefault: Bool
+
+    init?(
+        currentBranch: String?,
+        defaultBranch: String?,
+        hasAvailableBranches: Bool
+    ) {
+        let normalizedCurrentBranch = currentBranch?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard normalizedCurrentBranch.isEmpty == false else { return nil }
+
+        let normalizedDefaultBranch = defaultBranch?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        isDefault = normalizedCurrentBranch == normalizedDefaultBranch
+        title = normalizedCurrentBranch
+        quickHelp = hasAvailableBranches ? "当前分支" : "当前分支，暂无可切换的本地分支"
+    }
+}
+
 struct WorkplaceRepositoryRowPresentationState {
     let canRetryClone: Bool
     let canPullLatest: Bool

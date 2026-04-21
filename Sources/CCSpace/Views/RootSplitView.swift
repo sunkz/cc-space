@@ -11,6 +11,9 @@ struct RootSplitView: View {
     @State private var editingWorkplace: Workplace?
     @State private var showingCreateSheet = false
     @State private var refreshTask: Task<Void, Never>?
+    @State private var createWorkplaceSeed = WorkplaceCreateSeed.empty
+    @State private var hasAppliedLaunchConfiguration = false
+    private let launchConfiguration: CCSpaceLaunchConfiguration
     private let syncCoordinator: SyncCoordinator
     private let gitService: GitService
 
@@ -60,14 +63,21 @@ struct RootSplitView: View {
         )
     }
 
-    init() {
-        guard let appSupportBase = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first else {
-            fatalError("Application Support directory unavailable")
+    init(launchConfiguration: CCSpaceLaunchConfiguration = CCSpaceLaunchConfiguration()) {
+        self.launchConfiguration = launchConfiguration
+
+        let appSupport: URL
+        if let overrideDirectory = launchConfiguration.appSupportDirectory {
+            appSupport = overrideDirectory
+        } else {
+            guard let appSupportBase = FileManager.default
+                .urls(for: .applicationSupportDirectory, in: .userDomainMask)
+                .first else {
+                fatalError("Application Support directory unavailable")
+            }
+            appSupport = appSupportBase
+                .appendingPathComponent("CCSpace", isDirectory: true)
         }
-        let appSupport = appSupportBase
-            .appendingPathComponent("CCSpace", isDirectory: true)
         let fileStore = JSONFileStore(rootDirectory: appSupport)
         _settingsStore = StateObject(wrappedValue: SettingsStore(fileStore: fileStore))
         _repositoryStore = StateObject(wrappedValue: RepositoryStore(fileStore: fileStore))
@@ -92,7 +102,8 @@ struct RootSplitView: View {
                 SettingsView(
                     settingsStore: settingsStore,
                     repositoryStore: repositoryStore,
-                    workplaceStore: workplaceStore
+                    workplaceStore: workplaceStore,
+                    gitService: gitService
                 )
             case .workplaces:
                 if let workplace = selectedWorkplace {
@@ -112,6 +123,7 @@ struct RootSplitView: View {
             Task { await updateChecker.check() }
         }
         .onAppear {
+            applyLaunchConfigurationIfNeeded()
             scheduleDiskRefresh()
         }
         .onReceive(Timer.publish(every: 120, on: .main, in: .common).autoconnect()) { _ in
@@ -151,6 +163,7 @@ struct RootSplitView: View {
                 repositoryStore: repositoryStore,
                 workplaceCreateService: workplaceCreateService,
                 appViewModel: appViewModel,
+                initialSeed: createWorkplaceSeed,
                 onDismiss: { showingCreateSheet = false }
             )
         }
@@ -195,18 +208,6 @@ struct RootSplitView: View {
                     }
                 ) {
                     try await workplaceRuntimeService.retryClone(repository: repository, in: workplace)
-                }
-            },
-            onSync: {
-                var result: RepositoryPullResult?
-                detailActionCoordinator.run(
-                    actionName: "同步工作区",
-                    successFeedback: {
-                        guard let result else { return nil }
-                        return WorkplaceDetailFeedbackFactory.syncAll(result: result)
-                    }
-                ) {
-                    result = await workplaceRuntimeService.pullRepositories(in: workplace)
                 }
             },
             onPush: {
@@ -339,7 +340,7 @@ struct RootSplitView: View {
                     )
                 }
             },
-            onCreateMergeRequest: { state, repository in
+            onCreateMergeRequest: { state, repository, targetBranch in
                 detailActionCoordinator.run(
                     actionName: "创建 MR",
                     successFeedback: {
@@ -352,7 +353,8 @@ struct RootSplitView: View {
                     let mergeRequestURL = try await MergeRequestService.createURL(
                         repository: repository,
                         syncState: state,
-                        gitService: gitService
+                        gitService: gitService,
+                        targetBranch: targetBranch
                     )
                     try WorkplaceSystemActions.openInBrowser(mergeRequestURL)
                 }
@@ -495,6 +497,44 @@ struct RootSplitView: View {
     ) -> RepositorySyncState? {
         workplaceStore.syncStates.first {
             $0.workplaceID == workplaceID && $0.repositoryID == repositoryID
+        }
+    }
+
+    @MainActor
+    private func applyLaunchConfigurationIfNeeded() {
+        guard hasAppliedLaunchConfiguration == false else { return }
+        hasAppliedLaunchConfiguration = true
+
+        guard let screenshotScene = launchConfiguration.screenshotScene else {
+            return
+        }
+
+        createWorkplaceSeed = launchConfiguration.createWorkplaceSeed(
+            repositories: repositoryStore.repositories
+        )
+
+        switch screenshotScene {
+        case .settingsOverview:
+            appViewModel.showRoute(.settings)
+            showingCreateSheet = false
+        case .workplaceDetail:
+            if let workplace = launchConfiguration.targetWorkplace(
+                in: workplaceStore.workplaces
+            ) {
+                appViewModel.showWorkplace(workplace.id)
+            } else {
+                appViewModel.showRoute(.workplaces)
+            }
+            showingCreateSheet = false
+        case .createWorkplace:
+            if let workplace = launchConfiguration.targetWorkplace(
+                in: workplaceStore.workplaces
+            ) {
+                appViewModel.showWorkplace(workplace.id)
+            } else {
+                appViewModel.showRoute(.workplaces)
+            }
+            showingCreateSheet = true
         }
     }
 

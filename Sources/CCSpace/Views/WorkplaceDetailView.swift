@@ -13,7 +13,6 @@ struct WorkplaceDetailView: View {
     let onEdit: () -> Void
     let onDelete: () -> Void
     let onRetry: (RepositoryConfig) -> Void
-    let onSync: () -> Void
     let onPush: () -> Void
     let onPull: (RepositoryConfig) -> Void
     let onPushRepository: (RepositorySyncState, String) -> Void
@@ -21,7 +20,7 @@ struct WorkplaceDetailView: View {
     let onSwitchRepositoryToDefaultBranch: (RepositorySyncState, String) -> Void
     let onSwitchRepositoryToWorkBranch: (RepositorySyncState, String) -> Void
     let onMergeRepositoryDefaultBranchIntoCurrent: (RepositorySyncState, String) -> Void
-    let onCreateMergeRequest: (RepositorySyncState, RepositoryConfig) -> Void
+    let onCreateMergeRequest: (RepositorySyncState, RepositoryConfig, String?) -> Void
     let onDeleteRepository: (RepositorySyncState, String) -> Void
     let onMergeDefaultBranchIntoCurrent: () -> Void
     let onSwitchAllRepositoriesToDefaultBranch: () -> Void
@@ -111,7 +110,6 @@ struct WorkplaceDetailView: View {
         onEdit: @escaping () -> Void = {},
         onDelete: @escaping () -> Void = {},
         onRetry: @escaping (RepositoryConfig) -> Void = { _ in },
-        onSync: @escaping () -> Void = {},
         onPush: @escaping () -> Void = {},
         onPull: @escaping (RepositoryConfig) -> Void = { _ in },
         onPushRepository: @escaping (RepositorySyncState, String) -> Void = { _, _ in },
@@ -119,7 +117,7 @@ struct WorkplaceDetailView: View {
         onSwitchRepositoryToDefaultBranch: @escaping (RepositorySyncState, String) -> Void = { _, _ in },
         onSwitchRepositoryToWorkBranch: @escaping (RepositorySyncState, String) -> Void = { _, _ in },
         onMergeRepositoryDefaultBranchIntoCurrent: @escaping (RepositorySyncState, String) -> Void = { _, _ in },
-        onCreateMergeRequest: @escaping (RepositorySyncState, RepositoryConfig) -> Void = { _, _ in },
+        onCreateMergeRequest: @escaping (RepositorySyncState, RepositoryConfig, String?) -> Void = { _, _, _ in },
         onDeleteRepository: @escaping (RepositorySyncState, String) -> Void = { _, _ in },
         onMergeDefaultBranchIntoCurrent: @escaping () -> Void = {},
         onSwitchAllRepositoriesToDefaultBranch: @escaping () -> Void = {},
@@ -135,7 +133,6 @@ struct WorkplaceDetailView: View {
         self.onEdit = onEdit
         self.onDelete = onDelete
         self.onRetry = onRetry
-        self.onSync = onSync
         self.onPush = onPush
         self.onPull = onPull
         self.onPushRepository = onPushRepository
@@ -167,9 +164,7 @@ struct WorkplaceDetailView: View {
         .toolbar {
             operationProgressToolbarItem
             editToolbarItem
-            syncToolbarItem
             pushToolbarItem
-            mergeDefaultBranchToolbarItem
             switchAllToDefaultBranchToolbarItem
             switchAllToWorkBranchToolbarItem
             directoryToolbarItems
@@ -229,20 +224,6 @@ struct WorkplaceDetailView: View {
         }
     }
 
-    private var syncToolbarItem: some ToolbarContent {
-        ToolbarItem(placement: .primaryAction) {
-            Button {
-                onSync()
-            } label: {
-                Image(systemName: "arrow.trianglehead.2.clockwise")
-            }
-            .accessibilityLabel("同步仓库")
-            .ccspaceToolbarActionButton(prominent: true)
-            .disabled(!presentationState.canSyncAllRepositories)
-            .ccspaceQuickHelp(presentationState.syncHelp)
-        }
-    }
-
     private var pushToolbarItem: some ToolbarContent {
         ToolbarItem(placement: .primaryAction) {
             Button {
@@ -254,19 +235,6 @@ struct WorkplaceDetailView: View {
             .ccspaceToolbarActionButton(prominent: true)
             .disabled(!presentationState.canPushAllRepositories)
             .ccspaceQuickHelp(presentationState.pushHelp)
-        }
-    }
-
-    private var mergeDefaultBranchToolbarItem: some ToolbarContent {
-        ToolbarItem(placement: .primaryAction) {
-            Button {
-                onMergeDefaultBranchIntoCurrent()
-            } label: {
-                Label("合并默认", systemImage: "arrow.triangle.merge")
-            }
-            .ccspaceToolbarActionButton(prominent: true)
-            .disabled(!presentationState.canMergeDefaultBranchIntoCurrent)
-            .ccspaceQuickHelp(presentationState.mergeDefaultBranchHelp)
         }
     }
 
@@ -437,8 +405,8 @@ struct WorkplaceDetailView: View {
                             onMergeDefaultBranchIntoCurrent: {
                                 onMergeRepositoryDefaultBranchIntoCurrent(state, repositoryName)
                             },
-                            onCreateMergeRequest: { repository in
-                                onCreateMergeRequest(state, repository)
+                            onCreateMergeRequest: { repository, targetBranch in
+                                onCreateMergeRequest(state, repository, targetBranch)
                             },
                             actionsDisabled: presentationState.isActionLocked,
                             supportsIDEA: presentationState.supportsIDEA,

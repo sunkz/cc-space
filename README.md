@@ -115,6 +115,24 @@ macOS 多仓库工作区管理工具。配置常用 Git 仓库，按需组合创
 ./run.sh clean
 ```
 
+### README 截图
+
+以下命令会基于 `script/readme-screenshot-fixture/` 中的演示数据，在 `/tmp/CCSpaceDemo` 下重建截图所需的本地 Git 场景，并且只更新 `README.md` 当前实际引用的那 3 张图：
+
+```bash
+# 直接更新 README 当前引用的正式截图
+./run.sh readme-screenshots
+
+# 或直接调用脚本
+./script/generate_readme_screenshots.sh
+```
+
+如果只想先验收产物、不覆盖仓库里的正式图片，可以改写到临时目录：
+
+```bash
+./script/generate_readme_screenshots.sh --output-root "$(mktemp -d)"
+```
+
 ## 发布
 
 创建并推送 release tag：

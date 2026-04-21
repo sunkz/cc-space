@@ -42,14 +42,17 @@ struct RepositoryEditPresentationState {
     init(
         repository: RepositoryConfig,
         editingRepositoryID: UUID?,
-        editingGitURL: String
+        editingGitURL: String,
+        editingMRBranches: [String] = []
     ) {
         let trimmedGitURL = editingGitURL.trimmingCharacters(in: .whitespacesAndNewlines)
         isEditing = editingRepositoryID == repository.id
+        let gitURLChanged = trimmedGitURL != repository.gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let mrBranchesChanged = editingMRBranches != repository.mrTargetBranches
         canSubmit =
             isEditing &&
             !trimmedGitURL.isEmpty &&
-            trimmedGitURL != repository.gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            (gitURLChanged || mrBranchesChanged)
     }
 }
 
@@ -100,6 +103,16 @@ struct RepositoryDeletePresentationState: Equatable {
     }
 }
 
+struct MRTargetBranchAddPresentationState {
+    let canSubmit: Bool
+    let trimmedBranchName: String
+
+    init(inputText: String, existingBranches: [String]) {
+        trimmedBranchName = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        canSubmit = !trimmedBranchName.isEmpty && !existingBranches.contains(trimmedBranchName)
+    }
+}
+
 enum RepositoryConfigFeedbackFactory {
     static func addSuccess(repositoryName: String) -> CCSpaceFeedback {
         CCSpaceFeedbackFactory.actionSuccess("已新增 \(repositoryName)")
@@ -121,21 +134,23 @@ enum RepositoryConfigFeedbackFactory {
     }
 
     static func importResult(_ result: RepositoryImportResult) -> CCSpaceFeedback {
-        if result.importedCount > 0 && result.skippedCount > 0 {
-            return CCSpaceFeedback(
-                style: .info,
-                message: "已导入 \(result.importedCount) 个仓库，跳过 \(result.skippedCount) 个重复项"
-            )
-        }
+        var parts: [String] = []
         if result.importedCount > 0 {
-            return CCSpaceFeedbackFactory.actionSuccess("已导入 \(result.importedCount) 个仓库")
+            parts.append("导入 \(result.importedCount) 个仓库")
+        }
+        if result.mergedCount > 0 {
+            parts.append("合并 \(result.mergedCount) 个仓库的 MR 目标分支")
         }
         if result.skippedCount > 0 {
-            return CCSpaceFeedback(
-                style: .info,
-                message: "备份中的仓库已全部存在，未导入新仓库"
-            )
+            parts.append("跳过 \(result.skippedCount) 个重复项")
         }
-        return CCSpaceFeedback(style: .info, message: "未导入任何仓库")
+
+        if parts.isEmpty {
+            return CCSpaceFeedback(style: .info, message: "未导入任何仓库")
+        }
+
+        let message = "已" + parts.joined(separator: "，")
+        let style: CCSpaceFeedbackStyle = (result.importedCount > 0 || result.mergedCount > 0) ? .success : .info
+        return CCSpaceFeedback(style: style, message: message)
     }
 }

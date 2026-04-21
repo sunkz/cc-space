@@ -285,6 +285,69 @@ final class WorkplaceEditServiceTests: XCTestCase {
         XCTAssertTrue(checkoutDirectories.isEmpty)
     }
 
+    func test_saveWorkplaceEditSwitchesFailedLocalRepositoryWhenBranchChanges() async throws {
+        let stores = try makeServiceStores()
+        let repositoryStore = stores.repositoryStore
+        let workplaceStore = stores.workplaceStore
+        let workspaceRoot = stores.workspaceRoot
+
+        try repositoryStore.addRepository(gitURL: "git@github.com:org/api.git")
+        let apiRepository = try XCTUnwrap(repositoryStore.repositories.first { $0.repoName == "api" })
+        let workplace = try workplaceStore.createWorkplace(
+            name: "ios-dev",
+            rootPath: workspaceRoot.path,
+            selectedRepositories: [apiRepository]
+        )
+
+        let apiPath = URL(fileURLWithPath: workplace.path).appendingPathComponent("api").path
+        try FileManager.default.createDirectory(
+            atPath: apiPath,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+
+        var existingState = try XCTUnwrap(
+            workplaceStore.syncStates.first {
+                $0.workplaceID == workplace.id && $0.repositoryID == apiRepository.id
+            }
+        )
+        existingState.status = .failed
+        existingState.localPath = apiPath
+        existingState.lastError = "stale error"
+        try workplaceStore.updateSyncState(existingState)
+
+        let gitService = WorkplaceEditGitServiceSpy()
+        await gitService.setCurrentBranch("main", for: apiPath)
+
+        let service = WorkplaceEditService(
+            workplaceStore: workplaceStore,
+            repositoryStore: repositoryStore,
+            syncCoordinator: SyncCoordinator(gitService: gitService),
+            gitService: gitService
+        )
+
+        try await service.saveWorkplaceEdit(
+            workplaceID: workplace.id,
+            name: "ios-dev",
+            selectedRepositoryIDs: [apiRepository.id],
+            branch: "release"
+        )
+
+        let updatedWorkplace = try XCTUnwrap(workplaceStore.workplaces.first { $0.id == workplace.id })
+        XCTAssertEqual(updatedWorkplace.branch, "release")
+
+        let updatedState = try XCTUnwrap(
+            workplaceStore.syncStates.first {
+                $0.workplaceID == workplace.id && $0.repositoryID == apiRepository.id
+            }
+        )
+        XCTAssertEqual(updatedState.status, .success)
+        XCTAssertNil(updatedState.lastError)
+
+        let checkoutDirectories = await gitService.checkoutDirectories()
+        XCTAssertEqual(checkoutDirectories, [apiPath])
+    }
+
     func test_saveWorkplaceEditPersistsDirtyRepositoryBranchSwitchFailure() async throws {
         let stores = try makeServiceStores()
         let repositoryStore = stores.repositoryStore

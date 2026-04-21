@@ -4,7 +4,8 @@ enum MergeRequestService {
     static func createURL(
         repository: RepositoryConfig,
         syncState: RepositorySyncState,
-        gitService: GitServicing
+        gitService: GitServicing,
+        targetBranch: String? = nil
     ) async throws -> URL {
         let remoteURL = await resolvedRemoteURL(
             repository: repository,
@@ -19,18 +20,24 @@ enum MergeRequestService {
             throw MergeRequestServiceError.missingCurrentBranch
         }
 
-        guard let targetBranch = await trimmedDefaultBranch(
-            remoteURL: remoteURL,
-            syncState: syncState,
-            gitService: gitService
-        ) else {
-            throw MergeRequestServiceError.missingDefaultBranch
+        let resolvedTargetBranch: String
+        if let targetBranch {
+            resolvedTargetBranch = targetBranch
+        } else {
+            guard let defaultBranch = await trimmedDefaultBranch(
+                remoteURL: remoteURL,
+                syncState: syncState,
+                gitService: gitService
+            ) else {
+                throw MergeRequestServiceError.missingDefaultBranch
+            }
+            resolvedTargetBranch = defaultBranch
         }
 
         return try GitURLParser.mergeRequestURL(
             from: remoteURL,
             sourceBranch: sourceBranch,
-            targetBranch: targetBranch
+            targetBranch: resolvedTargetBranch
         )
     }
 }

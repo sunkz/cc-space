@@ -174,6 +174,43 @@ final class WorkplaceRepositoryRowPresentationStateTests: XCTestCase {
         XCTAssertTrue(presentationState.canOpenInIDEA)
     }
 
+    func test_branchPillShowsCurrentBranchNameAndGenericTooltip() {
+        let pillState = WorkplaceRepositoryBranchPillState(
+            currentBranch: " feature/login ",
+            defaultBranch: "main",
+            hasAvailableBranches: true
+        )
+
+        XCTAssertEqual(pillState?.title, "feature/login")
+        XCTAssertEqual(pillState?.quickHelp, "当前分支")
+        XCTAssertEqual(pillState?.isDefault, false)
+    }
+
+    func test_branchPillMarksDefaultBranchAndEmptyBranchMenu() {
+        let pillState = WorkplaceRepositoryBranchPillState(
+            currentBranch: "main",
+            defaultBranch: " main ",
+            hasAvailableBranches: false
+        )
+
+        XCTAssertEqual(
+            pillState?.quickHelp,
+            "当前分支，暂无可切换的本地分支"
+        )
+        XCTAssertEqual(pillState?.title, "main")
+        XCTAssertEqual(pillState?.isDefault, true)
+    }
+
+    func test_blankCurrentBranchDoesNotShowBranchPill() {
+        XCTAssertNil(
+            WorkplaceRepositoryBranchPillState(
+                currentBranch: "   ",
+                defaultBranch: "main",
+                hasAvailableBranches: true
+            )
+        )
+    }
+
     private func makeLocalDirectory(named name: String) throws -> String {
         let path = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)

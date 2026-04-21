@@ -102,6 +102,42 @@ final class MergeRequestServiceTests: XCTestCase {
         )
     }
 
+    func test_createURLUsesSpecifiedTargetBranchWhenProvided() async throws {
+        let repository = RepositoryConfig(
+            id: UUID(),
+            gitURL: "git@code.example.com:team/app.git",
+            repoName: "app",
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        let syncState = RepositorySyncState(
+            workplaceID: UUID(),
+            repositoryID: repository.id,
+            status: .success,
+            localPath: "/tmp/app",
+            lastError: nil,
+            lastSyncedAt: nil
+        )
+        let gitService = MergeRequestGitServiceStub(
+            defaultBranchInResult: "main",
+            defaultBranchForResult: nil,
+            currentBranchResult: "feature/demo",
+            remoteURLResult: "git@code.example.com:team/app.git"
+        )
+
+        let url = try await MergeRequestService.createURL(
+            repository: repository,
+            syncState: syncState,
+            gitService: gitService,
+            targetBranch: "develop"
+        )
+
+        XCTAssertEqual(
+            url.absoluteString,
+            "https://code.example.com/team/app/merge_requests/new?merge_request%5Bsource_branch%5D=feature/demo&merge_request%5Btarget_branch%5D=develop"
+        )
+    }
+
     func test_createURLThrowsWhenCurrentBranchMissing() async {
         let repository = RepositoryConfig(
             id: UUID(),

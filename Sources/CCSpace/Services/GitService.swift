@@ -133,7 +133,7 @@ struct GitService: GitServicing {
     private static let maxConcurrentRemoteBranchChecks = 4
 
     func clone(repositoryURL: String, into directory: String) async throws {
-        try await runGit(arguments: ["clone", repositoryURL, directory])
+        try await runGit(arguments: ["clone", repositoryURL, directory], timeout: 300)
     }
 
     func pull(in directory: String) async throws {
@@ -389,8 +389,8 @@ struct GitService: GitServicing {
             message.contains("invalid reference")
     }
 
-    private func runGitOutput(arguments: [String]) async throws -> String {
-        let result = try await runProcess(arguments: arguments, captureStdout: true, captureStderr: true)
+    private func runGitOutput(arguments: [String], timeout: TimeInterval = 60) async throws -> String {
+        let result = try await runProcess(arguments: arguments, captureStdout: true, captureStderr: true, timeout: timeout)
         guard result.terminationStatus == 0 else {
             let stderrMessage = String(data: result.stderrData, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -404,8 +404,8 @@ struct GitService: GitServicing {
         return String(data: result.stdoutData, encoding: .utf8) ?? ""
     }
 
-    private func runGit(arguments: [String]) async throws {
-        let result = try await runProcess(arguments: arguments, captureStdout: false, captureStderr: true)
+    private func runGit(arguments: [String], timeout: TimeInterval = 60) async throws {
+        let result = try await runProcess(arguments: arguments, captureStdout: false, captureStderr: true, timeout: timeout)
         guard result.terminationStatus == 0 else {
             let stderrMessage = String(data: result.stderrData, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -421,16 +421,23 @@ struct GitService: GitServicing {
     private func runProcess(
         arguments: [String],
         captureStdout: Bool,
-        captureStderr: Bool
+        captureStderr: Bool,
+        timeout: TimeInterval = 60
     ) async throws -> GitProcessResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = ["git"] + arguments
 
+        var environment = ProcessInfo.processInfo.environment
+        environment["GIT_TERMINAL_PROMPT"] = "0"
+        environment["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes"
+        process.environment = environment
+
         let stdoutPipe = captureStdout ? Pipe() : nil
         let stderrPipe = captureStderr ? Pipe() : nil
         process.standardOutput = stdoutPipe ?? FileHandle.nullDevice
         process.standardError = stderrPipe ?? FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
 
         let processBox = SendableProcessBox(process)
 
@@ -456,7 +463,13 @@ struct GitService: GitServicing {
                     }
                 }
 
+                nonisolated(unsafe) let timeoutWork = DispatchWorkItem { [processBox] in
+                    guard processBox.process.isRunning else { return }
+                    processBox.process.terminate()
+                }
+
                 process.terminationHandler = { completedProcess in
+                    timeoutWork.cancel()
                     readGroup.notify(queue: .global()) {
                         continuation.resume(
                             returning: GitProcessResult(
@@ -472,11 +485,14 @@ struct GitService: GitServicing {
                     try process.run()
                 } catch {
                     process.terminationHandler = nil
+                    timeoutWork.cancel()
                     stdoutPipe?.fileHandleForReading.closeFile()
                     stderrPipe?.fileHandleForReading.closeFile()
                     continuation.resume(throwing: error)
                     return
                 }
+
+                DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timeoutWork)
             }
         } onCancel: {
             if processBox.process.isRunning {

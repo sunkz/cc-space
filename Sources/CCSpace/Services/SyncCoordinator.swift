@@ -26,6 +26,7 @@ private enum PullPreparationDecision {
 
 struct SyncCoordinator: Sendable {
     static let maxConcurrentCloneTasks = 4
+    static let maxConcurrentPullTasks = 4
 
     let gitService: GitServicing
     let fileSystemService: FileSystemServicing
@@ -143,34 +144,33 @@ struct SyncCoordinator: Sendable {
         var successCount = 0
         var failedCount = preparation.failed.count
         var resultStates = preparation.failed
-        await withTaskGroup(of: RepositorySyncState.self) { group in
-            for state in preparation.pullable {
-                let localPath = state.localPath
-                group.addTask {
-                    do {
-                        try await gitService.pull(in: localPath)
-                        var successState = state
-                        successState.status = .success
-                        successState.lastSyncedAt = .now
-                        successState.lastError = nil
-                        return successState
-                    } catch {
-                        var failedState = state
-                        failedState.status = .failed
-                        failedState.lastError = error.localizedDescription
-                        return failedState
-                    }
-                }
+        let pulledStates = await Self.runLimitedTasks(
+            preparation.pullable,
+            maxConcurrentTasks: Self.maxConcurrentPullTasks
+        ) { state in
+            let localPath = state.localPath
+            do {
+                try await gitService.pull(in: localPath)
+                var successState = state
+                successState.status = .success
+                successState.lastSyncedAt = .now
+                successState.lastError = nil
+                return successState
+            } catch {
+                var failedState = state
+                failedState.status = .failed
+                failedState.lastError = error.localizedDescription
+                return failedState
             }
+        }
 
-            for await resultState in group {
-                if resultState.status == .success {
-                    successCount += 1
-                } else if resultState.status == .failed {
-                    failedCount += 1
-                }
-                resultStates.append(resultState)
+        for resultState in pulledStates {
+            if resultState.status == .success {
+                successCount += 1
+            } else if resultState.status == .failed {
+                failedCount += 1
             }
+            resultStates.append(resultState)
         }
         try? workplaceStore.updateSyncStates(resultStates)
 
@@ -193,69 +193,102 @@ struct SyncCoordinator: Sendable {
             state.status != .removing
         }
 
-        return await withTaskGroup(
-            of: PullPreparationDecision.self,
-            returning: PullPreparationResult.self
-        ) { group in
-            for state in candidates {
-                group.addTask {
-                    guard let currentBranch = await gitService.currentBranch(in: state.localPath) else {
-                        return .failed(
-                            failedPullInspectionState(
-                                state,
-                                message: "无法识别当前分支"
-                            )
-                        )
-                    }
-                    guard let defaultBranch = await gitService.defaultBranch(in: state.localPath) else {
-                        return .failed(
-                            failedPullInspectionState(
-                                state,
-                                message: "无法识别仓库默认分支"
-                            )
-                        )
-                    }
-
-                    if currentBranch == defaultBranch {
-                        var pullableState = state
-                        if pullableState.status == .failed {
-                            pullableState.status = .success
-                        }
-                        return .pullable(pullableState)
-                    }
-
-                    return .skipped
-                }
+        let decisions = await runLimitedTasks(
+            candidates,
+            maxConcurrentTasks: Self.maxConcurrentPullTasks
+        ) { state in
+            guard let currentBranch = await gitService.currentBranch(in: state.localPath) else {
+                return PullPreparationDecision.failed(
+                    failedPullInspectionState(
+                        state,
+                        message: "无法识别当前分支"
+                    )
+                )
+            }
+            guard let defaultBranch = await gitService.defaultBranch(in: state.localPath) else {
+                return PullPreparationDecision.failed(
+                    failedPullInspectionState(
+                        state,
+                        message: "无法识别仓库默认分支"
+                    )
+                )
             }
 
-            var pullableStates: [RepositorySyncState] = []
-            var normalizedStates: [RepositorySyncState] = []
-            var failedStates: [RepositorySyncState] = []
-            var skippedCount = 0
-            for await result in group {
-                switch result {
-                case .pullable(let pullable):
-                    pullableStates.append(pullable)
-                case .normalized(let normalized):
-                    normalizedStates.append(normalized)
-                case .failed(let failed):
-                    failedStates.append(failed)
-                case .skipped:
-                    skippedCount += 1
+            if currentBranch == defaultBranch {
+                var pullableState = state
+                if pullableState.status == .failed {
+                    pullableState.status = .success
                 }
+                return PullPreparationDecision.pullable(pullableState)
             }
-            return PullPreparationResult(
-                pullable: pullableStates,
-                normalized: normalizedStates,
-                failed: failedStates,
-                skippedCount: skippedCount
-            )
+
+            return PullPreparationDecision.skipped
         }
+
+        var pullableStates: [RepositorySyncState] = []
+        var normalizedStates: [RepositorySyncState] = []
+        var failedStates: [RepositorySyncState] = []
+        var skippedCount = 0
+
+        for decision in decisions {
+            switch decision {
+            case .pullable(let pullable):
+                pullableStates.append(pullable)
+            case .normalized(let normalized):
+                normalizedStates.append(normalized)
+            case .failed(let failed):
+                failedStates.append(failed)
+            case .skipped:
+                skippedCount += 1
+            }
+        }
+
+        return PullPreparationResult(
+            pullable: pullableStates,
+            normalized: normalizedStates,
+            failed: failedStates,
+            skippedCount: skippedCount
+        )
     }
 
     @MainActor
     func isGitAvailable() async -> Bool {
         await gitService.isGitAvailable()
+    }
+
+    private static func runLimitedTasks<Input: Sendable, Output: Sendable>(
+        _ inputs: [Input],
+        maxConcurrentTasks: Int,
+        operation: @escaping @Sendable (Input) async -> Output
+    ) async -> [Output] {
+        guard inputs.isEmpty == false else { return [] }
+
+        return await withTaskGroup(of: (Int, Output).self, returning: [Output].self) { group in
+            let initialTaskCount = min(maxConcurrentTasks, inputs.count)
+            var nextInputIndex = 0
+            var results = Array<Output?>(repeating: nil, count: inputs.count)
+
+            func addTask(for index: Int) {
+                let input = inputs[index]
+                group.addTask {
+                    (index, await operation(input))
+                }
+            }
+
+            for _ in 0..<initialTaskCount {
+                addTask(for: nextInputIndex)
+                nextInputIndex += 1
+            }
+
+            while let (index, result) = await group.next() {
+                results[index] = result
+                guard nextInputIndex < inputs.count else { continue }
+                addTask(for: nextInputIndex)
+                nextInputIndex += 1
+            }
+
+            return results.compactMap { $0 }
+        }
     }
 }
 

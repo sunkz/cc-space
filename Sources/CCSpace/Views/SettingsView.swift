@@ -5,16 +5,19 @@ struct SettingsView: View {
     @ObservedObject var settingsStore: SettingsStore
     @ObservedObject var repositoryStore: RepositoryStore
     @ObservedObject var workplaceStore: WorkplaceStore
+    let gitService: GitServicing
     @State private var saveFeedback: CCSpaceFeedback?
 
     init(
         settingsStore: SettingsStore,
         repositoryStore: RepositoryStore,
-        workplaceStore: WorkplaceStore
+        workplaceStore: WorkplaceStore,
+        gitService: GitServicing
     ) {
         self.settingsStore = settingsStore
         self.repositoryStore = repositoryStore
         self.workplaceStore = workplaceStore
+        self.gitService = gitService
     }
 
     private var savedPath: String {
@@ -33,7 +36,8 @@ struct SettingsView: View {
                 rootDirectorySection
                 RepositorySettingsSection(
                     repositoryStore: repositoryStore,
-                    workplaceStore: workplaceStore
+                    workplaceStore: workplaceStore,
+                    gitService: gitService
                 )
                     .ccspacePanel(
                         background: .clear,

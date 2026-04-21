@@ -7,10 +7,10 @@ final class RepositoryStoreTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
 
-        try await store.addRepository(gitURL: "git@github.com:org/api.git")
+        try store.addRepository(gitURL: "git@github.com:org/api.git")
 
         do {
-            try await store.addRepository(gitURL: "git@github.com:org/api.git")
+            try store.addRepository(gitURL: "git@github.com:org/api.git")
             XCTFail("Expected duplicate URL error")
         } catch {
             XCTAssertEqual(error.localizedDescription, "仓库地址已存在")
@@ -21,10 +21,10 @@ final class RepositoryStoreTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
 
-        try await store.addRepository(gitURL: "git@github.com:team-a/api.git")
+        try store.addRepository(gitURL: "git@github.com:team-a/api.git")
 
         do {
-            try await store.addRepository(gitURL: "https://github.com/team-b/api.git")
+            try store.addRepository(gitURL: "https://github.com/team-b/api.git")
             XCTFail("Expected duplicate repo name error")
         } catch {
             XCTAssertEqual(error.localizedDescription, "仓库名称已存在")
@@ -47,8 +47,8 @@ final class RepositoryStoreTests: XCTestCase {
         let fileStore = JSONFileStore(rootDirectory: root)
         let store = RepositoryStore(fileStore: fileStore)
 
-        try await store.addRepository(gitURL: "git@github.com:org/api.git")
-        try await store.addRepository(gitURL: "git@github.com:org/web.git")
+        try store.addRepository(gitURL: "git@github.com:org/api.git")
+        try store.addRepository(gitURL: "git@github.com:org/web.git")
         XCTAssertEqual(store.repositories.count, 2)
 
         let idToRemove = store.repositories[0].id
@@ -66,7 +66,7 @@ final class RepositoryStoreTests: XCTestCase {
         let fileStore = JSONFileStore(rootDirectory: root)
         let store = RepositoryStore(fileStore: fileStore)
 
-        try await store.addRepository(gitURL: "git@github.com:org/api.git")
+        try store.addRepository(gitURL: "git@github.com:org/api.git")
         let repoID = store.repositories.first!.id
 
         try store.updateRepository(id: repoID, gitURL: "git@gitlab.example.com:team/api.git")
@@ -83,7 +83,7 @@ final class RepositoryStoreTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
 
-        try await store.addRepository(gitURL: " git@github.com:org/api.git ")
+        try store.addRepository(gitURL: " git@github.com:org/api.git ")
         let repoID = try XCTUnwrap(store.repositories.first?.id)
         XCTAssertEqual(store.repositories.first?.gitURL, "git@github.com:org/api.git")
 
@@ -95,8 +95,8 @@ final class RepositoryStoreTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
 
-        try await store.addRepository(gitURL: "git@github.com:org/api.git")
-        try await store.addRepository(gitURL: "git@github.com:org/web.git")
+        try store.addRepository(gitURL: "git@github.com:org/api.git")
+        try store.addRepository(gitURL: "git@github.com:org/web.git")
         let webID = store.repositories.first { $0.repoName == "web" }!.id
 
         XCTAssertThrowsError(
@@ -110,7 +110,7 @@ final class RepositoryStoreTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
 
-        try await store.addRepository(gitURL: "git@github.com:org/api.git")
+        try store.addRepository(gitURL: "git@github.com:org/api.git")
         let repoID = store.repositories.first { $0.repoName == "api" }!.id
 
         XCTAssertThrowsError(
@@ -144,8 +144,8 @@ final class RepositoryStoreTests: XCTestCase {
         let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
         let backupURL = root.appendingPathComponent("repositories-backup.json")
 
-        try await store.addRepository(gitURL: "git@github.com:org/api.git")
-        try await store.addRepository(gitURL: "git@github.com:org/web.git")
+        try store.addRepository(gitURL: "git@github.com:org/api.git")
+        try store.addRepository(gitURL: "git@github.com:org/web.git")
 
         let document = try store.exportBackup(to: backupURL)
         let data = try Data(contentsOf: backupURL)
@@ -157,8 +157,8 @@ final class RepositoryStoreTests: XCTestCase {
         XCTAssertEqual(decoded.version, RepositoryBackupDocument.currentVersion)
         XCTAssertEqual(document.repositories, decoded.repositories)
         XCTAssertEqual(decoded.repositories, [
-            "git@github.com:org/api.git",
-            "git@github.com:org/web.git",
+            RepositoryBackupEntry(gitURL: "git@github.com:org/api.git"),
+            RepositoryBackupEntry(gitURL: "git@github.com:org/web.git"),
         ])
     }
 
@@ -169,22 +169,25 @@ final class RepositoryStoreTests: XCTestCase {
 
         try store.addRepository(gitURL: "git@github.com:org/api.git")
 
-        let document = RepositoryBackupDocument(
-            repositories: [
+        let v1JSON = """
+        {
+            "version": 1,
+            "exportedAt": "2024-01-01T00:00:00Z",
+            "repositories": [
                 "git@github.com:org/api.git",
                 "git@github.com:org/web.git",
                 "git@github.com:org/ios.git",
-                "git@github.com:team-b/web.git",
+                "git@github.com:team-b/web.git"
             ]
-        )
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        try encoder.encode(document).write(to: backupURL, options: .atomic)
+        }
+        """
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data(v1JSON.utf8).write(to: backupURL, options: .atomic)
 
         let result = try store.importBackup(from: backupURL)
 
-        XCTAssertEqual(result, RepositoryImportResult(importedCount: 2, skippedCount: 2))
+        XCTAssertEqual(result.importedCount, 2)
+        XCTAssertEqual(result.skippedCount, 2)
         XCTAssertEqual(
             Set(store.repositories.map(\.gitURL)),
             Set([
@@ -214,16 +217,127 @@ final class RepositoryStoreTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
         let backupURL = root.appendingPathComponent("repositories-backup.json")
-        let document = RepositoryBackupDocument(repositories: [])
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
+        let v1JSON = """
+        {
+            "version": 1,
+            "exportedAt": "2024-01-01T00:00:00Z",
+            "repositories": []
+        }
+        """
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        try encoder.encode(document).write(to: backupURL, options: .atomic)
+        try Data(v1JSON.utf8).write(to: backupURL, options: .atomic)
 
         XCTAssertThrowsError(
             try store.importBackup(from: backupURL)
         ) { error in
             XCTAssertEqual(error as? RepositoryStoreError, .emptyBackup)
         }
+    }
+
+    func test_exportBackupV2IncludesMRTargetBranches() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
+        let backupURL = root.appendingPathComponent("repositories-backup.json")
+
+        try store.addRepository(gitURL: "git@github.com:org/api.git")
+        try store.updateMRTargetBranches(
+            id: store.repositories.first!.id,
+            branches: ["develop", "release/v1"]
+        )
+
+        let document = try store.exportBackup(to: backupURL)
+
+        XCTAssertEqual(document.version, 2)
+        XCTAssertEqual(document.repositories.count, 1)
+        XCTAssertEqual(document.repositories.first?.gitURL, "git@github.com:org/api.git")
+        XCTAssertEqual(document.repositories.first?.mrTargetBranches, ["develop", "release/v1"])
+    }
+
+    func test_importBackupV1FormatImportsWithEmptyMRTargetBranches() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
+        let backupURL = root.appendingPathComponent("repositories-backup.json")
+
+        let v1JSON = """
+        {
+            "version": 1,
+            "exportedAt": "2024-01-01T00:00:00Z",
+            "repositories": [
+                "git@github.com:org/api.git",
+                "git@github.com:org/web.git"
+            ]
+        }
+        """
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data(v1JSON.utf8).write(to: backupURL, options: .atomic)
+
+        let result = try store.importBackup(from: backupURL)
+
+        XCTAssertEqual(result.importedCount, 2)
+        XCTAssertTrue(store.repositories.allSatisfy { $0.mrTargetBranches.isEmpty })
+    }
+
+    func test_importBackupV2FormatImportsWithMRTargetBranches() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
+        let backupURL = root.appendingPathComponent("repositories-backup.json")
+
+        let v2JSON = """
+        {
+            "version": 2,
+            "exportedAt": "2024-01-01T00:00:00Z",
+            "repositories": [
+                {
+                    "gitURL": "git@github.com:org/api.git",
+                    "mrTargetBranches": ["develop", "staging"]
+                }
+            ]
+        }
+        """
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data(v2JSON.utf8).write(to: backupURL, options: .atomic)
+
+        let result = try store.importBackup(from: backupURL)
+
+        XCTAssertEqual(result.importedCount, 1)
+        XCTAssertEqual(store.repositories.first?.mrTargetBranches, ["develop", "staging"])
+    }
+
+    func test_importBackupMergesMRTargetBranchesForExistingRepositories() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
+        let backupURL = root.appendingPathComponent("repositories-backup.json")
+
+        try store.addRepository(gitURL: "git@github.com:org/api.git")
+        try store.updateMRTargetBranches(
+            id: store.repositories.first!.id,
+            branches: ["develop"]
+        )
+
+        let v2JSON = """
+        {
+            "version": 2,
+            "exportedAt": "2024-01-01T00:00:00Z",
+            "repositories": [
+                {
+                    "gitURL": "git@github.com:org/api.git",
+                    "mrTargetBranches": ["develop", "staging"]
+                },
+                {
+                    "gitURL": "git@github.com:org/web.git",
+                    "mrTargetBranches": ["main"]
+                }
+            ]
+        }
+        """
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data(v2JSON.utf8).write(to: backupURL, options: .atomic)
+
+        let result = try store.importBackup(from: backupURL)
+
+        XCTAssertEqual(result.importedCount, 1)
+        XCTAssertEqual(result.mergedCount, 1)
+        let apiRepo = store.repositories.first { $0.repoName == "api" }
+        XCTAssertEqual(apiRepo?.mrTargetBranches, ["develop", "staging"])
     }
 }

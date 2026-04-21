@@ -94,10 +94,10 @@ struct WorkplaceEditService {
             }
 
             if nextBranch != originalWorkplace.branch, let branchToCheckout = nextBranch, !branchToCheckout.isEmpty {
-                for index in retainedStates.indices where
-                    retainedStates[index].status == .success &&
-                    !addedRepositoryIDs.contains(retainedStates[index].repositoryID)
-                {
+                for index in retainedStates.indices where !addedRepositoryIDs.contains(retainedStates[index].repositoryID) {
+                    guard retainedStates[index].hasLocalDirectory else {
+                        continue
+                    }
                     do {
                         let currentBranch = await gitService.currentBranch(in: retainedStates[index].localPath)
                         if currentBranch == branchToCheckout {

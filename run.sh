@@ -5,14 +5,15 @@ APP_NAME="CCSpace"
 BUILD_DIR=".build"
 
 usage() {
-    echo "Usage: $0 [build|run|test|clean|help]"
+    echo "Usage: $0 [build|run|test|clean|readme-screenshots|help] [args]"
     echo ""
     echo "Commands:"
-    echo "  build  - Build the debug executable with SwiftPM"
-    echo "  run    - Build and launch the app bundle"
-    echo "  test   - Run unit tests"
-    echo "  clean  - Remove SwiftPM build artifacts"
-    echo "  help   - Show this help message"
+    echo "  build             - Build the debug executable with SwiftPM"
+    echo "  run               - Build and launch the app bundle"
+    echo "  test              - Run unit tests"
+    echo "  clean             - Remove SwiftPM build artifacts"
+    echo "  readme-screenshots - Recreate only the README-referenced screenshots"
+    echo "  help              - Show this help message"
     echo ""
     echo "No arguments defaults to 'run'."
 }
@@ -97,13 +98,19 @@ cmd_clean() {
     echo "=> Done."
 }
 
+cmd_readme_screenshots() {
+    "./script/generate_readme_screenshots.sh" "$@"
+}
+
 COMMAND="${1:-run}"
+shift || true
 
 case "${COMMAND}" in
     build) cmd_build ;;
     run) cmd_run ;;
     test) cmd_test ;;
     clean) cmd_clean ;;
+    readme-screenshots) cmd_readme_screenshots "$@" ;;
     help|-h|--help) usage ;;
     *)
         echo "Unknown command: ${COMMAND}"

@@ -7,12 +7,30 @@ struct WorkplaceCreateView: View {
     @ObservedObject var appViewModel: AppViewModel
     let onDismiss: () -> Void
 
-    @State private var name: String = ""
-    @State private var branch: String = ""
-    @State private var selectedIDs = Set<UUID>()
+    @State private var name: String
+    @State private var branch: String
+    @State private var selectedIDs: Set<UUID>
     @State private var feedback: CCSpaceFeedback?
     @State private var isSubmitting = false
     @State private var repositorySearchText = ""
+
+    init(
+        settingsStore: SettingsStore,
+        repositoryStore: RepositoryStore,
+        workplaceCreateService: WorkplaceCreateService,
+        appViewModel: AppViewModel,
+        initialSeed: WorkplaceCreateSeed = .empty,
+        onDismiss: @escaping () -> Void
+    ) {
+        self.settingsStore = settingsStore
+        self.repositoryStore = repositoryStore
+        self.workplaceCreateService = workplaceCreateService
+        self.appViewModel = appViewModel
+        self.onDismiss = onDismiss
+        _name = State(initialValue: initialSeed.name)
+        _branch = State(initialValue: initialSeed.branch)
+        _selectedIDs = State(initialValue: initialSeed.selectedRepositoryIDs)
+    }
 
     private var presentationState: WorkplaceCreatePresentationState {
         WorkplaceCreatePresentationState(

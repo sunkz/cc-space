@@ -18,7 +18,7 @@ struct WorkplaceRepositoryRowView: View {
     let onSwitchToWorkBranch: () -> Void
     let showsWorkBranchAction: Bool
     let onMergeDefaultBranchIntoCurrent: () -> Void
-    let onCreateMergeRequest: (RepositoryConfig) -> Void
+    let onCreateMergeRequest: (RepositoryConfig, String?) -> Void
     let actionsDisabled: Bool
     let supportsIDEA: Bool
     let onOpenFinder: (String) -> Void
@@ -40,6 +40,14 @@ struct WorkplaceRepositoryRowView: View {
 
     private var branchMenuDisabled: Bool {
         !presentationState.canSwitchBranch || availableBranches.isEmpty
+    }
+
+    private var branchPillState: WorkplaceRepositoryBranchPillState? {
+        WorkplaceRepositoryBranchPillState(
+            currentBranch: currentBranch,
+            defaultBranch: repository?.defaultBranch,
+            hasAvailableBranches: availableBranches.isEmpty == false
+        )
     }
 
     private var showsPrimaryActionMenuItems: Bool {
@@ -70,15 +78,22 @@ struct WorkplaceRepositoryRowView: View {
                                 .font(.body.weight(.medium))
                                 .lineLimit(1)
                                 .fixedSize()
-                            if let currentBranch {
-                                Menu {
-                                    branchMenuContent
-                                } label: {
-                                    RepositoryBranchPill(title: currentBranch)
-                                }
-                                .menuStyle(.borderlessButton)
-                                .disabled(branchMenuDisabled)
-                                .ccspaceQuickHelp(availableBranches.isEmpty ? "暂无可切换的本地分支" : "切换分支")
+                            if let branchPillState {
+                                RepositoryBranchPill(
+                                    title: branchPillState.title,
+                                    isDefault: branchPillState.isDefault
+                                )
+                                    .overlay {
+                                        Menu {
+                                            branchMenuContent
+                                        } label: {
+                                            Color.clear.contentShape(Capsule())
+                                        }
+                                        .menuStyle(.borderlessButton)
+                                        .menuIndicator(.hidden)
+                                    }
+                                    .disabled(branchMenuDisabled)
+                                    .ccspaceQuickHelp(branchPillState.quickHelp)
                             }
                         }
                     }
@@ -104,14 +119,32 @@ struct WorkplaceRepositoryRowView: View {
 
                         if presentationState.canOpenLocalActions {
                             if let repository {
-                                Button {
-                                    onCreateMergeRequest(repository)
-                                } label: {
-                                    Image(systemName: "arrow.up.right.square")
+                                if repository.mrTargetBranches.count > 1 {
+                                    Menu {
+                                        mrTargetBranchMenuItems(repository: repository)
+                                    } label: {
+                                        Image(systemName: "arrow.up.right.square")
+                                    }
+                                    .menuStyle(.borderlessButton)
+                                    .menuIndicator(.hidden)
+                                    .controlSize(.small)
+                                    .font(.footnote.weight(.medium))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 24, height: 24)
+                                    .contentShape(Rectangle())
+                                    .disabled(!presentationState.canCreateMergeRequest)
+                                    .ccspaceQuickHelp("选择 MR 目标分支，可在设置中配置")
+                                } else {
+                                    Button {
+                                        let targetBranch = repository.mrTargetBranches.first
+                                        onCreateMergeRequest(repository, targetBranch)
+                                    } label: {
+                                        Image(systemName: "arrow.up.right.square")
+                                    }
+                                    .ccspaceIconActionButton()
+                                    .disabled(!presentationState.canCreateMergeRequest)
+                                    .ccspaceQuickHelp(repository.mrTargetBranches.first.map { "向 \($0) 创建 MR，可在设置中配置目标分支" } ?? "向默认分支创建 MR，可在设置中配置目标分支")
                                 }
-                                .ccspaceIconActionButton()
-                                .disabled(!presentationState.canCreateMergeRequest)
-                                .ccspaceQuickHelp("向默认分支创建 MR")
                             }
 
                             Button {
@@ -170,6 +203,22 @@ struct WorkplaceRepositoryRowView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text(deleteConfirmationState.message)
+        }
+    }
+
+    @ViewBuilder
+    private func mrTargetBranchMenuItems(repository: RepositoryConfig) -> some View {
+        ForEach(repository.mrTargetBranches, id: \.self) { branch in
+            Button {
+                onCreateMergeRequest(repository, branch)
+            } label: {
+                let prefix = branch == repository.defaultBranch ? "★ " : ""
+                if branch == currentBranch {
+                    Label("\(prefix)\(branch)（当前分支）", systemImage: "arrow.up.right.square")
+                } else {
+                    Text("\(prefix)\(branch)")
+                }
+            }
         }
     }
 
@@ -246,12 +295,25 @@ struct WorkplaceRepositoryRowView: View {
             }
             .disabled(!presentationState.canSwitchBranch)
             if let repository {
-                Button {
-                    onCreateMergeRequest(repository)
-                } label: {
-                    Label("向默认分支创建 MR", systemImage: "arrow.up.right.square")
+                if repository.mrTargetBranches.count > 1 {
+                    Menu {
+                        mrTargetBranchMenuItems(repository: repository)
+                    } label: {
+                        Label("创建 MR", systemImage: "arrow.up.right.square")
+                    }
+                    .disabled(!presentationState.canCreateMergeRequest)
+                } else {
+                    Button {
+                        let targetBranch = repository.mrTargetBranches.first
+                        onCreateMergeRequest(repository, targetBranch)
+                    } label: {
+                        Label(
+                            repository.mrTargetBranches.first.map { "向 \($0) 创建 MR" } ?? "向默认分支创建 MR",
+                            systemImage: "arrow.up.right.square"
+                        )
+                    }
+                    .disabled(!presentationState.canCreateMergeRequest)
                 }
-                .disabled(!presentationState.canCreateMergeRequest)
             }
             Divider()
             Button {
@@ -284,27 +346,32 @@ struct WorkplaceRepositoryRowView: View {
     }
 }
 
-private struct RepositoryBranchPill: View {
+struct RepositoryBranchPill: View {
     let title: String
+    let isDefault: Bool
+
+    init(title: String, isDefault: Bool = false) {
+        self.title = title
+        self.isDefault = isDefault
+    }
+
+    private var tint: Color { isDefault ? .orange : .accentColor }
+    private var icon: String { isDefault ? "star.fill" : "arrow.triangle.branch" }
 
     var body: some View {
-        HStack(spacing: 5) {
-            Image(systemName: "arrow.triangle.branch")
-                .font(.caption2.weight(.semibold))
+        HStack(spacing: 3) {
+            Image(systemName: icon)
+                .font(.system(size: 7))
+                .foregroundColor(tint)
             Text(title)
+                .font(.caption2)
+                .foregroundColor(tint)
                 .lineLimit(1)
                 .truncationMode(.tail)
         }
-        .font(.footnote)
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
-        .frame(maxWidth: 200)
-        .background(Color.primary.opacity(0.04), in: Capsule())
-        .overlay {
-            Capsule()
-                .strokeBorder(Color.primary.opacity(0.06))
-        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(tint.opacity(0.1), in: Capsule())
     }
 }
 

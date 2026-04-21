@@ -84,6 +84,33 @@ final class RepositoryConfigPresentationStateTests: XCTestCase {
         XCTAssertFalse(nonEditingState.canSubmit)
     }
 
+    func test_editStateSubmitsWhenMRBranchesChange() {
+        let repository = RepositoryConfig(
+            id: UUID(),
+            gitURL: "git@github.com:org/blog.git",
+            repoName: "blog",
+            mrTargetBranches: ["main"],
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+
+        let branchChangedState = RepositoryEditPresentationState(
+            repository: repository,
+            editingRepositoryID: repository.id,
+            editingGitURL: "git@github.com:org/blog.git",
+            editingMRBranches: ["main", "develop"]
+        )
+        let nothingChangedState = RepositoryEditPresentationState(
+            repository: repository,
+            editingRepositoryID: repository.id,
+            editingGitURL: "git@github.com:org/blog.git",
+            editingMRBranches: ["main"]
+        )
+
+        XCTAssertTrue(branchChangedState.canSubmit)
+        XCTAssertFalse(nothingChangedState.canSubmit)
+    }
+
     func test_backupExportStateUsesTimestampedDefaultName() {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .gmt
@@ -161,6 +188,26 @@ final class RepositoryConfigPresentationStateTests: XCTestCase {
         )
         XCTAssertEqual(state.confirmLabel, "")
         XCTAssertTrue(state.isBlocked)
+    }
+
+    func test_mrTargetBranchAddStateRejectsDuplicatesAndEmptyInput() {
+        let emptyState = MRTargetBranchAddPresentationState(
+            inputText: "   ",
+            existingBranches: ["develop"]
+        )
+        let duplicateState = MRTargetBranchAddPresentationState(
+            inputText: "develop",
+            existingBranches: ["develop"]
+        )
+        let validState = MRTargetBranchAddPresentationState(
+            inputText: " staging ",
+            existingBranches: ["develop"]
+        )
+
+        XCTAssertFalse(emptyState.canSubmit)
+        XCTAssertFalse(duplicateState.canSubmit)
+        XCTAssertTrue(validState.canSubmit)
+        XCTAssertEqual(validState.trimmedBranchName, "staging")
     }
 
     private func makeRepository(name: String, url: String) -> RepositoryConfig {

@@ -2,10 +2,15 @@ import SwiftUI
 
 @main
 struct CCSpace: App {
+    private let launchConfiguration = CCSpaceLaunchConfiguration()
+
     var body: some Scene {
         WindowGroup {
-            RootSplitView()
+            RootSplitView(launchConfiguration: launchConfiguration)
         }
-        .defaultSize(width: 860, height: 580)
+        .defaultSize(
+            width: launchConfiguration.windowSize.width,
+            height: launchConfiguration.windowSize.height
+        )
     }
 }

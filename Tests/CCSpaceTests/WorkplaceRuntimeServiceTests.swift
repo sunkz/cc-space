@@ -880,7 +880,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         let workplaceStore = stores.workplaceStore
         let workspaceRoot = stores.workspaceRoot
 
-        try await repositoryStore.addRepository(gitURL: "git@github.com:org/api.git")
+        try repositoryStore.addRepository(gitURL: "git@github.com:org/api.git")
         let repository = try XCTUnwrap(repositoryStore.repositories.first)
         let workplace = try workplaceStore.createWorkplace(
             name: "blog",

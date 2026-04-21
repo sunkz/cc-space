@@ -6,17 +6,23 @@ private let repositoryStoreLog = Logger(
     category: "RepositoryStore"
 )
 
+struct RepositoryBackupEntry: Codable, Equatable, Sendable {
+    let gitURL: String
+    var defaultBranch: String?
+    var mrTargetBranches: [String] = []
+}
+
 struct RepositoryBackupDocument: Codable, Equatable {
-    static let currentVersion = 1
+    static let currentVersion = 2
 
     let version: Int
     let exportedAt: Date
-    let repositories: [String]
+    let repositories: [RepositoryBackupEntry]
 
     init(
         version: Int = currentVersion,
         exportedAt: Date = .now,
-        repositories: [String]
+        repositories: [RepositoryBackupEntry]
     ) {
         self.version = version
         self.exportedAt = exportedAt
@@ -27,9 +33,10 @@ struct RepositoryBackupDocument: Codable, Equatable {
 struct RepositoryImportResult: Equatable, Sendable {
     let importedCount: Int
     let skippedCount: Int
+    let mergedCount: Int
 
     var hasChanges: Bool {
-        importedCount > 0
+        importedCount > 0 || mergedCount > 0
     }
 }
 
@@ -68,6 +75,12 @@ enum RepositoryStoreError: LocalizedError, Equatable {
             return "备份文件中没有仓库"
         }
     }
+}
+
+private struct RepositoryBackupDocumentV1: Codable {
+    let version: Int
+    let exportedAt: Date
+    let repositories: [String]
 }
 
 @MainActor
@@ -180,7 +193,17 @@ final class RepositoryStore: ObservableObject {
         )
     }
 
-    func updateRepository(id: UUID, gitURL: String) throws {
+    private func mutateRepository(id: UUID, _ mutate: (inout RepositoryConfig) -> Void) throws {
+        guard let index = repositories.firstIndex(where: { $0.id == id }) else {
+            throw RepositoryStoreError.notFound
+        }
+        var updatedRepositories = repositories
+        mutate(&updatedRepositories[index])
+        updatedRepositories[index].updatedAt = .now
+        try persistRepositories(updatedRepositories)
+    }
+
+    func updateRepository(id: UUID, gitURL: String, mrTargetBranches: [String]? = nil) throws {
         let normalizedGitURL = gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard let index = repositories.firstIndex(where: { $0.id == id }) else {
@@ -201,13 +224,30 @@ final class RepositoryStore: ObservableObject {
 
         var updatedRepositories = repositories
         updatedRepositories[index].gitURL = normalizedGitURL
+        if let mrTargetBranches {
+            updatedRepositories[index].mrTargetBranches = mrTargetBranches
+        }
         updatedRepositories[index].updatedAt = .now
         try persistRepositories(updatedRepositories)
     }
 
+    func updateMRTargetBranches(id: UUID, branches: [String]) throws {
+        try mutateRepository(id: id) { $0.mrTargetBranches = branches }
+    }
+
+    func updateDefaultBranch(id: UUID, branch: String) throws {
+        try mutateRepository(id: id) { $0.defaultBranch = branch }
+    }
+
     func exportBackup(to fileURL: URL) throws -> RepositoryBackupDocument {
         let document = RepositoryBackupDocument(
-            repositories: repositories.map(\.gitURL)
+            repositories: repositories.map {
+                RepositoryBackupEntry(
+                    gitURL: $0.gitURL,
+                    defaultBranch: $0.defaultBranch,
+                    mrTargetBranches: $0.mrTargetBranches
+                )
+            }
         )
         let encoder = makeBackupEncoder()
         let data = try encoder.encode(document)
@@ -221,35 +261,64 @@ final class RepositoryStore: ObservableObject {
         let data = try Data(contentsOf: fileURL)
         let decoder = makeBackupDecoder()
 
-        let document: RepositoryBackupDocument
-        do {
-            document = try decoder.decode(RepositoryBackupDocument.self, from: data)
-        } catch {
+        let entries: [RepositoryBackupEntry]
+        let version: Int
+
+        if let v2Doc = try? decoder.decode(RepositoryBackupDocument.self, from: data) {
+            entries = v2Doc.repositories
+            version = v2Doc.version
+        } else if let v1Doc = try? decoder.decode(RepositoryBackupDocumentV1.self, from: data) {
+            entries = v1Doc.repositories.map { RepositoryBackupEntry(gitURL: $0) }
+            version = v1Doc.version
+        } else {
             throw RepositoryStoreError.invalidBackupFormat
         }
 
-        guard document.version == RepositoryBackupDocument.currentVersion else {
-            throw RepositoryStoreError.unsupportedBackupVersion(document.version)
+        guard version <= RepositoryBackupDocument.currentVersion else {
+            throw RepositoryStoreError.unsupportedBackupVersion(version)
         }
 
-        let rawURLs = document.repositories.map {
-            $0.trimmingCharacters(in: .whitespacesAndNewlines)
-        }.filter {
-            !$0.isEmpty
+        let cleanedEntries = entries.filter {
+            !$0.gitURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
-        guard rawURLs.isEmpty == false else {
+        guard !cleanedEntries.isEmpty else {
             throw RepositoryStoreError.emptyBackup
         }
 
-        var existingURLs = Set(repositories.map(\.gitURL))
         var existingNames = Set(repositories.map(\.repoName))
         var updatedRepositories = repositories
         var importedCount = 0
         var skippedCount = 0
+        var mergedCount = 0
 
-        for gitURL in rawURLs {
+        for entry in cleanedEntries {
+            let gitURL = entry.gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
             let repoName = try validatedRepositoryName(from: gitURL)
-            if existingURLs.contains(gitURL) || existingNames.contains(repoName) {
+
+            if let existingIndex = updatedRepositories.firstIndex(where: { $0.gitURL == gitURL }) {
+                var changed = false
+                if updatedRepositories[existingIndex].defaultBranch == nil, let entryDefault = entry.defaultBranch {
+                    updatedRepositories[existingIndex].defaultBranch = entryDefault
+                    changed = true
+                }
+                if !entry.mrTargetBranches.isEmpty {
+                    let existing = Set(updatedRepositories[existingIndex].mrTargetBranches)
+                    let newBranches = entry.mrTargetBranches.filter { !existing.contains($0) }
+                    if !newBranches.isEmpty {
+                        updatedRepositories[existingIndex].mrTargetBranches += newBranches
+                        changed = true
+                    }
+                }
+                if changed {
+                    updatedRepositories[existingIndex].updatedAt = .now
+                    mergedCount += 1
+                } else {
+                    skippedCount += 1
+                }
+                continue
+            }
+
+            if existingNames.contains(repoName) {
                 skippedCount += 1
                 continue
             }
@@ -260,22 +329,24 @@ final class RepositoryStore: ObservableObject {
                     id: UUID(),
                     gitURL: gitURL,
                     repoName: repoName,
+                    defaultBranch: entry.defaultBranch,
+                    mrTargetBranches: entry.mrTargetBranches,
                     createdAt: now,
                     updatedAt: now
                 )
             )
-            existingURLs.insert(gitURL)
             existingNames.insert(repoName)
             importedCount += 1
         }
 
-        if importedCount > 0 {
+        if importedCount > 0 || mergedCount > 0 {
             try persistRepositories(updatedRepositories)
         }
 
         return RepositoryImportResult(
             importedCount: importedCount,
-            skippedCount: skippedCount
+            skippedCount: skippedCount,
+            mergedCount: mergedCount
         )
     }
 }

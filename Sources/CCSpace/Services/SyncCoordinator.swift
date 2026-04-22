@@ -25,7 +25,7 @@ private enum PullPreparationDecision {
 }
 
 struct SyncCoordinator: Sendable {
-    static let maxConcurrentCloneTasks = 4
+    static let maxConcurrentCloneTasks = 2
     static let maxConcurrentPullTasks = 4
 
     let gitService: GitServicing

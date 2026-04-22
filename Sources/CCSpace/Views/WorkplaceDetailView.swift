@@ -218,7 +218,7 @@ struct WorkplaceDetailView: View {
         if presentationState.showsOperationProgress {
             ToolbarItem(placement: .primaryAction) {
                 ProgressView()
-                    .controlSize(.small)
+                    .ccspaceToolbarStatusIndicator()
                     .ccspaceQuickHelp("工作区操作进行中")
             }
         }

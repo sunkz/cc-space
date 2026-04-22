@@ -83,6 +83,13 @@ extension View {
                 .foregroundStyle(.secondary)
         }
     }
+
+    func ccspaceToolbarStatusIndicator() -> some View {
+        controlSize(.small)
+            .frame(minWidth: 30, minHeight: 28, alignment: .center)
+            .padding(.horizontal, 2)
+            .contentShape(Rectangle())
+    }
 }
 
 struct CCSpaceEmptyStateCard<Actions: View>: View {

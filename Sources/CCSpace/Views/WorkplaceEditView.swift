@@ -4,7 +4,7 @@ struct WorkplaceEditView: View {
     let workplace: Workplace
     let repositories: [RepositoryConfig]
     let syncStates: [RepositorySyncState]
-    let onSave: (String, [UUID], String?) async throws -> Void
+    let onSave: (String, [UUID], String?, WorkplaceOperationProgressHandler?) async throws -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var selectedRepositoryIDs: Set<UUID>
@@ -13,6 +13,7 @@ struct WorkplaceEditView: View {
     @State private var isSaving = false
     @State private var feedback: CCSpaceFeedback?
     @State private var repositorySearchText = ""
+    @State private var operationProgress: WorkplaceOperationProgress?
 
     private var presentationState: WorkplaceEditPresentationState {
         WorkplaceEditPresentationState(
@@ -38,7 +39,9 @@ struct WorkplaceEditView: View {
         workplace: Workplace,
         repositories: [RepositoryConfig],
         syncStates: [RepositorySyncState] = [],
-        onSave: @escaping (String, [UUID], String?) async throws -> Void = { _, _, _ in }
+        onSave: @escaping (String, [UUID], String?, WorkplaceOperationProgressHandler?) async throws -> Void = {
+            _, _, _, _ in
+        }
     ) {
         self.workplace = workplace
         self.repositories = repositories
@@ -57,16 +60,32 @@ struct WorkplaceEditView: View {
         WorkplaceFormTextNormalization.normalizedOptionalText(branch)
     }
 
+    private var progressPresentationState: WorkplaceFormProgressPresentationState? {
+        guard let operationProgress else { return nil }
+        return WorkplaceFormProgressPresentationState(progress: operationProgress)
+    }
+
     @MainActor
     private func submitEdit() async {
         guard presentationState.canSubmit else { return }
 
         isSaving = true
         feedback = nil
-        defer { isSaving = false }
+        operationProgress = nil
+        defer {
+            isSaving = false
+            operationProgress = nil
+        }
 
         do {
-            try await onSave(name, orderedSelectedRepositoryIDs, normalizedBranch)
+            try await onSave(
+                name,
+                orderedSelectedRepositoryIDs,
+                normalizedBranch,
+                { progress in
+                    operationProgress = progress
+                }
+            )
             dismiss()
         } catch {
             feedback = CCSpaceFeedbackFactory.actionError(
@@ -122,8 +141,10 @@ struct WorkplaceEditView: View {
 
             WorkplaceFormFooter(
                 submitTitle: "保存",
+                submittingTitle: "保存中",
                 isSubmitting: isSaving,
                 isSubmitDisabled: !presentationState.canSubmit,
+                progress: progressPresentationState,
                 onCancel: {
                     dismiss()
                 },

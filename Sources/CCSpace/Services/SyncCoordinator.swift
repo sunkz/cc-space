@@ -42,7 +42,8 @@ struct SyncCoordinator: Sendable {
     @MainActor
     func cloneRepositories(
         repositories: [RepositoryConfig],
-        workplace: Workplace
+        workplace: Workplace,
+        progressHandler: WorkplaceOperationProgressHandler? = nil
     ) async throws -> [RepositorySyncState] {
         try fileSystemService.createDirectory(at: workplace.path)
 
@@ -50,6 +51,11 @@ struct SyncCoordinator: Sendable {
         let workplaceID = workplace.id
         let workplacePath = workplace.path
         let workplaceBranch = workplace.branch
+        let progressTracker = WorkplaceOperationProgressTracker(
+            step: .cloningRepositories,
+            totalCount: repositories.count,
+            progressHandler: progressHandler
+        )
         return try await withThrowingTaskGroup(of: RepositorySyncState.self) { group in
             let initialTaskCount = min(Self.maxConcurrentCloneTasks, repositories.count)
             var nextRepositoryIndex = 0
@@ -61,16 +67,25 @@ struct SyncCoordinator: Sendable {
 
                 group.addTask {
                     try Task.checkCancellation()
-                    let localPath = try WorkplaceStore.repositoryPath(
-                        workplacePath: workplacePath,
-                        repositoryName: repositoryName
-                    )
+                    await progressTracker.didStart(repositoryName: repositoryName)
+                    let localPath: String
+                    do {
+                        localPath = try WorkplaceStore.repositoryPath(
+                            workplacePath: workplacePath,
+                            repositoryName: repositoryName
+                        )
+                    } catch {
+                        await progressTracker.didFinish(repositoryName: repositoryName)
+                        throw error
+                    }
+                    let state: RepositorySyncState
                     do {
                         try await gitService.clone(repositoryURL: repositoryURL, into: localPath)
                     } catch is CancellationError {
+                        await progressTracker.didFinish(repositoryName: repositoryName)
                         throw CancellationError()
                     } catch {
-                        return RepositorySyncState(
+                        state = RepositorySyncState(
                             workplaceID: workplaceID,
                             repositoryID: repositoryID,
                             status: .failed,
@@ -78,6 +93,8 @@ struct SyncCoordinator: Sendable {
                             lastError: error.localizedDescription,
                             lastSyncedAt: nil
                         )
+                        await progressTracker.didFinish(repositoryName: repositoryName)
+                        return state
                     }
 
                     var checkoutError: String?
@@ -89,7 +106,7 @@ struct SyncCoordinator: Sendable {
                         }
                     }
 
-                    return RepositorySyncState(
+                    state = RepositorySyncState(
                         workplaceID: workplaceID,
                         repositoryID: repositoryID,
                         status: checkoutError != nil ? .failed : .success,
@@ -97,6 +114,8 @@ struct SyncCoordinator: Sendable {
                         lastError: checkoutError,
                         lastSyncedAt: .now
                     )
+                    await progressTracker.didFinish(repositoryName: repositoryName)
+                    return state
                 }
             }
 

@@ -13,6 +13,7 @@ struct WorkplaceCreateView: View {
     @State private var feedback: CCSpaceFeedback?
     @State private var isSubmitting = false
     @State private var repositorySearchText = ""
+    @State private var operationProgress: WorkplaceOperationProgress?
 
     init(
         settingsStore: SettingsStore,
@@ -48,13 +49,22 @@ struct WorkplaceCreateView: View {
         )
     }
 
+    private var progressPresentationState: WorkplaceFormProgressPresentationState? {
+        guard let operationProgress else { return nil }
+        return WorkplaceFormProgressPresentationState(progress: operationProgress)
+    }
+
     @MainActor
     private func submitCreate() async {
         guard presentationState.canSubmit else { return }
 
         isSubmitting = true
         feedback = nil
-        defer { isSubmitting = false }
+        operationProgress = nil
+        defer {
+            isSubmitting = false
+            operationProgress = nil
+        }
 
         do {
             let sortedIDs = repositoryStore.repositories
@@ -64,7 +74,10 @@ struct WorkplaceCreateView: View {
                 name: name,
                 rootPath: settingsStore.settings.workplaceRootPath,
                 selectedRepositoryIDs: sortedIDs,
-                branch: branch
+                branch: branch,
+                progressHandler: { progress in
+                    operationProgress = progress
+                }
             )
 
             appViewModel.showWorkplace(workplace.id)
@@ -117,8 +130,10 @@ struct WorkplaceCreateView: View {
 
             WorkplaceFormFooter(
                 submitTitle: "创建",
+                submittingTitle: "创建中",
                 isSubmitting: isSubmitting,
                 isSubmitDisabled: !presentationState.canSubmit,
+                progress: progressPresentationState,
                 onCancel: {
                     onDismiss()
                 },

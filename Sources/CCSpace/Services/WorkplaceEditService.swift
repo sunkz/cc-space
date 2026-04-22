@@ -22,7 +22,8 @@ struct WorkplaceEditService {
         workplaceID: UUID,
         name: String,
         selectedRepositoryIDs: [UUID],
-        branch: String?
+        branch: String?,
+        progressHandler: WorkplaceOperationProgressHandler? = nil
     ) async throws {
         guard let originalWorkplace = workplaceStore.workplaces.first(where: { $0.id == workplaceID }) else { return }
         guard selectedRepositoryIDs.isEmpty == false else { throw WorkplaceStoreError.noRepositoriesSelected }
@@ -35,6 +36,9 @@ struct WorkplaceEditService {
         let removedRepositoryIDs = currentSelectedIDs.subtracting(nextSelectedIDs)
         let addedRepositoryIDs = nextSelectedIDs.subtracting(currentSelectedIDs)
         let originalStates = workplaceStore.syncStates.filter { $0.workplaceID == workplaceID }
+        let repositoryNamesByID = Dictionary(uniqueKeysWithValues: repositoryStore.repositories.map {
+            ($0.id, $0.repoName)
+        })
         let oldPath = originalWorkplace.path
         let parentPath = (oldPath as NSString).deletingLastPathComponent
         let newPath = try WorkplaceStore.workplacePath(
@@ -83,42 +87,80 @@ struct WorkplaceEditService {
             }
             let removedStates = updatedStates.filter { removedRepositoryIDs.contains($0.repositoryID) }
             var retainedStates = updatedStates.filter { nextSelectedIDs.contains($0.repositoryID) }
+            let removalProgressTracker =
+                removedStates.isEmpty
+                ? nil
+                : WorkplaceOperationProgressTracker(
+                    step: .removingRepositories,
+                    totalCount: removedStates.count,
+                    progressHandler: progressHandler
+                )
 
             for state in removedStates {
-                if let stagedPath = try stageLocalItemForRemovalIfExists(
-                    at: state.localPath,
-                    stagingRoot: removalStagingRoot.path
+                let repositoryName = repositoryDisplayName(
+                    for: state,
+                    repositoryNamesByID: repositoryNamesByID
+                )
+                let stagedPath = try await performProgressTrackedOperation(
+                    with: removalProgressTracker,
+                    repositoryName: repositoryName
                 ) {
+                    try stageLocalItemForRemovalIfExists(
+                        at: state.localPath,
+                        stagingRoot: removalStagingRoot.path
+                    )
+                }
+                if let stagedPath {
                     stagedRemovals.append((originalPath: state.localPath, stagedPath: stagedPath))
                 }
             }
 
             if nextBranch != originalWorkplace.branch, let branchToCheckout = nextBranch, !branchToCheckout.isEmpty {
+                let retainedStatesToSwitch = retainedStates.filter { state in
+                    !addedRepositoryIDs.contains(state.repositoryID) && state.hasLocalDirectory
+                }
+                let branchProgressTracker =
+                    retainedStatesToSwitch.isEmpty
+                    ? nil
+                    : WorkplaceOperationProgressTracker(
+                        step: .switchingBranches(branch: branchToCheckout),
+                        totalCount: retainedStatesToSwitch.count,
+                        progressHandler: progressHandler
+                    )
+
                 for index in retainedStates.indices where !addedRepositoryIDs.contains(retainedStates[index].repositoryID) {
-                    guard retainedStates[index].hasLocalDirectory else {
+                    let state = retainedStates[index]
+                    guard state.hasLocalDirectory else {
                         continue
                     }
+                    let repositoryName = repositoryDisplayName(
+                        for: state,
+                        repositoryNamesByID: repositoryNamesByID
+                    )
                     do {
-                        let currentBranch = await gitService.currentBranch(in: retainedStates[index].localPath)
-                        if currentBranch == branchToCheckout {
-                            retainedStates[index].lastError = nil
-                            retainedStates[index].status = .success
-                            continue
-                        }
-                        try await GitWorktreeSafety.validateCleanWorkingTree(
-                            in: retainedStates[index].localPath,
-                            gitService: gitService,
-                            blockedOperation: .switchBranch
-                        )
-                        try await gitService.checkoutBranch(branchToCheckout, in: retainedStates[index].localPath)
-                        if let currentBranch,
-                           currentBranch.isEmpty == false {
-                            branchRollbacks.append(
-                                WorkplaceEditBranchRollback(
-                                    path: retainedStates[index].localPath,
-                                    branch: currentBranch
-                                )
+                        try await performProgressTrackedOperation(
+                            with: branchProgressTracker,
+                            repositoryName: repositoryName
+                        ) {
+                            let currentBranch = await gitService.currentBranch(in: state.localPath)
+                            if currentBranch == branchToCheckout {
+                                return
+                            }
+                            try await GitWorktreeSafety.validateCleanWorkingTree(
+                                in: state.localPath,
+                                gitService: gitService,
+                                blockedOperation: .switchBranch
                             )
+                            try await gitService.checkoutBranch(branchToCheckout, in: state.localPath)
+                            if let currentBranch,
+                               currentBranch.isEmpty == false {
+                                branchRollbacks.append(
+                                    WorkplaceEditBranchRollback(
+                                        path: state.localPath,
+                                        branch: currentBranch
+                                    )
+                                )
+                            }
                         }
                         retainedStates[index].lastError = nil
                         retainedStates[index].status = .success
@@ -134,7 +176,8 @@ struct WorkplaceEditService {
                 if addedRepositories.isEmpty == false {
                     clonedStates = try await syncCoordinator.cloneRepositories(
                         repositories: addedRepositories,
-                        workplace: updatedWorkplace
+                        workplace: updatedWorkplace,
+                        progressHandler: progressHandler
                     )
                     retainedStates.append(contentsOf: clonedStates)
                 }
@@ -225,6 +268,36 @@ struct WorkplaceEditService {
             .path
         try FileManager.default.moveItem(atPath: path, toPath: stagedPath)
         return stagedPath
+    }
+
+    private func repositoryDisplayName(
+        for state: RepositorySyncState,
+        repositoryNamesByID: [UUID: String]
+    ) -> String {
+        if let repositoryName = repositoryNamesByID[state.repositoryID] {
+            return repositoryName
+        }
+        return URL(fileURLWithPath: state.localPath).lastPathComponent
+    }
+
+    private func performProgressTrackedOperation<Result>(
+        with tracker: WorkplaceOperationProgressTracker?,
+        repositoryName: String,
+        operation: () async throws -> Result
+    ) async throws -> Result {
+        guard let tracker else {
+            return try await operation()
+        }
+
+        await tracker.didStart(repositoryName: repositoryName)
+        do {
+            let result = try await operation()
+            await tracker.didFinish(repositoryName: repositoryName)
+            return result
+        } catch {
+            await tracker.didFinish(repositoryName: repositoryName)
+            throw error
+        }
     }
 
     private func restoreStagedItems(_ stagedItems: [(originalPath: String, stagedPath: String)]) throws {

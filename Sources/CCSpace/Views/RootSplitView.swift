@@ -148,12 +148,13 @@ struct RootSplitView: View {
                 workplace: workplace,
                 repositories: repositoryStore.repositories,
                 syncStates: workplaceStore.syncStates
-            ) { name, selectedRepositoryIDs, branch in
+            ) { name, selectedRepositoryIDs, branch, progressHandler in
                 try await workplaceEditService.saveWorkplaceEdit(
                     workplaceID: workplace.id,
                     name: name,
                     selectedRepositoryIDs: selectedRepositoryIDs,
-                    branch: branch
+                    branch: branch,
+                    progressHandler: progressHandler
                 )
             }
         }

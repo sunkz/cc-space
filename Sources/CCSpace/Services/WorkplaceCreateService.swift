@@ -10,7 +10,8 @@ struct WorkplaceCreateService {
         name: String,
         rootPath: String,
         selectedRepositoryIDs: [UUID],
-        branch: String?
+        branch: String?,
+        progressHandler: WorkplaceOperationProgressHandler? = nil
     ) async throws -> Workplace {
         let trimmedBranch = branch?.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedBranch = trimmedBranch?.isEmpty == true ? nil : trimmedBranch
@@ -28,7 +29,8 @@ struct WorkplaceCreateService {
         do {
             let states = try await syncCoordinator.cloneRepositories(
                 repositories: selectedRepositories,
-                workplace: workplace
+                workplace: workplace,
+                progressHandler: progressHandler
             )
             try workplaceStore.replaceSyncStates(states, for: workplace.id)
             return workplace

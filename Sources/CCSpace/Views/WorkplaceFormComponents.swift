@@ -106,34 +106,65 @@ struct WorkplaceRepositorySelectionSection: View {
 
 struct WorkplaceFormFooter: View {
     let submitTitle: String
+    let submittingTitle: String
     let isSubmitting: Bool
     let isSubmitDisabled: Bool
+    let progress: WorkplaceFormProgressPresentationState?
     let onCancel: () -> Void
     let onSubmit: () -> Void
 
     var body: some View {
-        HStack {
-            Spacer()
+        VStack(alignment: .leading, spacing: 10) {
+            if let progress {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        Text(progress.title)
+                            .font(.callout.weight(.semibold))
+                            .foregroundStyle(.primary)
 
-            Button("取消", action: onCancel)
+                        Spacer()
+
+                        Text(progress.countLabel)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+
+                    ProgressView(value: progress.fractionCompleted)
+                        .controlSize(.small)
+
+                    Text(progress.detail)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                .ccspacePanel(background: .clear, cornerRadius: 12, padding: 12, borderOpacity: 0.03)
+            }
+
+            HStack {
+                Spacer()
+
+                Button("取消", action: onCancel)
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(isSubmitting)
+                    .ccspaceQuickHelp(isSubmitting ? "操作进行中，请等待完成" : nil)
+
+                Button(action: onSubmit) {
+                    if isSubmitting {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text(submittingTitle)
+                        }
+                    } else {
+                        Text(submitTitle)
+                    }
+                }
                 .buttonStyle(.bordered)
                 .controlSize(.regular)
-                .keyboardShortcut(.cancelAction)
-                .disabled(isSubmitting)
-                .ccspaceQuickHelp(isSubmitting ? "操作进行中，请等待完成" : nil)
-
-            Button(action: onSubmit) {
-                if isSubmitting {
-                    ProgressView()
-                        .controlSize(.small)
-                } else {
-                    Text(submitTitle)
-                }
+                .disabled(isSubmitDisabled)
+                .keyboardShortcut(.defaultAction)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.regular)
-            .disabled(isSubmitDisabled)
-            .keyboardShortcut(.defaultAction)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)

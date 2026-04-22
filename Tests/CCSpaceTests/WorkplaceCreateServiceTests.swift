@@ -121,6 +121,51 @@ final class WorkplaceCreateServiceTests: XCTestCase {
         XCTAssertEqual(checkoutBranches, ["release", "release"])
     }
 
+    func test_createWorkplaceReportsCloneProgress() async throws {
+        let stores = try makeServiceStores()
+        let repositoryStore = stores.repositoryStore
+        let workspaceRoot = stores.workspaceRoot
+
+        try repositoryStore.addRepository(gitURL: "git@github.com:org/api.git")
+        let repository = try XCTUnwrap(repositoryStore.repositories.first)
+
+        let gitService = WorkplaceCreateGitServiceSpy()
+        let service = WorkplaceCreateService(
+            repositoryStore: repositoryStore,
+            workplaceStore: stores.workplaceStore,
+            syncCoordinator: SyncCoordinator(gitService: gitService)
+        )
+        var progressEvents: [WorkplaceOperationProgress] = []
+
+        _ = try await service.createWorkplace(
+            name: "blog",
+            rootPath: workspaceRoot.path,
+            selectedRepositoryIDs: [repository.id],
+            branch: nil,
+            progressHandler: { progress in
+                progressEvents.append(progress)
+            }
+        )
+
+        XCTAssertEqual(
+            progressEvents,
+            [
+                WorkplaceOperationProgress(
+                    step: .cloningRepositories,
+                    completedCount: 0,
+                    totalCount: 1,
+                    activeRepositoryNames: ["api"]
+                ),
+                WorkplaceOperationProgress(
+                    step: .cloningRepositories,
+                    completedCount: 1,
+                    totalCount: 1,
+                    activeRepositoryNames: []
+                ),
+            ]
+        )
+    }
+
     func test_createWorkplaceRollsBackStoreWhenCloneSetupFails() async throws {
         let stores = try makeServiceStores()
         let repositoryStore = stores.repositoryStore

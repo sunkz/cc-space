@@ -170,6 +170,100 @@ final class WorkplaceEditServiceTests: XCTestCase {
         )
     }
 
+    func test_saveWorkplaceEditReportsProgressAcrossRemovalBranchSwitchAndClone() async throws {
+        let stores = try makeServiceStores()
+        let repositoryStore = stores.repositoryStore
+        let workplaceStore = stores.workplaceStore
+        let workspaceRoot = stores.workspaceRoot
+
+        try repositoryStore.addRepository(gitURL: "git@github.com:org/api.git")
+        try repositoryStore.addRepository(gitURL: "git@github.com:org/web.git")
+        try repositoryStore.addRepository(gitURL: "git@github.com:org/mobile.git")
+
+        let apiRepository = try XCTUnwrap(repositoryStore.repositories.first { $0.repoName == "api" })
+        let webRepository = try XCTUnwrap(repositoryStore.repositories.first { $0.repoName == "web" })
+        let mobileRepository = try XCTUnwrap(repositoryStore.repositories.first { $0.repoName == "mobile" })
+        let workplace = try workplaceStore.createWorkplace(
+            name: "ios-dev",
+            rootPath: workspaceRoot.path,
+            selectedRepositories: [apiRepository, webRepository]
+        )
+
+        let apiPath = URL(fileURLWithPath: workplace.path).appendingPathComponent("api").path
+        let webPath = URL(fileURLWithPath: workplace.path).appendingPathComponent("web").path
+        try FileManager.default.createDirectory(
+            atPath: apiPath,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        try FileManager.default.createDirectory(
+            atPath: webPath,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+
+        let gitService = WorkplaceEditGitServiceSpy()
+        let service = WorkplaceEditService(
+            workplaceStore: workplaceStore,
+            repositoryStore: repositoryStore,
+            syncCoordinator: SyncCoordinator(gitService: gitService),
+            gitService: gitService
+        )
+        var progressEvents: [WorkplaceOperationProgress] = []
+
+        try await service.saveWorkplaceEdit(
+            workplaceID: workplace.id,
+            name: "ios-dev",
+            selectedRepositoryIDs: [apiRepository.id, mobileRepository.id],
+            branch: "release",
+            progressHandler: { progress in
+                progressEvents.append(progress)
+            }
+        )
+
+        XCTAssertEqual(
+            progressEvents,
+            [
+                WorkplaceOperationProgress(
+                    step: .removingRepositories,
+                    completedCount: 0,
+                    totalCount: 1,
+                    activeRepositoryNames: ["web"]
+                ),
+                WorkplaceOperationProgress(
+                    step: .removingRepositories,
+                    completedCount: 1,
+                    totalCount: 1,
+                    activeRepositoryNames: []
+                ),
+                WorkplaceOperationProgress(
+                    step: .switchingBranches(branch: "release"),
+                    completedCount: 0,
+                    totalCount: 1,
+                    activeRepositoryNames: ["api"]
+                ),
+                WorkplaceOperationProgress(
+                    step: .switchingBranches(branch: "release"),
+                    completedCount: 1,
+                    totalCount: 1,
+                    activeRepositoryNames: []
+                ),
+                WorkplaceOperationProgress(
+                    step: .cloningRepositories,
+                    completedCount: 0,
+                    totalCount: 1,
+                    activeRepositoryNames: ["mobile"]
+                ),
+                WorkplaceOperationProgress(
+                    step: .cloningRepositories,
+                    completedCount: 1,
+                    totalCount: 1,
+                    activeRepositoryNames: []
+                ),
+            ]
+        )
+    }
+
     func test_saveWorkplaceEditRestoresFilesystemAndStoreWhenCloneSetupFails() async throws {
         let stores = try makeServiceStores()
         let repositoryStore = stores.repositoryStore

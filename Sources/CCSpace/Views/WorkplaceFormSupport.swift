@@ -74,6 +74,64 @@ struct WorkplaceRepositorySelectionPresentationState {
     }
 }
 
+struct WorkplaceFormProgressPresentationState: Equatable {
+    let title: String
+    let detail: String
+    let completedCount: Int
+    let totalCount: Int
+    let countLabel: String
+
+    var fractionCompleted: Double {
+        guard totalCount > 0 else { return 0 }
+        return Double(completedCount) / Double(totalCount)
+    }
+
+    init(progress: WorkplaceOperationProgress) {
+        completedCount = progress.completedCount
+        totalCount = progress.totalCount
+        countLabel = "\(progress.completedCount)/\(progress.totalCount)"
+
+        let repositorySummary = Self.repositorySummary(
+            from: progress.activeRepositoryNames
+        )
+
+        switch progress.step {
+        case .cloningRepositories:
+            title = "正在克隆仓库"
+            detail =
+                if let repositorySummary {
+                    "当前：\(repositorySummary)"
+                } else {
+                    "正在整理克隆结果"
+                }
+        case .removingRepositories:
+            title = "正在移除本地仓库"
+            detail =
+                if let repositorySummary {
+                    "当前：\(repositorySummary)"
+                } else {
+                    "正在整理移除结果"
+                }
+        case .switchingBranches(let branch):
+            title = "正在切换工作分支"
+            detail =
+                if let repositorySummary {
+                    "当前：\(repositorySummary) -> \(branch)"
+                } else {
+                    "目标分支：\(branch)"
+                }
+        }
+    }
+
+    private static func repositorySummary(from repositoryNames: [String]) -> String? {
+        guard repositoryNames.isEmpty == false else { return nil }
+        let visibleNames = repositoryNames.prefix(3)
+        let visibleSummary = visibleNames.joined(separator: "、")
+        guard repositoryNames.count > visibleNames.count else { return visibleSummary }
+        return "\(visibleSummary) 等 \(repositoryNames.count) 个仓库"
+    }
+}
+
 enum WorkplaceSelectableRepositoryFactory {
     static func createOptions(
         repositories: [RepositoryConfig]

@@ -256,6 +256,37 @@ final class WorkplaceFormPresentationStateTests: XCTestCase {
         )
     }
 
+    func test_formProgressStateShowsCurrentCloneRepositoriesAndCount() {
+        let state = WorkplaceFormProgressPresentationState(
+            progress: WorkplaceOperationProgress(
+                step: .cloningRepositories,
+                completedCount: 1,
+                totalCount: 4,
+                activeRepositoryNames: ["api", "web"]
+            )
+        )
+
+        XCTAssertEqual(state.title, "正在克隆仓库")
+        XCTAssertEqual(state.detail, "当前：api、web")
+        XCTAssertEqual(state.countLabel, "1/4")
+        XCTAssertEqual(state.fractionCompleted, 0.25, accuracy: 0.000_1)
+    }
+
+    func test_formProgressStateCondensesLongRepositoryListForBranchSwitch() {
+        let state = WorkplaceFormProgressPresentationState(
+            progress: WorkplaceOperationProgress(
+                step: .switchingBranches(branch: "release/01"),
+                completedCount: 2,
+                totalCount: 5,
+                activeRepositoryNames: ["api", "web", "ios", "android"]
+            )
+        )
+
+        XCTAssertEqual(state.title, "正在切换工作分支")
+        XCTAssertEqual(state.detail, "当前：api、web、ios 等 4 个仓库 -> release/01")
+        XCTAssertEqual(state.countLabel, "2/5")
+    }
+
     func test_editStateBuildsSelectionSummaryAndRemovalWarning() {
         let retainedRepositoryID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
         let removedRepositoryID = UUID(uuidString: "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC")!

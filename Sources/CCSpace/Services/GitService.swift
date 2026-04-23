@@ -16,6 +16,20 @@ protocol GitServicing: Sendable {
     func remoteBranchExists(branch: String, remoteURL: String) async -> Bool
     func checkRemoteBranches(branch: String, repositories: [RepositoryConfig]) async -> [RepositoryConfig]
     func mergeDefaultBranchIntoCurrent(in directory: String) async throws -> GitMergeDefaultBranchOutcome
+    func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry]
+}
+
+struct GitCommitEntry: Identifiable, Equatable {
+    let hash: String
+    let subject: String
+    let author: String
+    let date: Date
+
+    var id: String { hash }
+
+    var shortHash: String {
+        String(hash.prefix(7))
+    }
 }
 
 enum GitMergeDefaultBranchOutcome: Equatable {
@@ -312,6 +326,38 @@ struct GitService: GitServicing {
         try await runGit(arguments: ["-C", directory, "fetch", "origin", "--", defaultBranch])
         try await runGit(arguments: ["-C", directory, "merge", "--no-edit", "--", "origin/\(defaultBranch)"])
         return .merged
+    }
+
+    func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] {
+        let separator = "<<CCSPACE_SEP>>"
+        let format = ["%H", "%s", "%an", "%aI"].joined(separator: separator)
+        guard let output = try? await runGitOutput(arguments: [
+            "-C", directory,
+            "log",
+            "--format=\(format)",
+            "-\(count)",
+        ]) else {
+            return []
+        }
+
+        let dateFormatter = ISO8601DateFormatter()
+        dateFormatter.formatOptions = [.withInternetDateTime]
+
+        return output
+            .components(separatedBy: .newlines)
+            .compactMap { line -> GitCommitEntry? in
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard trimmed.isEmpty == false else { return nil }
+                let parts = trimmed.components(separatedBy: separator)
+                guard parts.count == 4 else { return nil }
+                let date = dateFormatter.date(from: parts[3]) ?? .distantPast
+                return GitCommitEntry(
+                    hash: parts[0],
+                    subject: parts[1],
+                    author: parts[2],
+                    date: date
+                )
+            }
     }
 
     func isGitAvailable() async -> Bool {

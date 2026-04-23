@@ -34,4 +34,10 @@ final class SettingsStore: ObservableObject {
             return "保存失败：\(error.localizedDescription)"
         }
     }
+
+    func updatePreferredOpenActionID(_ actionID: String?) throws {
+        var updatedSettings = settings
+        updatedSettings.preferredOpenActionID = actionID
+        try persistSettings(updatedSettings)
+    }
 }

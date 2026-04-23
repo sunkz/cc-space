@@ -426,7 +426,11 @@ struct RootSplitView: View {
             },
             isPerformingAction: detailActionCoordinator.isRunningAction,
             branchRefreshSeed: detailActionCoordinator.branchRefreshSeed,
-            feedback: $detailActionCoordinator.feedback
+            feedback: $detailActionCoordinator.feedback,
+            preferredOpenActionID: settingsStore.settings.preferredOpenActionID,
+            onSelectOpenAction: { actionID in
+                try? settingsStore.updatePreferredOpenActionID(actionID)
+            }
         )
         .id(workplace.id)
     }

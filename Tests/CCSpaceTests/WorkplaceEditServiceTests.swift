@@ -59,6 +59,8 @@ private actor WorkplaceEditGitServiceSpy: GitServicing {
         .merged
     }
 
+    func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] { [] }
+
     func cloneDirectories() async -> [String] {
         cloneCalls.map(\.directory)
     }

@@ -213,46 +213,6 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
         XCTAssertEqual(presentationState.switchWorkBranchHelp, "切换全部本地仓库到工作分支：88")
     }
 
-    func test_ideaAvailabilityDependsOnInstallationAndDirectory() throws {
-        let repository = makeRepository(repoName: "blog")
-        let workplacePath = try makeLocalDirectory(named: "blog")
-        let localPath = try makeChildDirectory(named: "blog", in: workplacePath)
-        let workplace = makeWorkplace(
-            path: workplacePath,
-            selectedRepositoryIDs: [repository.id]
-        )
-        let actionState = WorkplaceActionState(
-            workplace: workplace,
-            repositories: [repository],
-            syncStates: [
-                RepositorySyncState(
-                    workplaceID: workplace.id,
-                    repositoryID: repository.id,
-                    status: .success,
-                    localPath: localPath,
-                    lastError: nil,
-                    lastSyncedAt: nil
-                )
-            ]
-        )
-
-        let withoutIDEA = WorkplaceDetailPresentationState(
-            actionState: actionState,
-            isPerformingAction: false,
-            supportsIDEA: false
-        )
-        let withIDEA = WorkplaceDetailPresentationState(
-            actionState: actionState,
-            isPerformingAction: false,
-            supportsIDEA: true
-        )
-
-        XCTAssertFalse(withoutIDEA.supportsIDEA)
-        XCTAssertFalse(withoutIDEA.canOpenInIDEA)
-        XCTAssertTrue(withIDEA.supportsIDEA)
-        XCTAssertTrue(withIDEA.canOpenInIDEA)
-    }
-
     private func makeWorkplace(
         path: String,
         selectedRepositoryIDs: [UUID],

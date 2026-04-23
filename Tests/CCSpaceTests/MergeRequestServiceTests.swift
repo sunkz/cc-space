@@ -34,6 +34,7 @@ private actor MergeRequestGitServiceStub: GitServicing {
     func remoteBranchExists(branch: String, remoteURL: String) async -> Bool { false }
     func checkRemoteBranches(branch: String, repositories: [RepositoryConfig]) async -> [RepositoryConfig] { [] }
     func mergeDefaultBranchIntoCurrent(in directory: String) async throws -> GitMergeDefaultBranchOutcome { .merged }
+    func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] { [] }
 }
 
 final class MergeRequestServiceTests: XCTestCase {

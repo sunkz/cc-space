@@ -18,16 +18,13 @@ final class WorkplaceRepositoryRowPresentationStateTests: XCTestCase {
             hasRetryRepository: true,
             hasPullRepository: true,
             allowsDeleteRepository: true,
-            actionsDisabled: false,
-            supportsIDEA: true
+            actionsDisabled: false
         )
 
         XCTAssertTrue(presentationState.canRetryClone)
         XCTAssertFalse(presentationState.canPullLatest)
         XCTAssertTrue(presentationState.canPushToRemote)
         XCTAssertTrue(presentationState.canOpenLocalActions)
-        XCTAssertTrue(presentationState.supportsIDEA)
-        XCTAssertTrue(presentationState.canOpenInIDEA)
         XCTAssertTrue(presentationState.canDeleteRepository)
         XCTAssertTrue(presentationState.canCreateMergeRequest)
         XCTAssertTrue(presentationState.canSwitchBranch)
@@ -50,15 +47,13 @@ final class WorkplaceRepositoryRowPresentationStateTests: XCTestCase {
             hasRetryRepository: true,
             hasPullRepository: true,
             allowsDeleteRepository: true,
-            actionsDisabled: false,
-            supportsIDEA: true
+            actionsDisabled: false
         )
 
         XCTAssertFalse(presentationState.canRetryClone)
         XCTAssertTrue(presentationState.canPullLatest)
         XCTAssertTrue(presentationState.canPushToRemote)
         XCTAssertTrue(presentationState.canOpenLocalActions)
-        XCTAssertTrue(presentationState.canOpenInIDEA)
         XCTAssertTrue(presentationState.canDeleteRepository)
         XCTAssertTrue(presentationState.canCreateMergeRequest)
         XCTAssertTrue(presentationState.canSwitchBranch)
@@ -81,15 +76,13 @@ final class WorkplaceRepositoryRowPresentationStateTests: XCTestCase {
             hasRetryRepository: true,
             hasPullRepository: true,
             allowsDeleteRepository: true,
-            actionsDisabled: true,
-            supportsIDEA: true
+            actionsDisabled: true
         )
 
         XCTAssertFalse(presentationState.canRetryClone)
         XCTAssertFalse(presentationState.canPullLatest)
         XCTAssertFalse(presentationState.canPushToRemote)
         XCTAssertTrue(presentationState.canOpenLocalActions)
-        XCTAssertTrue(presentationState.canOpenInIDEA)
         XCTAssertFalse(presentationState.canDeleteRepository)
         XCTAssertFalse(presentationState.canCreateMergeRequest)
         XCTAssertFalse(presentationState.canSwitchBranch)
@@ -111,12 +104,10 @@ final class WorkplaceRepositoryRowPresentationStateTests: XCTestCase {
             hasRetryRepository: true,
             hasPullRepository: true,
             allowsDeleteRepository: true,
-            actionsDisabled: false,
-            supportsIDEA: true
+            actionsDisabled: false
         )
 
         XCTAssertFalse(presentationState.canOpenLocalActions)
-        XCTAssertFalse(presentationState.canOpenInIDEA)
         XCTAssertFalse(presentationState.canPushToRemote)
         XCTAssertTrue(presentationState.canDeleteRepository)
         XCTAssertFalse(presentationState.canCreateMergeRequest)
@@ -140,12 +131,10 @@ final class WorkplaceRepositoryRowPresentationStateTests: XCTestCase {
             hasRetryRepository: true,
             hasPullRepository: true,
             allowsDeleteRepository: true,
-            actionsDisabled: false,
-            supportsIDEA: false
+            actionsDisabled: false
         )
 
         XCTAssertTrue(presentationState.canPushToRemote)
-        XCTAssertFalse(presentationState.canOpenInIDEA)
         XCTAssertTrue(presentationState.canDeleteRepository)
         XCTAssertNil(presentationState.visibleErrorMessage)
     }
@@ -166,12 +155,10 @@ final class WorkplaceRepositoryRowPresentationStateTests: XCTestCase {
             hasRetryRepository: true,
             hasPullRepository: true,
             allowsDeleteRepository: false,
-            actionsDisabled: false,
-            supportsIDEA: true
+            actionsDisabled: false
         )
 
         XCTAssertFalse(presentationState.canDeleteRepository)
-        XCTAssertTrue(presentationState.canOpenInIDEA)
     }
 
     func test_branchPillShowsCurrentBranchNameAndGenericTooltip() {

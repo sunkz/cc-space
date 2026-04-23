@@ -28,6 +28,8 @@ struct WorkplaceDetailView: View {
     let isPerformingAction: Bool
     let branchRefreshSeed: Int
     let gitService: GitServicing
+    let preferredOpenActionID: String?
+    let onSelectOpenAction: (String) -> Void
     @Binding var feedback: CCSpaceFeedback?
     @State private var branchSnapshots: [RepositoryBranchCacheKey: RepositoryBranchSnapshot] = [:]
     @State private var showingDeleteConfirmation = false
@@ -56,15 +58,18 @@ struct WorkplaceDetailView: View {
         )
     }
 
-    private var installedIDEAApplication: WorkplaceIDEAApplication? {
-        WorkplaceSystemActions.installedIDEAApplication
+    private var openActions: [OpenActionItem] {
+        WorkplaceSystemActions.allOpenActions
+    }
+
+    private var preferredOpenAction: OpenActionItem {
+        WorkplaceSystemActions.preferredOpenAction(id: preferredOpenActionID)
     }
 
     private var presentationState: WorkplaceDetailPresentationState {
         WorkplaceDetailPresentationState(
             actionState: actionState,
-            isPerformingAction: isPerformingAction,
-            supportsIDEA: installedIDEAApplication != nil
+            isPerformingAction: isPerformingAction
         )
     }
 
@@ -124,7 +129,9 @@ struct WorkplaceDetailView: View {
         onSwitchAllRepositoriesToWorkBranch: @escaping () -> Void = {},
         isPerformingAction: Bool = false,
         branchRefreshSeed: Int = 0,
-        feedback: Binding<CCSpaceFeedback?> = .constant(nil)
+        feedback: Binding<CCSpaceFeedback?> = .constant(nil),
+        preferredOpenActionID: String? = nil,
+        onSelectOpenAction: @escaping (String) -> Void = { _ in }
     ) {
         self.workplace = workplace
         self.repositories = repositories
@@ -148,6 +155,8 @@ struct WorkplaceDetailView: View {
         self.isPerformingAction = isPerformingAction
         self.branchRefreshSeed = branchRefreshSeed
         self._feedback = feedback
+        self.preferredOpenActionID = preferredOpenActionID
+        self.onSelectOpenAction = onSelectOpenAction
     }
 
     var body: some View {
@@ -167,7 +176,7 @@ struct WorkplaceDetailView: View {
             pushToolbarItem
             switchAllToDefaultBranchToolbarItem
             switchAllToWorkBranchToolbarItem
-            directoryToolbarItems
+            openActionToolbarItem
             deleteToolbarItem
         }
         .animation(.snappy(duration: 0.22), value: repositories.count)
@@ -264,55 +273,33 @@ struct WorkplaceDetailView: View {
         }
     }
 
-    private var finderToolbarItem: some ToolbarContent {
+    private var openActionToolbarItem: some ToolbarContent {
         ToolbarItem(placement: .primaryAction) {
-            Button {
-                WorkplaceSystemActions.showInFinder(at: workplace.path)
-            } label: {
-                Image(systemName: "finder")
-            }
-            .accessibilityLabel("在 Finder 中显示")
-            .ccspaceToolbarActionButton(prominent: true)
-            .disabled(!presentationState.canOpenDirectory)
-            .ccspaceQuickHelp("在 Finder 中显示")
-        }
-    }
-
-    private var terminalToolbarItem: some ToolbarContent {
-        ToolbarItem(placement: .primaryAction) {
-            Button {
-                handleOpenTerminal(at: workplace.path)
-            } label: {
-                Image(systemName: "terminal")
-            }
-            .accessibilityLabel("在终端中打开")
-            .ccspaceToolbarActionButton(prominent: true)
-            .disabled(!presentationState.canOpenDirectory)
-            .ccspaceQuickHelp("在终端中打开")
-        }
-    }
-
-    @ToolbarContentBuilder
-    private var directoryToolbarItems: some ToolbarContent {
-        finderToolbarItem
-        ideaToolbarItem
-        terminalToolbarItem
-    }
-
-    @ToolbarContentBuilder
-    private var ideaToolbarItem: some ToolbarContent {
-        if presentationState.supportsIDEA {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    handleOpenIDEA(at: workplace.path)
-                } label: {
-                    Image(systemName: "chevron.left.forwardslash.chevron.right")
+            Menu {
+                ForEach(openActions) { action in
+                    Button {
+                        handleOpenAction(action, at: workplace.path)
+                    } label: {
+                        Label {
+                            Text(action.displayName)
+                        } icon: {
+                            Image(nsImage: action.icon)
+                        }
+                    }
                 }
-                .accessibilityLabel("在 IDEA 中打开")
-                .ccspaceToolbarActionButton(prominent: true)
-                .disabled(!presentationState.canOpenInIDEA)
-                .ccspaceQuickHelp("在 IDEA 中打开")
+            } label: {
+                Image(nsImage: preferredOpenAction.icon)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 15, height: 15)
+            } primaryAction: {
+                handleOpenAction(preferredOpenAction, at: workplace.path)
             }
+            .menuStyle(.borderlessButton)
+            .accessibilityLabel("在 \(preferredOpenAction.displayName) 中打开")
+            .ccspaceToolbarActionButton(prominent: true)
+            .disabled(!presentationState.canOpenDirectory)
+            .ccspaceQuickHelp("在 \(preferredOpenAction.displayName) 中打开")
         }
     }
 
@@ -409,12 +396,10 @@ struct WorkplaceDetailView: View {
                                 onCreateMergeRequest(state, repository, targetBranch)
                             },
                             actionsDisabled: presentationState.isActionLocked,
-                            supportsIDEA: presentationState.supportsIDEA,
-                            onOpenFinder: { path in
-                                WorkplaceSystemActions.showInFinder(at: path)
-                            },
-                            onOpenIDEA: handleOpenIDEA(at:),
-                            onOpenTerminal: handleOpenTerminal(at:),
+                            openActions: openActions,
+                            preferredOpenAction: preferredOpenAction,
+                            onOpenAction: handleOpenAction,
+                            gitService: gitService,
                             onDelete: {
                                 onDeleteRepository(state, repositoryName)
                             }
@@ -425,23 +410,13 @@ struct WorkplaceDetailView: View {
         }
     }
     
-    private func handleOpenTerminal(at path: String) {
+    private func handleOpenAction(_ action: OpenActionItem, at path: String) {
+        onSelectOpenAction(action.id)
         do {
-            try WorkplaceSystemActions.openTerminal(at: path)
+            try WorkplaceSystemActions.performOpenAction(action, at: path)
         } catch {
             feedback = WorkplaceDetailFeedbackFactory.actionError(
-                action: "打开终端",
-                error: error
-            )
-        }
-    }
-
-    private func handleOpenIDEA(at path: String) {
-        do {
-            try WorkplaceSystemActions.openInIDEA(at: path)
-        } catch {
-            feedback = WorkplaceDetailFeedbackFactory.actionError(
-                action: "打开 IDEA",
+                action: "打开 \(action.displayName)",
                 error: error
             )
         }

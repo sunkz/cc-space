@@ -20,12 +20,15 @@ struct WorkplaceRepositoryRowView: View {
     let onMergeDefaultBranchIntoCurrent: () -> Void
     let onCreateMergeRequest: (RepositoryConfig, String?) -> Void
     let actionsDisabled: Bool
-    let supportsIDEA: Bool
-    let onOpenFinder: (String) -> Void
-    let onOpenIDEA: (String) -> Void
-    let onOpenTerminal: (String) -> Void
+    let openActions: [OpenActionItem]
+    let preferredOpenAction: OpenActionItem
+    let onOpenAction: (OpenActionItem, String) -> Void
+    let gitService: GitServicing
     let onDelete: () -> Void
     @State private var showingDeleteConfirmation = false
+    @State private var showingCommitLog = false
+    @State private var commitLogEntries: [GitCommitEntry] = []
+    @State private var isLoadingCommitLog = false
 
     private var presentationState: WorkplaceRepositoryRowPresentationState {
         WorkplaceRepositoryRowPresentationState(
@@ -33,8 +36,7 @@ struct WorkplaceRepositoryRowView: View {
             hasRetryRepository: retryRepository != nil,
             hasPullRepository: pullRepository != nil,
             allowsDeleteRepository: allowsDeleteRepository,
-            actionsDisabled: actionsDisabled,
-            supportsIDEA: supportsIDEA
+            actionsDisabled: actionsDisabled
         )
     }
 
@@ -147,31 +149,30 @@ struct WorkplaceRepositoryRowView: View {
                                 }
                             }
 
-                            Button {
-                                onOpenFinder(state.localPath)
-                            } label: {
-                                Image(systemName: "finder")
-                            }
-                            .ccspaceIconActionButton()
-                            .ccspaceQuickHelp("在 Finder 中显示")
-
-                            if presentationState.canOpenInIDEA {
-                                Button {
-                                    onOpenIDEA(state.localPath)
-                                } label: {
-                                    Image(systemName: "chevron.left.forwardslash.chevron.right")
+                            Menu {
+                                ForEach(openActions) { action in
+                                    Button {
+                                        onOpenAction(action, state.localPath)
+                                    } label: {
+                                        Label {
+                                            Text(action.displayName)
+                                        } icon: {
+                                            Image(nsImage: action.icon)
+                                        }
+                                    }
                                 }
-                                .ccspaceIconActionButton()
-                                .ccspaceQuickHelp("在 IDEA 中打开")
-                            }
-
-                            Button {
-                                onOpenTerminal(state.localPath)
                             } label: {
-                                Image(systemName: "terminal")
+                                Image(nsImage: preferredOpenAction.icon)
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fit)
+                                    .frame(width: 12, height: 12)
+                            } primaryAction: {
+                                onOpenAction(preferredOpenAction, state.localPath)
                             }
-                            .ccspaceIconActionButton()
-                            .ccspaceQuickHelp("在终端中打开")
+                            .menuStyle(.borderlessButton)
+                            .menuIndicator(.hidden)
+                            .fixedSize()
+                            .ccspaceQuickHelp("在 \(preferredOpenAction.displayName) 中打开")
                         }
 
                         Menu {
@@ -203,6 +204,24 @@ struct WorkplaceRepositoryRowView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text(deleteConfirmationState.message)
+        }
+        .popover(isPresented: $showingCommitLog) {
+            CommitLogPopoverView(
+                repositoryName: displayName,
+                commits: commitLogEntries,
+                isLoading: isLoadingCommitLog
+            )
+        }
+    }
+
+    private func loadCommitLog() {
+        isLoadingCommitLog = true
+        commitLogEntries = []
+        let localPath = state.localPath
+        Task {
+            let entries = await gitService.recentCommits(in: localPath, count: 20)
+            isLoadingCommitLog = false
+            commitLogEntries = entries
         }
     }
 
@@ -316,22 +335,23 @@ struct WorkplaceRepositoryRowView: View {
                 }
             }
             Divider()
-            Button {
-                onOpenFinder(state.localPath)
-            } label: {
-                Label("在 Finder 中显示", systemImage: "finder")
-            }
-            if presentationState.canOpenInIDEA {
+            ForEach(openActions) { action in
                 Button {
-                    onOpenIDEA(state.localPath)
+                    onOpenAction(action, state.localPath)
                 } label: {
-                    Label("在 IDEA 中打开", systemImage: "chevron.left.forwardslash.chevron.right")
+                    Label {
+                        Text(action.displayName)
+                    } icon: {
+                        Image(nsImage: action.icon)
+                    }
                 }
             }
+            Divider()
             Button {
-                onOpenTerminal(state.localPath)
+                showingCommitLog = true
+                loadCommitLog()
             } label: {
-                Label("在终端中打开", systemImage: "terminal")
+                Label("查看提交记录", systemImage: "clock.arrow.circlepath")
             }
         }
         if showsPrimaryActionMenuItems {

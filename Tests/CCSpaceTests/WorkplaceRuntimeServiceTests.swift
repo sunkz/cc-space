@@ -105,6 +105,8 @@ private actor WorkplaceRuntimeGitServiceSpy: GitServicing {
         return mergeOutcomesByDirectory[directory] ?? .merged
     }
 
+    func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] { [] }
+
     func cloneDirectories() async -> [String] {
         cloneCalls.map(\.directory)
     }
@@ -251,6 +253,8 @@ private final class ConcurrentPushGitServiceSpy: GitServicing, @unchecked Sendab
     func mergeDefaultBranchIntoCurrent(in directory: String) async throws -> GitMergeDefaultBranchOutcome {
         .merged
     }
+
+    func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] { [] }
 
     func maxActiveCount() async -> Int {
         await recorder.maxActiveCount()

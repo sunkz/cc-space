@@ -342,23 +342,27 @@ struct RootSplitView: View {
                 }
             },
             onCreateMergeRequest: { state, repository, targetBranch in
-                detailActionCoordinator.run(
-                    actionName: "创建 MR",
-                    successFeedback: {
-                        WorkplaceDetailFeedbackFactory.openMergeRequest(
-                            repositoryName: repository.repoName
+                RootSplitWorkplaceActions.runCreateMergeRequest(
+                    coordinator: detailActionCoordinator,
+                    repositoryName: repository.repoName,
+                    pushRepository: {
+                        _ = try await workplaceRuntimeService.pushRepository(
+                            for: state,
+                            in: workplace
                         )
+                    },
+                    resolveMergeRequestURL: {
+                        try await MergeRequestService.createURL(
+                            repository: repository,
+                            syncState: state,
+                            gitService: gitService,
+                            targetBranch: targetBranch
+                        )
+                    },
+                    openInBrowser: { mergeRequestURL in
+                        try WorkplaceSystemActions.openInBrowser(mergeRequestURL)
                     }
-                ) {
-                    try await gitService.push(in: state.localPath)
-                    let mergeRequestURL = try await MergeRequestService.createURL(
-                        repository: repository,
-                        syncState: state,
-                        gitService: gitService,
-                        targetBranch: targetBranch
-                    )
-                    try WorkplaceSystemActions.openInBrowser(mergeRequestURL)
-                }
+                )
             },
             onDeleteRepository: { state, repositoryName in
                 detailActionCoordinator.run(

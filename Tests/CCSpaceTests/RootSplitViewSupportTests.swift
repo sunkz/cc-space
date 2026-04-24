@@ -126,6 +126,37 @@ final class RootSplitViewSupportTests: XCTestCase {
         XCTAssertEqual(coordinator.branchRefreshSeed, 0)
     }
 
+    func test_runCreateMergeRequestRefreshesBranchesAfterSuccess() async throws {
+        let coordinator = WorkplaceDetailActionCoordinator()
+        let mergeRequestURL = try XCTUnwrap(URL(string: "https://example.com/mr"))
+        var pushCount = 0
+        var openedURLs: [URL] = []
+
+        RootSplitWorkplaceActions.runCreateMergeRequest(
+            coordinator: coordinator,
+            repositoryName: "api",
+            pushRepository: {
+                pushCount += 1
+            },
+            resolveMergeRequestURL: {
+                mergeRequestURL
+            },
+            openInBrowser: { url in
+                openedURLs.append(url)
+            }
+        )
+
+        await waitUntil(coordinator.isRunningAction == false)
+
+        XCTAssertEqual(pushCount, 1)
+        XCTAssertEqual(openedURLs, [mergeRequestURL])
+        XCTAssertEqual(
+            coordinator.feedback,
+            CCSpaceFeedback(style: .success, message: "已打开 api 的 MR 创建页")
+        )
+        XCTAssertEqual(coordinator.branchRefreshSeed, 1)
+    }
+
     private func waitUntil(
         _ condition: @autoclosure @escaping () -> Bool,
         timeoutNanoseconds: UInt64 = 1_000_000_000,

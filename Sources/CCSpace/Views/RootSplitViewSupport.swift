@@ -84,3 +84,28 @@ final class WorkplaceDetailActionCoordinator: ObservableObject {
         }
     }
 }
+
+enum RootSplitWorkplaceActions {
+    @MainActor
+    static func runCreateMergeRequest(
+        coordinator: WorkplaceDetailActionCoordinator,
+        repositoryName: String,
+        pushRepository: @escaping @MainActor () async throws -> Void,
+        resolveMergeRequestURL: @escaping @MainActor () async throws -> URL,
+        openInBrowser: @escaping @MainActor (URL) throws -> Void
+    ) {
+        coordinator.run(
+            actionName: "创建 MR",
+            refreshBranches: true,
+            successFeedback: {
+                WorkplaceDetailFeedbackFactory.openMergeRequest(
+                    repositoryName: repositoryName
+                )
+            }
+        ) {
+            try await pushRepository()
+            let mergeRequestURL = try await resolveMergeRequestURL()
+            try openInBrowser(mergeRequestURL)
+        }
+    }
+}

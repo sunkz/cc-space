@@ -13,6 +13,7 @@ struct WorkplaceDetailView: View {
     let onEdit: () -> Void
     let onDelete: () -> Void
     let onRetry: (RepositoryConfig) -> Void
+    let onPullAll: () -> Void
     let onPush: () -> Void
     let onPull: (RepositoryConfig) -> Void
     let onPushRepository: (RepositorySyncState, String) -> Void
@@ -115,6 +116,7 @@ struct WorkplaceDetailView: View {
         onEdit: @escaping () -> Void = {},
         onDelete: @escaping () -> Void = {},
         onRetry: @escaping (RepositoryConfig) -> Void = { _ in },
+        onPullAll: @escaping () -> Void = {},
         onPush: @escaping () -> Void = {},
         onPull: @escaping (RepositoryConfig) -> Void = { _ in },
         onPushRepository: @escaping (RepositorySyncState, String) -> Void = { _, _ in },
@@ -140,6 +142,7 @@ struct WorkplaceDetailView: View {
         self.onEdit = onEdit
         self.onDelete = onDelete
         self.onRetry = onRetry
+        self.onPullAll = onPullAll
         self.onPush = onPush
         self.onPull = onPull
         self.onPushRepository = onPushRepository
@@ -173,6 +176,7 @@ struct WorkplaceDetailView: View {
         .toolbar {
             operationProgressToolbarItem
             editToolbarItem
+            pullToolbarItem
             pushToolbarItem
             switchAllToDefaultBranchToolbarItem
             switchAllToWorkBranchToolbarItem
@@ -244,6 +248,20 @@ struct WorkplaceDetailView: View {
             .ccspaceToolbarActionButton(prominent: true)
             .disabled(!presentationState.canPushAllRepositories)
             .ccspaceQuickHelp(presentationState.pushHelp)
+        }
+    }
+
+    private var pullToolbarItem: some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                onPullAll()
+            } label: {
+                Image(systemName: "square.and.arrow.down")
+            }
+            .accessibilityLabel("Pull 工作区")
+            .ccspaceToolbarActionButton(prominent: true)
+            .disabled(!presentationState.canSyncAllRepositories)
+            .ccspaceQuickHelp(presentationState.syncHelp)
         }
     }
 

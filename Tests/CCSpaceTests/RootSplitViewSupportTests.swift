@@ -126,6 +126,25 @@ final class RootSplitViewSupportTests: XCTestCase {
         XCTAssertEqual(coordinator.branchRefreshSeed, 0)
     }
 
+    func test_runPullRepositoriesPublishesSyncFeedback() async {
+        let coordinator = WorkplaceDetailActionCoordinator()
+
+        RootSplitWorkplaceActions.runPullRepositories(
+            coordinator: coordinator,
+            pullRepositories: {
+                RepositoryPullResult(successCount: 2, failedCount: 0, skippedCount: 1)
+            }
+        )
+
+        await waitUntil(coordinator.isRunningAction == false)
+
+        XCTAssertEqual(
+            coordinator.feedback,
+            CCSpaceFeedback(style: .info, message: "已同步 2 个仓库，跳过 1 个")
+        )
+        XCTAssertEqual(coordinator.branchRefreshSeed, 0)
+    }
+
     func test_runCreateMergeRequestRefreshesBranchesAfterSuccess() async throws {
         let coordinator = WorkplaceDetailActionCoordinator()
         let mergeRequestURL = try XCTUnwrap(URL(string: "https://example.com/mr"))

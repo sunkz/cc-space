@@ -275,7 +275,7 @@ struct WorkplaceRepositoryRowView: View {
             Button {
                 onPull(pullRepository)
             } label: {
-                Label("Pull 最新代码", systemImage: "arrow.trianglehead.2.clockwise")
+                Label("Pull 最新代码", systemImage: "square.and.arrow.down")
             }
             .disabled(!presentationState.canPullLatest)
         }

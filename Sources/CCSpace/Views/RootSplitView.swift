@@ -211,6 +211,14 @@ struct RootSplitView: View {
                     try await workplaceRuntimeService.retryClone(repository: repository, in: workplace)
                 }
             },
+            onPullAll: {
+                RootSplitWorkplaceActions.runPullRepositories(
+                    coordinator: detailActionCoordinator,
+                    pullRepositories: {
+                        await workplaceRuntimeService.pullRepositories(in: workplace)
+                    }
+                )
+            },
             onPush: {
                 var result: RepositoryPushResult?
                 detailActionCoordinator.run(

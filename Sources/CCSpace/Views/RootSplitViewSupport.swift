@@ -87,6 +87,23 @@ final class WorkplaceDetailActionCoordinator: ObservableObject {
 
 enum RootSplitWorkplaceActions {
     @MainActor
+    static func runPullRepositories(
+        coordinator: WorkplaceDetailActionCoordinator,
+        pullRepositories: @escaping @MainActor () async -> RepositoryPullResult
+    ) {
+        var result: RepositoryPullResult?
+        coordinator.run(
+            actionName: "同步工作区",
+            successFeedback: {
+                guard let result else { return nil }
+                return WorkplaceDetailFeedbackFactory.syncAll(result: result)
+            }
+        ) {
+            result = await pullRepositories()
+        }
+    }
+
+    @MainActor
     static func runCreateMergeRequest(
         coordinator: WorkplaceDetailActionCoordinator,
         repositoryName: String,

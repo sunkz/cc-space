@@ -47,6 +47,7 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
         XCTAssertFalse(presentationState.isActionLocked)
         XCTAssertFalse(presentationState.showsOperationProgress)
         XCTAssertTrue(presentationState.canEditWorkplace)
+        XCTAssertTrue(presentationState.canRefreshAllRepositories)
         XCTAssertTrue(presentationState.canSyncAllRepositories)
         XCTAssertTrue(presentationState.canPushAllRepositories)
         XCTAssertTrue(presentationState.canMergeDefaultBranchIntoCurrent)
@@ -55,6 +56,7 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
         XCTAssertTrue(presentationState.canOpenDirectory)
         XCTAssertTrue(presentationState.canDeleteWorkplace)
         XCTAssertEqual(presentationState.editHelp, "编辑工作区")
+        XCTAssertEqual(presentationState.refreshHelp, "刷新全部本地仓库状态")
         XCTAssertEqual(presentationState.syncHelp, "同步全部已克隆仓库")
         XCTAssertEqual(presentationState.pushHelp, "推送全部需要推送的仓库")
         XCTAssertEqual(presentationState.switchWorkBranchHelp, "请先配置工作分支名称")
@@ -81,6 +83,7 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
         XCTAssertTrue(presentationState.isActionLocked)
         XCTAssertTrue(presentationState.showsOperationProgress)
         XCTAssertFalse(presentationState.canEditWorkplace)
+        XCTAssertFalse(presentationState.canRefreshAllRepositories)
         XCTAssertFalse(presentationState.canSyncAllRepositories)
         XCTAssertFalse(presentationState.canPushAllRepositories)
         XCTAssertFalse(presentationState.canMergeDefaultBranchIntoCurrent)
@@ -89,6 +92,7 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
         XCTAssertTrue(presentationState.canOpenDirectory)
         XCTAssertFalse(presentationState.canDeleteWorkplace)
         XCTAssertEqual(presentationState.editHelp, "工作区操作进行中")
+        XCTAssertEqual(presentationState.refreshHelp, "工作区操作进行中")
         XCTAssertEqual(presentationState.syncHelp, "工作区操作进行中")
         XCTAssertEqual(presentationState.pushHelp, "工作区操作进行中")
         XCTAssertEqual(presentationState.switchWorkBranchHelp, "工作区操作进行中")
@@ -220,10 +224,12 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
             isPerformingAction: false
         )
 
+        XCTAssertTrue(presentationState.canRefreshAllRepositories)
         XCTAssertTrue(presentationState.canMergeDefaultBranchIntoCurrent)
         XCTAssertTrue(presentationState.canPushAllRepositories)
         XCTAssertTrue(presentationState.canSwitchRepositoriesToDefaultBranch)
         XCTAssertTrue(presentationState.canSwitchRepositoriesToWorkBranch)
+        XCTAssertEqual(presentationState.refreshHelp, "刷新全部本地仓库状态")
         XCTAssertEqual(presentationState.switchWorkBranchHelp, "切换全部本地仓库到工作分支：88")
     }
 

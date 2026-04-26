@@ -88,6 +88,33 @@ final class WorkplaceDetailFeedbackFactoryTests: XCTestCase {
         XCTAssertEqual(feedback.message, "已从工作区删除 blog")
     }
 
+    func test_refreshRepositoryStatusReturnsSuccessFeedback() {
+        let feedback = WorkplaceDetailFeedbackFactory.refreshRepositoryStatus(
+            repositoryName: "blog"
+        )
+
+        XCTAssertEqual(feedback.style, .success)
+        XCTAssertEqual(feedback.message, "已刷新 blog 状态")
+    }
+
+    func test_refreshAllRepositoryStatusesReturnsSuccessFeedback() {
+        let feedback = WorkplaceDetailFeedbackFactory.refreshAllRepositoryStatuses(
+            repositoryCount: 3
+        )
+
+        XCTAssertEqual(feedback.style, .success)
+        XCTAssertEqual(feedback.message, "已刷新 3 个仓库状态")
+    }
+
+    func test_refreshAllRepositoryStatusesReturnsInfoWhenNoLocalRepositoryExists() {
+        let feedback = WorkplaceDetailFeedbackFactory.refreshAllRepositoryStatuses(
+            repositoryCount: 0
+        )
+
+        XCTAssertEqual(feedback.style, .info)
+        XCTAssertEqual(feedback.message, "没有可刷新的本地仓库")
+    }
+
     func test_syncRepositoryReturnsInfoFeedbackWhenRepositoryIsSkipped() {
         let feedback = WorkplaceDetailFeedbackFactory.syncRepository(
             repositoryName: "blog",

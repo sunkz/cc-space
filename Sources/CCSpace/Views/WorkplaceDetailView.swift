@@ -35,6 +35,7 @@ struct WorkplaceDetailView: View {
     @State private var branchSnapshots: [RepositoryBranchCacheKey: RepositoryBranchSnapshot] = [:]
     @State private var showingDeleteConfirmation = false
     @State private var periodicRefreshSeed = 0
+    @State private var manualRefreshSeed = 0
 
     private var workplaceSyncStates: [RepositorySyncState] {
         syncStates.filter { $0.workplaceID == workplace.id }
@@ -98,6 +99,7 @@ struct WorkplaceDetailView: View {
         hasher.combine(workplace.branch)
         hasher.combine(branchRefreshSeed)
         hasher.combine(periodicRefreshSeed)
+        hasher.combine(manualRefreshSeed)
         return hasher.finalize()
     }
 
@@ -176,6 +178,7 @@ struct WorkplaceDetailView: View {
         .toolbar {
             operationProgressToolbarItem
             editToolbarItem
+            refreshToolbarItem
             pullToolbarItem
             pushToolbarItem
             switchAllToDefaultBranchToolbarItem
@@ -248,6 +251,20 @@ struct WorkplaceDetailView: View {
             .ccspaceToolbarActionButton(prominent: true)
             .disabled(!presentationState.canPushAllRepositories)
             .ccspaceQuickHelp(presentationState.pushHelp)
+        }
+    }
+
+    private var refreshToolbarItem: some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                requestStatusRefresh()
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .accessibilityLabel("刷新全部仓库状态")
+            .ccspaceToolbarActionButton(prominent: true)
+            .disabled(!presentationState.canRefreshAllRepositories)
+            .ccspaceQuickHelp(presentationState.refreshHelp)
         }
     }
 
@@ -392,6 +409,9 @@ struct WorkplaceDetailView: View {
                             pullRepository: repository,
                             allowsDeleteRepository: workplace.selectedRepositoryIDs.count > 1,
                             onRetry: onRetry,
+                            onRefreshStatus: {
+                                requestStatusRefresh(repositoryName: repositoryName)
+                            },
                             onPull: onPull,
                             onPush: {
                                 onPushRepository(state, repositoryName)
@@ -438,5 +458,19 @@ struct WorkplaceDetailView: View {
                 error: error
             )
         }
+    }
+
+    private func requestStatusRefresh(repositoryName: String? = nil) {
+        guard presentationState.canRefreshAllRepositories else { return }
+        if let repositoryName {
+            feedback = WorkplaceDetailFeedbackFactory.refreshRepositoryStatus(
+                repositoryName: repositoryName
+            )
+        } else {
+            feedback = WorkplaceDetailFeedbackFactory.refreshAllRepositoryStatuses(
+                repositoryCount: workplaceSyncStates.filter(\.hasLocalDirectory).count
+            )
+        }
+        manualRefreshSeed += 1
     }
 }

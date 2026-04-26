@@ -11,6 +11,7 @@ struct WorkplaceRepositoryRowView: View {
     let pullRepository: RepositoryConfig?
     let allowsDeleteRepository: Bool
     let onRetry: (RepositoryConfig) -> Void
+    let onRefreshStatus: () -> Void
     let onPull: (RepositoryConfig) -> Void
     let onPush: () -> Void
     let onSwitchBranch: (String) -> Void
@@ -270,6 +271,14 @@ struct WorkplaceRepositoryRowView: View {
                 Label("重新克隆", systemImage: "arrow.clockwise")
             }
             .disabled(!presentationState.canRetryClone)
+        }
+        if presentationState.canOpenLocalActions {
+            Button {
+                onRefreshStatus()
+            } label: {
+                Label("刷新仓库状态", systemImage: "arrow.clockwise")
+            }
+            .disabled(!presentationState.canRefreshStatus)
         }
         if let pullRepository, state.status == .success, state.hasLocalDirectory {
             Button {

@@ -193,6 +193,7 @@ struct WorkplaceDetailPresentationState {
     let isActionLocked: Bool
     let showsOperationProgress: Bool
     let canEditWorkplace: Bool
+    let canRefreshAllRepositories: Bool
     let canSyncAllRepositories: Bool
     let canPushAllRepositories: Bool
     let canMergeDefaultBranchIntoCurrent: Bool
@@ -201,6 +202,7 @@ struct WorkplaceDetailPresentationState {
     let canOpenDirectory: Bool
     let canDeleteWorkplace: Bool
     let editHelp: String
+    let refreshHelp: String
     let syncHelp: String
     let pushHelp: String
     let mergeDefaultBranchHelp: String
@@ -219,6 +221,7 @@ struct WorkplaceDetailPresentationState {
         self.isActionLocked = isActionLocked
         showsOperationProgress = isActionLocked
         canEditWorkplace = !isActionLocked
+        canRefreshAllRepositories = actionState.hasLocalRepositories && !isActionLocked
         canSyncAllRepositories = actionState.hasPullableRepositories && !isActionLocked
         canPushAllRepositories = actionState.hasLocalRepositories && !isActionLocked
         canMergeDefaultBranchIntoCurrent = actionState.hasLocalRepositories && !isActionLocked
@@ -230,6 +233,7 @@ struct WorkplaceDetailPresentationState {
         canOpenDirectory = actionState.canOpenDirectory
         canDeleteWorkplace = !isActionLocked
         editHelp = isActionLocked ? "工作区操作进行中" : "编辑工作区"
+        refreshHelp = isActionLocked ? "工作区操作进行中" : "刷新全部本地仓库状态"
         syncHelp = isActionLocked ? "工作区操作进行中" : "同步全部已克隆仓库"
         pushHelp = isActionLocked ? "工作区操作进行中" : "推送全部需要推送的仓库"
         mergeDefaultBranchHelp = isActionLocked ? "工作区操作进行中" : "将默认分支代码合并到当前分支"
@@ -317,6 +321,7 @@ struct WorkplaceRepositoryBranchPillState: Equatable {
 
 struct WorkplaceRepositoryRowPresentationState {
     let canRetryClone: Bool
+    let canRefreshStatus: Bool
     let canPullLatest: Bool
     let canPushToRemote: Bool
     let canOpenLocalActions: Bool
@@ -336,6 +341,7 @@ struct WorkplaceRepositoryRowPresentationState {
             syncState.status == .failed &&
             hasRetryRepository &&
             !actionsDisabled
+        canRefreshStatus = syncState.hasLocalDirectory && !actionsDisabled
         canPullLatest =
             syncState.status == .success &&
             hasPullRepository &&
@@ -443,6 +449,24 @@ enum WorkplaceDetailFeedbackFactory {
         repositoryName: String
     ) -> CCSpaceFeedback {
         CCSpaceFeedbackFactory.actionSuccess("已从工作区删除 \(repositoryName)")
+    }
+
+    static func refreshRepositoryStatus(
+        repositoryName: String
+    ) -> CCSpaceFeedback {
+        CCSpaceFeedbackFactory.actionSuccess("已刷新 \(repositoryName) 状态")
+    }
+
+    static func refreshAllRepositoryStatuses(
+        repositoryCount: Int
+    ) -> CCSpaceFeedback {
+        guard repositoryCount > 0 else {
+            return CCSpaceFeedback(
+                style: .info,
+                message: "没有可刷新的本地仓库"
+            )
+        }
+        return CCSpaceFeedbackFactory.actionSuccess("已刷新 \(repositoryCount) 个仓库状态")
     }
 
     static func mergeRepositoryDefaultBranchIntoCurrent(

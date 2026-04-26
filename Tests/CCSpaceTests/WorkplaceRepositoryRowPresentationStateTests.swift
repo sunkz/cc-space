@@ -22,6 +22,7 @@ final class WorkplaceRepositoryRowPresentationStateTests: XCTestCase {
         )
 
         XCTAssertTrue(presentationState.canRetryClone)
+        XCTAssertTrue(presentationState.canRefreshStatus)
         XCTAssertFalse(presentationState.canPullLatest)
         XCTAssertTrue(presentationState.canPushToRemote)
         XCTAssertTrue(presentationState.canOpenLocalActions)
@@ -51,6 +52,7 @@ final class WorkplaceRepositoryRowPresentationStateTests: XCTestCase {
         )
 
         XCTAssertFalse(presentationState.canRetryClone)
+        XCTAssertTrue(presentationState.canRefreshStatus)
         XCTAssertTrue(presentationState.canPullLatest)
         XCTAssertTrue(presentationState.canPushToRemote)
         XCTAssertTrue(presentationState.canOpenLocalActions)
@@ -80,6 +82,7 @@ final class WorkplaceRepositoryRowPresentationStateTests: XCTestCase {
         )
 
         XCTAssertFalse(presentationState.canRetryClone)
+        XCTAssertFalse(presentationState.canRefreshStatus)
         XCTAssertFalse(presentationState.canPullLatest)
         XCTAssertFalse(presentationState.canPushToRemote)
         XCTAssertTrue(presentationState.canOpenLocalActions)
@@ -107,6 +110,7 @@ final class WorkplaceRepositoryRowPresentationStateTests: XCTestCase {
             actionsDisabled: false
         )
 
+        XCTAssertFalse(presentationState.canRefreshStatus)
         XCTAssertFalse(presentationState.canOpenLocalActions)
         XCTAssertFalse(presentationState.canPushToRemote)
         XCTAssertTrue(presentationState.canDeleteRepository)

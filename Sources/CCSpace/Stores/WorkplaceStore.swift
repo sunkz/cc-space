@@ -125,6 +125,20 @@ final class WorkplaceStore: ObservableObject {
         syncStates = newSyncStates
     }
 
+    private func mutateWorkplace(
+        _ workplaceID: UUID,
+        update: (inout Workplace) -> Bool
+    ) throws {
+        guard let index = workplaces.firstIndex(where: { $0.id == workplaceID }) else { return }
+
+        var updatedWorkplaces = workplaces
+        let changed = update(&updatedWorkplaces[index])
+        guard changed else { return }
+
+        updatedWorkplaces[index].updatedAt = .now
+        try persistWorkplaces(updatedWorkplaces)
+    }
+
     func createWorkplace(name: String, rootPath: String, selectedRepositories: [RepositoryConfig], branch: String? = nil) throws
         -> Workplace
     {
@@ -192,6 +206,22 @@ final class WorkplaceStore: ObservableObject {
         }
 
         try persist(workplaces: updatedWorkplaces, syncStates: updatedSyncStates)
+    }
+
+    func setPinned(_ isPinned: Bool, for workplaceID: UUID) throws {
+        try mutateWorkplace(workplaceID) { workplace in
+            guard workplace.isPinned != isPinned else { return false }
+            workplace.isPinned = isPinned
+            return true
+        }
+    }
+
+    func setArchived(_ isArchived: Bool, for workplaceID: UUID) throws {
+        try mutateWorkplace(workplaceID) { workplace in
+            guard workplace.isArchived != isArchived else { return false }
+            workplace.isArchived = isArchived
+            return true
+        }
     }
 
     func replaceSyncStates(_ newStates: [RepositorySyncState], for workplaceID: UUID) throws {

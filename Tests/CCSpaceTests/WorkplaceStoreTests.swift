@@ -131,6 +131,89 @@ final class WorkplaceStoreTests: XCTestCase {
         XCTAssertEqual(secondStore.syncStates.first?.repositoryID, repository.id)
     }
 
+    func test_loadLegacyWorkplaceJSONDefaultsPinnedAndArchivedFlagsToFalse() throws {
+        let root = tempRoot()
+        let fileStore = JSONFileStore(rootDirectory: root)
+        let legacyJSON = """
+        [
+          {
+            "id": "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
+            "name": "legacy",
+            "path": "/tmp/legacy",
+            "selectedRepositoryIDs": ["BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB"],
+            "branch": "feature/legacy",
+            "createdAt": "1970-01-01T00:00:00Z",
+            "updatedAt": "1970-01-01T00:00:00Z"
+          }
+        ]
+        """
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: true
+        )
+        try legacyJSON.write(
+            to: root.appendingPathComponent("workplaces.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try "[]".write(
+            to: root.appendingPathComponent("sync-states.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let store = WorkplaceStore(fileStore: fileStore)
+
+        let workplace = try XCTUnwrap(store.workplaces.first)
+        XCTAssertFalse(workplace.isPinned)
+        XCTAssertFalse(workplace.isArchived)
+    }
+
+    func test_setPinnedPersistsPinnedFlagAndUpdatedAt() throws {
+        let root = tempRoot()
+        let fileStore = JSONFileStore(rootDirectory: root)
+        let store = WorkplaceStore(fileStore: fileStore)
+        let repository = makeRepository(repoName: "api")
+        let workplace = try store.createWorkplace(
+            name: "ios-dev",
+            rootPath: tempRoot().path,
+            selectedRepositories: [repository]
+        )
+
+        try store.setPinned(true, for: workplace.id)
+
+        let updatedWorkplace = try XCTUnwrap(store.workplaces.first(where: { $0.id == workplace.id }))
+        XCTAssertTrue(updatedWorkplace.isPinned)
+        XCTAssertGreaterThan(updatedWorkplace.updatedAt, workplace.updatedAt)
+
+        let reloadedStore = WorkplaceStore(fileStore: fileStore)
+        XCTAssertTrue(reloadedStore.workplaces.first(where: { $0.id == workplace.id })?.isPinned == true)
+    }
+
+    func test_setArchivedPersistsArchivedFlagAndKeepsSelectedRepositories() throws {
+        let root = tempRoot()
+        let fileStore = JSONFileStore(rootDirectory: root)
+        let store = WorkplaceStore(fileStore: fileStore)
+        let repository = makeRepository(repoName: "api")
+        let workplace = try store.createWorkplace(
+            name: "ios-dev",
+            rootPath: tempRoot().path,
+            selectedRepositories: [repository]
+        )
+
+        try store.setArchived(true, for: workplace.id)
+
+        let updatedWorkplace = try XCTUnwrap(store.workplaces.first(where: { $0.id == workplace.id }))
+        XCTAssertTrue(updatedWorkplace.isArchived)
+        XCTAssertEqual(updatedWorkplace.selectedRepositoryIDs, [repository.id])
+        XCTAssertGreaterThan(updatedWorkplace.updatedAt, workplace.updatedAt)
+
+        let reloadedStore = WorkplaceStore(fileStore: fileStore)
+        let persistedWorkplace = try XCTUnwrap(reloadedStore.workplaces.first(where: { $0.id == workplace.id }))
+        XCTAssertTrue(persistedWorkplace.isArchived)
+        XCTAssertEqual(persistedWorkplace.selectedRepositoryIDs, [repository.id])
+    }
+
     func test_updateRepositoriesUpdatesSelectedRepositoryIDs() throws {
         let fileStore = JSONFileStore(rootDirectory: tempRoot())
         let store = WorkplaceStore(fileStore: fileStore)

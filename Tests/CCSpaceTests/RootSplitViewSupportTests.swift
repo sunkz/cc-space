@@ -176,6 +176,33 @@ final class RootSplitViewSupportTests: XCTestCase {
         XCTAssertEqual(coordinator.branchRefreshSeed, 1)
     }
 
+    func test_createSheetPresentationKeepsDuplicateSeedSelections() {
+        let repositoryID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+        let seed = WorkplaceCreateSeed(
+            name: "aso 副本",
+            branch: "feature-skz-aso",
+            selectedRepositoryIDs: [repositoryID]
+        )
+
+        let presentation = WorkplaceCreateSheetPresentation(seed: seed)
+
+        XCTAssertEqual(presentation.seed, seed)
+    }
+
+    func test_createSheetPresentationUsesFreshIdentityForRepeatedSeed() {
+        let seed = WorkplaceCreateSeed(
+            name: "aso 副本",
+            branch: "feature-skz-aso",
+            selectedRepositoryIDs: [UUID()]
+        )
+
+        let firstPresentation = WorkplaceCreateSheetPresentation(seed: seed)
+        let secondPresentation = WorkplaceCreateSheetPresentation(seed: seed)
+
+        XCTAssertNotEqual(firstPresentation.id, secondPresentation.id)
+        XCTAssertEqual(firstPresentation.seed, secondPresentation.seed)
+    }
+
     private func waitUntil(
         _ condition: @autoclosure @escaping () -> Bool,
         timeoutNanoseconds: UInt64 = 1_000_000_000,

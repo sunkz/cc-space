@@ -19,6 +19,16 @@ struct WorkplaceCreateSeed: Equatable {
     )
 }
 
+extension WorkplaceCreateSeed {
+    static func duplicate(from workplace: Workplace) -> WorkplaceCreateSeed {
+        WorkplaceCreateSeed(
+            name: "\(workplace.name) 副本",
+            branch: workplace.branch ?? "",
+            selectedRepositoryIDs: Set(workplace.selectedRepositoryIDs)
+        )
+    }
+}
+
 struct CCSpaceLaunchConfiguration {
     static let defaultWindowSize = CGSize(width: 860, height: 580)
     static let screenshotWindowSize = CGSize(width: 960, height: 640)

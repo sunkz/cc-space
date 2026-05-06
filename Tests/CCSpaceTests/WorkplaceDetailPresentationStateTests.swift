@@ -16,6 +16,22 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
         XCTAssertTrue(childLabels.contains("onPullAll"))
     }
 
+    @MainActor
+    func test_detailViewDoesNotStoreWorkspaceShortcutActionsForPinCopyArchive() {
+        let workplace = makeWorkplace(path: "/tmp/main", selectedRepositoryIDs: [])
+        let view = WorkplaceDetailView(
+            workplace: workplace,
+            repositories: [],
+            syncStates: []
+        )
+
+        let childLabels = Set(Mirror(reflecting: view).children.compactMap(\.label))
+
+        XCTAssertFalse(childLabels.contains("onTogglePinned"))
+        XCTAssertFalse(childLabels.contains("onDuplicateWorkplace"))
+        XCTAssertFalse(childLabels.contains("onToggleArchived"))
+    }
+
     func test_idleWorkplaceEnablesEditSyncAndDelete() throws {
         let repository = makeRepository(repoName: "blog")
         let workplacePath = try makeLocalDirectory(named: "blog")

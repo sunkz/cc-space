@@ -5,14 +5,16 @@ struct SidebarView: View {
     @ObservedObject var workplaceStore: WorkplaceStore
     let hasUpdate: Bool
     let onCreateWorkplace: () -> Void
+    let onTogglePinned: (Workplace) -> Void
+    let onDuplicateWorkplace: (Workplace) -> Void
+    let onToggleArchived: (Workplace) -> Void
     @State private var searchText = ""
 
-    private var filteredWorkplaces: [Workplace] {
-        let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty { return workplaceStore.workplaces }
-        return workplaceStore.workplaces.filter {
-            $0.name.localizedCaseInsensitiveContains(trimmed)
-        }
+    private var presentationState: SidebarPresentationState {
+        SidebarPresentationState(
+            workplaces: workplaceStore.workplaces,
+            searchText: searchText
+        )
     }
 
     var body: some View {
@@ -35,7 +37,7 @@ struct SidebarView: View {
             }
 
             Section {
-                ForEach(filteredWorkplaces) { workplace in
+                ForEach(presentationState.activeWorkplaces) { workplace in
                     workplaceRow(workplace)
                         .tag(SidebarSelection.workplace(workplace.id))
                 }
@@ -60,6 +62,15 @@ struct SidebarView: View {
                 }
                 .padding(.bottom, 6)
             }
+
+            if !presentationState.archivedWorkplaces.isEmpty {
+                Section("已归档") {
+                    ForEach(presentationState.archivedWorkplaces) { workplace in
+                        workplaceRow(workplace)
+                            .tag(SidebarSelection.workplace(workplace.id))
+                    }
+                }
+            }
         }
         .listStyle(.sidebar)
         .searchable(text: $searchText, placement: .sidebar)
@@ -68,16 +79,55 @@ struct SidebarView: View {
 
     @ViewBuilder
     private func workplaceRow(_ workplace: Workplace) -> some View {
+        let rowPresentationState = SidebarWorkplaceRowPresentationState(workplace: workplace)
+
         HStack(spacing: 8) {
-            Image(systemName: "folder")
+            Image(systemName: workplace.isArchived ? "archivebox" : "folder")
                 .foregroundStyle(.secondary)
                 .frame(width: 16)
             Text(workplace.name)
                 .lineLimit(1)
             Spacer()
-            Text("\(workplace.selectedRepositoryIDs.count)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            HStack(spacing: rowPresentationState.accessorySpacing) {
+                Image(systemName: "pin.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .opacity(rowPresentationState.showsPinnedIndicator ? 1 : 0)
+                    .frame(width: rowPresentationState.pinIndicatorColumnWidth)
+                Text(rowPresentationState.repositoryCountText)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(
+                        width: rowPresentationState.repositoryCountColumnWidth,
+                        alignment: .trailing
+                    )
+            }
+        }
+        .contentShape(Rectangle())
+        .contextMenu {
+            Button {
+                onTogglePinned(workplace)
+            } label: {
+                Label(
+                    workplace.isPinned ? "取消置顶" : "置顶",
+                    systemImage: workplace.isPinned ? "pin.slash" : "pin"
+                )
+            }
+
+            Button {
+                onDuplicateWorkplace(workplace)
+            } label: {
+                Label("复制工作区", systemImage: "doc.on.doc")
+            }
+
+            Button {
+                onToggleArchived(workplace)
+            } label: {
+                Label(
+                    workplace.isArchived ? "取消归档" : "归档工作区",
+                    systemImage: workplace.isArchived ? "tray.and.arrow.up" : "archivebox"
+                )
+            }
         }
     }
 }

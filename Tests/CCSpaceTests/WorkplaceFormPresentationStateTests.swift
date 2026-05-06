@@ -256,6 +256,34 @@ final class WorkplaceFormPresentationStateTests: XCTestCase {
         )
     }
 
+    func test_createSeedApplicationStateCopiesNameBranchAndSelectedRepositories() {
+        let repositoryID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+        let state = WorkplaceCreateSeedApplicationState(
+            seed: WorkplaceCreateSeed(
+                name: "checkout 副本",
+                branch: "feature/checkout",
+                selectedRepositoryIDs: [repositoryID]
+            )
+        )
+
+        XCTAssertEqual(state.name, "checkout 副本")
+        XCTAssertEqual(state.branch, "feature/checkout")
+        XCTAssertEqual(state.selectedRepositoryIDs, [repositoryID])
+    }
+
+    func test_createSeedApplicationStateResetsSearchAndFeedback() {
+        let state = WorkplaceCreateSeedApplicationState(
+            seed: WorkplaceCreateSeed(
+                name: "checkout 副本",
+                branch: "",
+                selectedRepositoryIDs: []
+            )
+        )
+
+        XCTAssertEqual(state.repositorySearchText, "")
+        XCTAssertNil(state.feedback)
+    }
+
     func test_formProgressStateShowsCurrentCloneRepositoriesAndCount() {
         let state = WorkplaceFormProgressPresentationState(
             progress: WorkplaceOperationProgress(

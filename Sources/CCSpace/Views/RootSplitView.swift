@@ -9,9 +9,8 @@ struct RootSplitView: View {
     @StateObject private var repositoryStore: RepositoryStore
     @StateObject private var workplaceStore: WorkplaceStore
     @State private var editingWorkplace: Workplace?
-    @State private var showingCreateSheet = false
+    @State private var createWorkplaceSheet: WorkplaceCreateSheetPresentation?
     @State private var refreshTask: Task<Void, Never>?
-    @State private var createWorkplaceSeed = WorkplaceCreateSeed.empty
     @State private var hasAppliedLaunchConfiguration = false
     private let launchConfiguration: CCSpaceLaunchConfiguration
     private let syncCoordinator: SyncCoordinator
@@ -93,7 +92,18 @@ struct RootSplitView: View {
                 appViewModel: appViewModel,
                 workplaceStore: workplaceStore,
                 hasUpdate: updateChecker.hasUpdate,
-                onCreateWorkplace: { showingCreateSheet = true }
+                onCreateWorkplace: {
+                    presentCreateWorkplace()
+                },
+                onTogglePinned: { workplace in
+                    togglePinned(for: workplace)
+                },
+                onDuplicateWorkplace: { workplace in
+                    duplicateWorkplace(workplace)
+                },
+                onToggleArchived: { workplace in
+                    toggleArchived(for: workplace)
+                }
             )
             .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 250)
         } detail: {
@@ -158,14 +168,16 @@ struct RootSplitView: View {
                 )
             }
         }
-        .sheet(isPresented: $showingCreateSheet) {
+        .sheet(item: $createWorkplaceSheet) { presentation in
             WorkplaceCreateView(
                 settingsStore: settingsStore,
                 repositoryStore: repositoryStore,
                 workplaceCreateService: workplaceCreateService,
                 appViewModel: appViewModel,
-                initialSeed: createWorkplaceSeed,
-                onDismiss: { showingCreateSheet = false }
+                initialSeed: presentation.seed,
+                onDismiss: {
+                    createWorkplaceSheet = nil
+                }
             )
         }
     }
@@ -453,7 +465,7 @@ struct RootSplitView: View {
                 Label("选择工作区", systemImage: "folder")
             } actions: {
                 Button("新建") {
-                    showingCreateSheet = true
+                    presentCreateWorkplace()
                 }
                 .ccspacePrimaryActionButton()
             }
@@ -504,6 +516,69 @@ struct RootSplitView: View {
         NSWorkspace.shared.open(updateChecker.releasesURL)
     }
 
+    @MainActor
+    private func presentCreateWorkplace(seed: WorkplaceCreateSeed = .empty) {
+        createWorkplaceSheet = WorkplaceCreateSheetPresentation(seed: seed)
+    }
+
+    @MainActor
+    private func duplicateWorkplace(_ workplace: Workplace) {
+        presentCreateWorkplace(seed: .duplicate(from: workplace))
+    }
+
+    @MainActor
+    private func togglePinned(for workplace: Workplace) {
+        let willPin = !workplace.isPinned
+        do {
+            try workplaceStore.setPinned(willPin, for: workplace.id)
+            setDetailFeedbackIfSelected(
+                CCSpaceFeedbackFactory.actionSuccess(
+                    willPin ? "已置顶 \(workplace.name)" : "已取消置顶 \(workplace.name)"
+                ),
+                for: workplace.id
+            )
+        } catch {
+            setDetailFeedbackIfSelected(
+                CCSpaceFeedbackFactory.actionError(
+                    action: willPin ? "置顶工作区" : "取消置顶工作区",
+                    error: error
+                ),
+                for: workplace.id
+            )
+        }
+    }
+
+    @MainActor
+    private func toggleArchived(for workplace: Workplace) {
+        let willArchive = !workplace.isArchived
+        do {
+            try workplaceStore.setArchived(willArchive, for: workplace.id)
+            setDetailFeedbackIfSelected(
+                CCSpaceFeedbackFactory.actionSuccess(
+                    willArchive ? "已归档 \(workplace.name)" : "已取消归档 \(workplace.name)"
+                ),
+                for: workplace.id
+            )
+        } catch {
+            setDetailFeedbackIfSelected(
+                CCSpaceFeedbackFactory.actionError(
+                    action: willArchive ? "归档工作区" : "取消归档工作区",
+                    error: error
+                ),
+                for: workplace.id
+            )
+        }
+    }
+
+    @MainActor
+    private func setDetailFeedbackIfSelected(
+        _ feedback: CCSpaceFeedback,
+        for workplaceID: UUID
+    ) {
+        guard appViewModel.selectedWorkplaceID == workplaceID else { return }
+        detailActionCoordinator.feedback = feedback
+    }
+
     private func latestWorkplace(for id: UUID) -> Workplace? {
         workplaceStore.workplaces.first { $0.id == id }
     }
@@ -526,14 +601,10 @@ struct RootSplitView: View {
             return
         }
 
-        createWorkplaceSeed = launchConfiguration.createWorkplaceSeed(
-            repositories: repositoryStore.repositories
-        )
-
         switch screenshotScene {
         case .settingsOverview:
             appViewModel.showRoute(.settings)
-            showingCreateSheet = false
+            createWorkplaceSheet = nil
         case .workplaceDetail:
             if let workplace = launchConfiguration.targetWorkplace(
                 in: workplaceStore.workplaces
@@ -542,7 +613,7 @@ struct RootSplitView: View {
             } else {
                 appViewModel.showRoute(.workplaces)
             }
-            showingCreateSheet = false
+            createWorkplaceSheet = nil
         case .createWorkplace:
             if let workplace = launchConfiguration.targetWorkplace(
                 in: workplaceStore.workplaces
@@ -551,7 +622,11 @@ struct RootSplitView: View {
             } else {
                 appViewModel.showRoute(.workplaces)
             }
-            showingCreateSheet = true
+            presentCreateWorkplace(
+                seed: launchConfiguration.createWorkplaceSeed(
+                    repositories: repositoryStore.repositories
+                )
+            )
         }
     }
 

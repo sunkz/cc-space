@@ -15,6 +15,16 @@ enum RootSplitRuntimeServices {
     }
 }
 
+struct WorkplaceCreateSheetPresentation: Identifiable, Equatable {
+    let id: UUID
+    let seed: WorkplaceCreateSeed
+
+    init(seed: WorkplaceCreateSeed, id: UUID = UUID()) {
+        self.id = id
+        self.seed = seed
+    }
+}
+
 struct RootSplitDiskRefreshState {
     let normalizedRootPath: String
     let canScheduleRefresh: Bool

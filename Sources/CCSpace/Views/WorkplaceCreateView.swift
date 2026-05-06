@@ -5,6 +5,7 @@ struct WorkplaceCreateView: View {
     @ObservedObject var repositoryStore: RepositoryStore
     let workplaceCreateService: WorkplaceCreateService
     @ObservedObject var appViewModel: AppViewModel
+    let initialSeed: WorkplaceCreateSeed
     let onDismiss: () -> Void
 
     @State private var name: String
@@ -27,6 +28,7 @@ struct WorkplaceCreateView: View {
         self.repositoryStore = repositoryStore
         self.workplaceCreateService = workplaceCreateService
         self.appViewModel = appViewModel
+        self.initialSeed = initialSeed
         self.onDismiss = onDismiss
         _name = State(initialValue: initialSeed.name)
         _branch = State(initialValue: initialSeed.branch)
@@ -147,10 +149,25 @@ struct WorkplaceCreateView: View {
         .frame(minWidth: 440, idealWidth: 520, minHeight: 360, idealHeight: 460)
         .navigationTitle("创建工作区")
         .interactiveDismissDisabled(isSubmitting)
+        .onAppear {
+            applySeed(initialSeed)
+        }
+        .onChange(of: initialSeed) { _, newSeed in
+            applySeed(newSeed)
+        }
     }
 
     private func clearFeedback() {
         feedback = nil
+    }
+
+    private func applySeed(_ seed: WorkplaceCreateSeed) {
+        let appliedState = WorkplaceCreateSeedApplicationState(seed: seed)
+        name = appliedState.name
+        branch = appliedState.branch
+        selectedIDs = appliedState.selectedRepositoryIDs
+        repositorySearchText = appliedState.repositorySearchText
+        feedback = appliedState.feedback
     }
 
     private func toggleSelection(_ id: UUID) {

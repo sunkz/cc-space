@@ -214,6 +214,22 @@ struct WorkplaceCreatePresentationState {
     }
 }
 
+struct WorkplaceCreateSeedApplicationState: Equatable {
+    let name: String
+    let branch: String
+    let selectedRepositoryIDs: Set<UUID>
+    let repositorySearchText: String
+    let feedback: CCSpaceFeedback?
+
+    init(seed: WorkplaceCreateSeed) {
+        name = seed.name
+        branch = seed.branch
+        selectedRepositoryIDs = seed.selectedRepositoryIDs
+        repositorySearchText = ""
+        feedback = nil
+    }
+}
+
 struct WorkplaceEditPresentationState {
     let canSubmit: Bool
     let selectedRepositorySubtitle: String

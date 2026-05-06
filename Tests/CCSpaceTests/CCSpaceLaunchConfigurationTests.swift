@@ -73,4 +73,25 @@ final class CCSpaceLaunchConfigurationTests: XCTestCase {
         XCTAssertEqual(seed.branch, "feature/checkout-redesign")
         XCTAssertEqual(seed.selectedRepositoryIDs, Set([apiGatewayID, iosAppID]))
     }
+
+    func test_duplicateWorkplaceSeedCopiesNameBranchAndRepositoryIDs() {
+        let repositoryID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+        let workplace = Workplace(
+            id: UUID(),
+            name: "checkout",
+            path: "/tmp/checkout",
+            selectedRepositoryIDs: [repositoryID],
+            branch: "feature/checkout",
+            isPinned: true,
+            isArchived: false,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+
+        let seed = WorkplaceCreateSeed.duplicate(from: workplace)
+
+        XCTAssertEqual(seed.name, "checkout 副本")
+        XCTAssertEqual(seed.branch, "feature/checkout")
+        XCTAssertEqual(seed.selectedRepositoryIDs, Set([repositoryID]))
+    }
 }

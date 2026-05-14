@@ -69,6 +69,8 @@ struct CloneConcurrencyGitServiceSpy: GitServicing {
 
     func pull(in directory: String) async throws {}
     func push(in directory: String) async throws {}
+    func stash(in directory: String) async throws {}
+    func stashPop(in directory: String) async throws {}
     func isGitAvailable() async -> Bool { true }
     func defaultBranch(for remoteURL: String) async -> String? { "main" }
     func defaultBranch(in directory: String) async -> String? { "main" }
@@ -100,6 +102,8 @@ struct PullConcurrencyGitServiceSpy: GitServicing {
     }
 
     func push(in directory: String) async throws {}
+    func stash(in directory: String) async throws {}
+    func stashPop(in directory: String) async throws {}
     func isGitAvailable() async -> Bool { true }
     func defaultBranch(for remoteURL: String) async -> String? { "main" }
     func defaultBranch(in directory: String) async -> String? {
@@ -161,6 +165,9 @@ struct GitServiceStub: GitServicing {
             try await Task.sleep(nanoseconds: 5_000_000_000)
         }
     }
+
+    func stash(in directory: String) async throws {}
+    func stashPop(in directory: String) async throws {}
 
     func isGitAvailable() async -> Bool { true }
     func defaultBranch(for remoteURL: String) async -> String? { defaultBranchResult }

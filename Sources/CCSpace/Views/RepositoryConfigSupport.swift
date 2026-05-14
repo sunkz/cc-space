@@ -37,22 +37,29 @@ struct RepositoryAddPresentationState {
 
 struct RepositoryEditPresentationState {
     let isEditing: Bool
+    let isPendingNew: Bool
     let canSubmit: Bool
 
     init(
         repository: RepositoryConfig,
         editingRepositoryID: UUID?,
         editingGitURL: String,
-        editingMRBranches: [String] = []
+        editingMRBranches: [String] = [],
+        isPendingNew: Bool = false
     ) {
         let trimmedGitURL = editingGitURL.trimmingCharacters(in: .whitespacesAndNewlines)
         isEditing = editingRepositoryID == repository.id
+        self.isPendingNew = isPendingNew
         let gitURLChanged = trimmedGitURL != repository.gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let mrBranchesChanged = editingMRBranches != repository.mrTargetBranches
-        canSubmit =
-            isEditing &&
-            !trimmedGitURL.isEmpty &&
-            (gitURLChanged || mrBranchesChanged)
+        if isPendingNew {
+            canSubmit = isEditing && !trimmedGitURL.isEmpty
+        } else {
+            canSubmit =
+                isEditing &&
+                !trimmedGitURL.isEmpty &&
+                (gitURLChanged || mrBranchesChanged)
+        }
     }
 }
 

@@ -385,7 +385,7 @@ enum WorkplaceDetailFeedbackFactory {
         if result.failedCount == 0 && result.successCount == 0 && result.skippedCount > 0 {
             return CCSpaceFeedback(
                 style: .info,
-                message: "\(repositoryName) 当前不是默认分支，已跳过同步"
+                message: "\(repositoryName) 未关联远端分支，已跳过同步"
             )
         }
 

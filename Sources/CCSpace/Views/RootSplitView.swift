@@ -91,6 +91,7 @@ struct RootSplitView: View {
             SidebarView(
                 appViewModel: appViewModel,
                 workplaceStore: workplaceStore,
+                syncStates: workplaceStore.syncStates,
                 hasUpdate: updateChecker.hasUpdate,
                 onCreateWorkplace: {
                     presentCreateWorkplace()

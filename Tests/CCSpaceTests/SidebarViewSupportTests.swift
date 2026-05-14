@@ -43,8 +43,8 @@ final class SidebarViewSupportTests: XCTestCase {
             isArchived: false
         )
 
-        let singleRepositoryState = SidebarWorkplaceRowPresentationState(workplace: singleRepositoryWorkplace)
-        let manyRepositoriesState = SidebarWorkplaceRowPresentationState(workplace: manyRepositoriesWorkplace)
+        let singleRepositoryState = SidebarWorkplaceRowPresentationState(workplace: singleRepositoryWorkplace, syncStates: [])
+        let manyRepositoriesState = SidebarWorkplaceRowPresentationState(workplace: manyRepositoriesWorkplace, syncStates: [])
 
         XCTAssertEqual(singleRepositoryState.pinIndicatorColumnWidth, manyRepositoriesState.pinIndicatorColumnWidth)
         XCTAssertEqual(singleRepositoryState.repositoryCountColumnWidth, manyRepositoriesState.repositoryCountColumnWidth)
@@ -54,7 +54,8 @@ final class SidebarViewSupportTests: XCTestCase {
 
     func test_rowAccessoryUsesCompactTwoDigitLayout() {
         let state = SidebarWorkplaceRowPresentationState(
-            workplace: makeWorkplace(name: "Pinned", repositoryCount: 42, isPinned: true, isArchived: false)
+            workplace: makeWorkplace(name: "Pinned", repositoryCount: 42, isPinned: true, isArchived: false),
+            syncStates: []
         )
 
         XCTAssertEqual(state.pinIndicatorColumnWidth, 12)
@@ -64,10 +65,12 @@ final class SidebarViewSupportTests: XCTestCase {
 
     func test_rowAccessoryStateOnlyShowsPinnedIndicatorForActivePinnedWorkplace() {
         let pinnedActive = SidebarWorkplaceRowPresentationState(
-            workplace: makeWorkplace(name: "Pinned", repositoryCount: 1, isPinned: true, isArchived: false)
+            workplace: makeWorkplace(name: "Pinned", repositoryCount: 1, isPinned: true, isArchived: false),
+            syncStates: []
         )
         let pinnedArchived = SidebarWorkplaceRowPresentationState(
-            workplace: makeWorkplace(name: "Archived", repositoryCount: 1, isPinned: true, isArchived: true)
+            workplace: makeWorkplace(name: "Archived", repositoryCount: 1, isPinned: true, isArchived: true),
+            syncStates: []
         )
 
         XCTAssertTrue(pinnedActive.showsPinnedIndicator)

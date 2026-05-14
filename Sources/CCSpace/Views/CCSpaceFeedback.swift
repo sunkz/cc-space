@@ -131,7 +131,7 @@ enum CCSpaceFeedbackFactory {
         if skippedCount > 0 {
             return CCSpaceFeedback(
                 style: .info,
-                message: "没有需要同步的默认分支仓库，已跳过 \(skippedCount) 个"
+                message: "没有需要同步的仓库，已跳过 \(skippedCount) 个未关联远端的仓库"
             )
         }
         if successCount == 0 {

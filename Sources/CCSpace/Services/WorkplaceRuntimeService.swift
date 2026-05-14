@@ -285,12 +285,13 @@ struct WorkplaceRuntimeService {
                 return
             }
 
-            try await GitWorktreeSafety.validateCleanWorkingTree(
+            try await GitWorktreeSafety.withCleanWorkingTree(
                 in: state.localPath,
                 gitService: gitService,
                 blockedOperation: .switchBranch
-            )
-            try await gitService.checkoutBranch(trimmedBranch, in: state.localPath)
+            ) {
+                try await gitService.checkoutBranch(trimmedBranch, in: state.localPath)
+            }
             var updatedState = state
             updatedState.status = .success
             updatedState.lastError = nil
@@ -386,18 +387,14 @@ struct WorkplaceRuntimeService {
                     return .skipped(Self.succeededState(from: state))
                 }
 
-                try await GitWorktreeSafety.validateCleanWorkingTree(
+                try await GitWorktreeSafety.withCleanWorkingTree(
                     in: state.localPath,
                     gitService: gitService,
                     blockedOperation: .mergeDefaultBranchIntoCurrent
-                )
-                let outcome = try await gitService.mergeDefaultBranchIntoCurrent(in: state.localPath)
-                switch outcome {
-                case .merged:
-                    return .merged(Self.succeededState(from: state))
-                case .skipped:
-                    return .skipped(Self.succeededState(from: state))
+                ) {
+                    _ = try await gitService.mergeDefaultBranchIntoCurrent(in: state.localPath)
                 }
+                return .merged(Self.succeededState(from: state))
             } catch {
                 return .failed(
                     Self.failedState(
@@ -438,13 +435,14 @@ struct WorkplaceRuntimeService {
                 return .skipped
             }
 
-            try await GitWorktreeSafety.validateCleanWorkingTree(
+            try await GitWorktreeSafety.withCleanWorkingTree(
                 in: state.localPath,
                 gitService: gitService,
                 blockedOperation: .mergeDefaultBranchIntoCurrent
-            )
-
-            let outcome = try await gitService.mergeDefaultBranchIntoCurrent(in: state.localPath)
+            ) {
+                _ = try await gitService.mergeDefaultBranchIntoCurrent(in: state.localPath)
+            }
+            let outcome: GitMergeDefaultBranchOutcome = .merged
             var updatedState = state
             updatedState.status = .success
             updatedState.lastError = nil
@@ -576,12 +574,13 @@ struct WorkplaceRuntimeService {
                         return .success(Self.succeededState(from: state))
                     }
 
-                    try await GitWorktreeSafety.validateCleanWorkingTree(
+                    try await GitWorktreeSafety.withCleanWorkingTree(
                         in: state.localPath,
                         gitService: gitService,
                         blockedOperation: .switchBranch
-                    )
-                    try await gitService.checkoutBranch(branch, in: state.localPath)
+                    ) {
+                        try await gitService.checkoutBranch(branch, in: state.localPath)
+                    }
                     return .success(Self.succeededState(from: state))
                 } catch {
                     return .failed(

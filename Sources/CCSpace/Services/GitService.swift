@@ -4,6 +4,8 @@ protocol GitServicing: Sendable {
     func clone(repositoryURL: String, into directory: String) async throws
     func pull(in directory: String) async throws
     func push(in directory: String) async throws
+    func stash(in directory: String) async throws
+    func stashPop(in directory: String) async throws
     func isGitAvailable() async -> Bool
     func defaultBranch(for remoteURL: String) async -> String?
     func defaultBranch(in directory: String) async -> String?
@@ -141,6 +143,38 @@ enum GitWorktreeSafety {
             throw GitWorktreeSafetyError.uncommittedChanges(blockedOperation: blockedOperation)
         }
     }
+
+    static func withCleanWorkingTree(
+        in directory: String,
+        gitService: GitServicing,
+        blockedOperation: GitWorktreeBlockedOperation,
+        body: @Sendable () async throws -> Void
+    ) async throws {
+        var didStash = false
+        do {
+            try await validateCleanWorkingTree(
+                in: directory,
+                gitService: gitService,
+                blockedOperation: blockedOperation
+            )
+        } catch GitWorktreeSafetyError.uncommittedChanges {
+            try await gitService.stash(in: directory)
+            didStash = true
+        }
+
+        do {
+            try await body()
+        } catch {
+            if didStash {
+                try? await gitService.stashPop(in: directory)
+            }
+            throw error
+        }
+
+        if didStash {
+            try? await gitService.stashPop(in: directory)
+        }
+    }
 }
 
 struct GitService: GitServicing {
@@ -169,6 +203,14 @@ struct GitService: GitServicing {
         }
 
         try await runGit(arguments: ["-C", directory, "push", "-u", "origin", "--", currentBranch])
+    }
+
+    func stash(in directory: String) async throws {
+        try await runGit(arguments: ["-C", directory, "stash"])
+    }
+
+    func stashPop(in directory: String) async throws {
+        try await runGit(arguments: ["-C", directory, "stash", "pop"])
     }
 
     func defaultBranch(for remoteURL: String) async -> String? {

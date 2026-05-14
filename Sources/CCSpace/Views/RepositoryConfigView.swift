@@ -17,6 +17,7 @@ struct RepositorySettingsSection: View {
     @State private var fetchingDefaultBranchForID: UUID?
     @State private var fetchDefaultBranchTask: Task<Void, Never>?
     @State private var scrollToRepositoryID: UUID?
+    @State private var pendingNewRepositoryID: UUID?
 
     private var repositories: [RepositoryConfig] {
         repositoryStore.repositories.sorted {
@@ -40,7 +41,8 @@ struct RepositorySettingsSection: View {
             repository: repository,
             editingRepositoryID: editingRepositoryID,
             editingGitURL: editingGitURL,
-            editingMRBranches: editingMRBranches
+            editingMRBranches: editingMRBranches,
+            isPendingNew: pendingNewRepositoryID == repository.id
         )
     }
 
@@ -54,12 +56,12 @@ struct RepositorySettingsSection: View {
         let trimmedGitURL = gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             feedback = nil
-            let repositoryName = try GitURLParser.repositoryName(from: trimmedGitURL)
             try repositoryStore.addRepository(gitURL: trimmedGitURL)
             gitURL = ""
-            feedback = RepositoryConfigFeedbackFactory.addSuccess(repositoryName: repositoryName)
             if let newRepo = repositoryStore.repositories.first(where: { $0.gitURL == trimmedGitURL }) {
+                pendingNewRepositoryID = newRepo.id
                 scrollToRepositoryID = newRepo.id
+                try? await Task.sleep(for: .milliseconds(350))
                 startEditing(newRepo)
             }
         } catch {
@@ -173,7 +175,7 @@ struct RepositorySettingsSection: View {
                     .onChange(of: scrollToRepositoryID) { _, targetID in
                         guard let targetID else { return }
                         scrollToRepositoryID = nil
-                        withAnimation {
+                        withAnimation(.easeInOut(duration: 0.3)) {
                             proxy.scrollTo(targetID, anchor: .center)
                         }
                     }
@@ -320,13 +322,15 @@ struct RepositorySettingsSection: View {
                                         }
                                         Text(branch)
                                             .font(.footnote)
-                                        Button {
-                                            editingMRBranches.removeAll { $0 == branch }
-                                        } label: {
-                                            Image(systemName: "xmark")
-                                                .font(.caption2)
+                                        if !isDefault {
+                                            Button {
+                                                editingMRBranches.removeAll { $0 == branch }
+                                            } label: {
+                                                Image(systemName: "xmark")
+                                                    .font(.caption2)
+                                            }
+                                            .buttonStyle(.plain)
                                         }
-                                        .buttonStyle(.plain)
                                     }
                                     .padding(.horizontal, 8)
                                     .padding(.vertical, 4)
@@ -345,7 +349,7 @@ struct RepositorySettingsSection: View {
                                 }
 
                             HStack(spacing: 6) {
-                                TextField("输入 MR 目标分支名称", text: $mrBranchInput)
+                                TextField("添加 MR 目标分支", text: $mrBranchInput)
                                     .textFieldStyle(.roundedBorder)
                                     .onSubmit {
                                         addEditingMRBranch()
@@ -371,6 +375,7 @@ struct RepositorySettingsSection: View {
                     }
                 }
             }
+            .transition(.opacity)
         } else {
             CCSpaceInteractiveCard(selected: false) {
                 HStack(alignment: .top, spacing: 8) {
@@ -423,6 +428,7 @@ struct RepositorySettingsSection: View {
                     }
                 }
             }
+            .transition(.opacity)
         }
     }
 
@@ -483,8 +489,12 @@ struct RepositorySettingsSection: View {
                 gitURL: trimmedEditingGitURL,
                 mrTargetBranches: branchesChanged ? editingMRBranches : nil
             )
+            let wasPendingNew = pendingNewRepositoryID == repository.id
+            pendingNewRepositoryID = nil
             cancelEditing()
-            feedback = RepositoryConfigFeedbackFactory.updateSuccess(repositoryName: repository.repoName)
+            feedback = wasPendingNew
+                ? RepositoryConfigFeedbackFactory.addSuccess(repositoryName: repository.repoName)
+                : RepositoryConfigFeedbackFactory.updateSuccess(repositoryName: repository.repoName)
         } catch {
             feedback = CCSpaceFeedbackFactory.actionError(
                 action: "更新仓库",
@@ -497,7 +507,9 @@ struct RepositorySettingsSection: View {
         fetchDefaultBranchTask?.cancel()
         fetchDefaultBranchTask = nil
         feedback = nil
-        editingRepositoryID = repository.id
+        withAnimation(.easeInOut(duration: 0.2)) {
+            editingRepositoryID = repository.id
+        }
         editingGitURL = repository.gitURL
         if repository.mrTargetBranches.isEmpty, let defaultBranch = repository.defaultBranch {
             editingMRBranches = [defaultBranch]
@@ -513,7 +525,13 @@ struct RepositorySettingsSection: View {
     private func cancelEditing() {
         fetchDefaultBranchTask?.cancel()
         fetchDefaultBranchTask = nil
-        editingRepositoryID = nil
+        if let pendingID = pendingNewRepositoryID, editingRepositoryID == pendingID {
+            try? repositoryStore.removeRepository(id: pendingID)
+            pendingNewRepositoryID = nil
+        }
+        withAnimation(.easeInOut(duration: 0.2)) {
+            editingRepositoryID = nil
+        }
         editingGitURL = ""
         editingMRBranches = []
         mrBranchInput = ""

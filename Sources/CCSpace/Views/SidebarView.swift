@@ -3,6 +3,7 @@ import SwiftUI
 struct SidebarView: View {
     @ObservedObject var appViewModel: AppViewModel
     @ObservedObject var workplaceStore: WorkplaceStore
+    let syncStates: [RepositorySyncState]
     let hasUpdate: Bool
     let onCreateWorkplace: () -> Void
     let onTogglePinned: (Workplace) -> Void
@@ -79,7 +80,10 @@ struct SidebarView: View {
 
     @ViewBuilder
     private func workplaceRow(_ workplace: Workplace) -> some View {
-        let rowPresentationState = SidebarWorkplaceRowPresentationState(workplace: workplace)
+        let rowPresentationState = SidebarWorkplaceRowPresentationState(
+            workplace: workplace,
+            syncStates: syncStates
+        )
 
         HStack(spacing: 8) {
             Image(systemName: workplace.isArchived ? "archivebox" : "folder")
@@ -94,6 +98,11 @@ struct SidebarView: View {
                     .foregroundStyle(.secondary)
                     .opacity(rowPresentationState.showsPinnedIndicator ? 1 : 0)
                     .frame(width: rowPresentationState.pinIndicatorColumnWidth)
+                if let color = rowPresentationState.statusIndicatorColor {
+                    Circle()
+                        .fill(color)
+                        .frame(width: 6, height: 6)
+                }
                 Text(rowPresentationState.repositoryCountText)
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)

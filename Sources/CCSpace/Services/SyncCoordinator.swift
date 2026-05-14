@@ -216,32 +216,22 @@ struct SyncCoordinator: Sendable {
             candidates,
             maxConcurrentTasks: Self.maxConcurrentPullTasks
         ) { state in
-            guard let currentBranch = await gitService.currentBranch(in: state.localPath) else {
+            guard let branchStatus = await gitService.branchStatus(in: state.localPath) else {
                 return PullPreparationDecision.failed(
                     failedPullInspectionState(
                         state,
-                        message: "无法识别当前分支"
+                        message: "无法读取仓库 Git 状态"
                     )
                 )
             }
-            guard let defaultBranch = await gitService.defaultBranch(in: state.localPath) else {
-                return PullPreparationDecision.failed(
-                    failedPullInspectionState(
-                        state,
-                        message: "无法识别仓库默认分支"
-                    )
-                )
+            guard branchStatus.hasRemoteTrackingBranch else {
+                return PullPreparationDecision.skipped
             }
-
-            if currentBranch == defaultBranch {
-                var pullableState = state
-                if pullableState.status == .failed {
-                    pullableState.status = .success
-                }
-                return PullPreparationDecision.pullable(pullableState)
+            var pullableState = state
+            if pullableState.status == .failed {
+                pullableState.status = .success
             }
-
-            return PullPreparationDecision.skipped
+            return PullPreparationDecision.pullable(pullableState)
         }
 
         var pullableStates: [RepositorySyncState] = []

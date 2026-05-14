@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import SwiftUI
 
 struct SidebarPresentationState {
     let activeWorkplaces: [Workplace]
@@ -54,12 +55,18 @@ struct SidebarWorkplaceRowPresentationState {
     let pinIndicatorColumnWidth: CGFloat
     let repositoryCountColumnWidth: CGFloat
     let accessorySpacing: CGFloat
+    let statusIndicatorColor: Color?
 
-    init(workplace: Workplace) {
+    init(workplace: Workplace, syncStates: [RepositorySyncState]) {
         showsPinnedIndicator = workplace.isPinned && !workplace.isArchived
         repositoryCountText = "\(workplace.selectedRepositoryIDs.count)"
         pinIndicatorColumnWidth = Self.pinIndicatorColumnWidth
         repositoryCountColumnWidth = Self.repositoryCountColumnWidth
         accessorySpacing = Self.accessorySpacing
+
+        let hasFailed = syncStates.contains {
+            $0.workplaceID == workplace.id && $0.status == .failed
+        }
+        statusIndicatorColor = hasFailed ? .red : nil
     }
 }

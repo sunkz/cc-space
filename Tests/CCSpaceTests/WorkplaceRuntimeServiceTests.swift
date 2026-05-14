@@ -12,6 +12,8 @@ private actor WorkplaceRuntimeGitServiceSpy: GitServicing {
     private(set) var pushCalls: [String] = []
     private(set) var checkoutCalls: [(branch: String, directory: String)] = []
     private(set) var mergeCalls: [String] = []
+    private(set) var stashCalls: [String] = []
+    private(set) var stashPopCalls: [String] = []
     var checkoutError: Error?
     var checkoutErrorsByDirectory: [String: Error] = [:]
     var pushErrorsByDirectory: [String: Error] = [:]
@@ -43,6 +45,13 @@ private actor WorkplaceRuntimeGitServiceSpy: GitServicing {
         if let error = pushErrorsByDirectory[directory] {
             throw error
         }
+    }
+
+    func stash(in directory: String) async throws {
+        stashCalls.append(directory)
+    }
+    func stashPop(in directory: String) async throws {
+        stashPopCalls.append(directory)
     }
 
     func isGitAvailable() async -> Bool { true }
@@ -125,6 +134,14 @@ private actor WorkplaceRuntimeGitServiceSpy: GitServicing {
 
     func mergedDirectories() async -> [String] {
         mergeCalls
+    }
+
+    func stashedDirectories() async -> [String] {
+        stashCalls
+    }
+
+    func stashPoppedDirectories() async -> [String] {
+        stashPopCalls
     }
 
     func setCheckoutError(_ error: Error?) {
@@ -225,6 +242,9 @@ private final class ConcurrentPushGitServiceSpy: GitServicing, @unchecked Sendab
             throw error
         }
     }
+
+    func stash(in directory: String) async throws {}
+    func stashPop(in directory: String) async throws {}
 
     func isGitAvailable() async -> Bool { true }
 
@@ -1054,18 +1074,24 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
             workplaceRootPath: workspaceRoot.path
         )
 
-        await XCTAssertThrowsErrorAsync {
-            try await service.switchBranch(for: state, in: workplace, to: "release")
-        }
+        try await service.switchBranch(for: state, in: workplace, to: "release")
 
         let persistedState = try XCTUnwrap(
             syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore)
         )
-        XCTAssertEqual(persistedState.lastError, "仓库有未提交的改动，无法切换分支")
-        XCTAssertEqual(persistedState.status, .failed)
+        XCTAssertEqual(persistedState.status, .success)
+        XCTAssertNil(persistedState.lastError)
+
+        let stashCalls = await gitService.stashedDirectories()
+        XCTAssertEqual(stashCalls, [localPath])
 
         let checkoutCalls = await gitService.checkedOutBranches()
-        XCTAssertTrue(checkoutCalls.isEmpty)
+        XCTAssertEqual(checkoutCalls.count, 1)
+        XCTAssertEqual(checkoutCalls.first?.branch, "release")
+        XCTAssertEqual(checkoutCalls.first?.directory, localPath)
+
+        let stashPopCalls = await gitService.stashPoppedDirectories()
+        XCTAssertEqual(stashPopCalls, [localPath])
     }
 
     func test_switchBranchSkipsCheckoutWhenRepositoryAlreadyOnTargetBranch() async throws {
@@ -1231,23 +1257,25 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         let result = try await service.switchRepositoriesToWorkBranch(in: workplace)
 
-        XCTAssertEqual(result, WorkplaceBulkBranchSwitchResult(successCount: 1, failedCount: 1))
+        XCTAssertEqual(result, WorkplaceBulkBranchSwitchResult(successCount: 2, failedCount: 0))
 
-        let failedState = try XCTUnwrap(
-            syncState(for: repositories[0].id, workplaceID: workplace.id, in: workplaceStore)
-        )
-        XCTAssertEqual(failedState.status, .failed)
-        XCTAssertEqual(failedState.lastError, "仓库有未提交的改动，无法切换分支")
+        let stashCalls = await gitService.stashedDirectories()
+        XCTAssertEqual(stashCalls, [localPaths[0]])
 
-        let succeededState = try XCTUnwrap(
-            syncState(for: repositories[1].id, workplaceID: workplace.id, in: workplaceStore)
-        )
-        XCTAssertEqual(succeededState.status, .success)
-        XCTAssertNil(succeededState.lastError)
+        let stashPopCalls = await gitService.stashPoppedDirectories()
+        XCTAssertEqual(stashPopCalls, [localPaths[0]])
+
+        for repository in repositories {
+            let persistedState = try XCTUnwrap(
+                syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore)
+            )
+            XCTAssertEqual(persistedState.status, .success)
+            XCTAssertNil(persistedState.lastError)
+        }
 
         let checkoutCalls = await gitService.checkedOutBranches()
-        XCTAssertEqual(checkoutCalls.count, 1)
-        XCTAssertEqual(checkoutCalls.first?.directory, localPaths[1])
+        XCTAssertEqual(checkoutCalls.count, 2)
+        XCTAssertEqual(checkoutCalls.map(\.branch), ["release/88", "release/88"])
     }
 
     func test_switchRepositoryToWorkBranchChecksOutConfiguredBranch() async throws {
@@ -1580,18 +1608,24 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
             workplaceRootPath: workspaceRoot.path
         )
 
-        await XCTAssertThrowsErrorAsync {
-            _ = try await service.mergeDefaultBranchIntoCurrent(for: state, in: workplace)
-        }
+        let outcome = try await service.mergeDefaultBranchIntoCurrent(for: state, in: workplace)
+
+        XCTAssertEqual(outcome, .merged)
 
         let persistedState = try XCTUnwrap(
             syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore)
         )
-        XCTAssertEqual(persistedState.status, .failed)
-        XCTAssertEqual(persistedState.lastError, "仓库有未提交的改动，无法合并默认分支")
+        XCTAssertEqual(persistedState.status, .success)
+        XCTAssertNil(persistedState.lastError)
+
+        let stashCalls = await gitService.stashedDirectories()
+        XCTAssertEqual(stashCalls, [localPath])
 
         let mergeCalls = await gitService.mergedDirectories()
-        XCTAssertTrue(mergeCalls.isEmpty)
+        XCTAssertEqual(mergeCalls, [localPath])
+
+        let stashPopCalls = await gitService.stashPoppedDirectories()
+        XCTAssertEqual(stashPopCalls, [localPath])
     }
 
     func test_mergeDefaultBranchIntoCurrentPersistsFailuresPerRepository() async throws {
@@ -1695,17 +1729,25 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         XCTAssertEqual(
             result,
-            WorkplaceBulkBranchSwitchResult(successCount: 1, failedCount: 1, skippedCount: 0)
+            WorkplaceBulkBranchSwitchResult(successCount: 2, failedCount: 0, skippedCount: 0)
         )
 
-        let failedState = try XCTUnwrap(
-            syncState(for: repositories[0].id, workplaceID: workplace.id, in: workplaceStore)
-        )
-        XCTAssertEqual(failedState.status, .failed)
-        XCTAssertEqual(failedState.lastError, "仓库有未提交的改动，无法合并默认分支")
+        let stashCalls = await gitService.stashedDirectories()
+        XCTAssertEqual(stashCalls, [localPaths[0]])
+
+        let stashPopCalls = await gitService.stashPoppedDirectories()
+        XCTAssertEqual(stashPopCalls, [localPaths[0]])
+
+        for repository in repositories {
+            let persistedState = try XCTUnwrap(
+                syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore)
+            )
+            XCTAssertEqual(persistedState.status, .success)
+            XCTAssertNil(persistedState.lastError)
+        }
 
         let mergeCalls = await gitService.mergedDirectories()
-        XCTAssertEqual(mergeCalls, [localPaths[1]])
+        XCTAssertEqual(Set(mergeCalls), Set(localPaths))
     }
 
     func test_retryCloneDoesNotRemoveCorruptedPathOutsideWorkplace() async throws {

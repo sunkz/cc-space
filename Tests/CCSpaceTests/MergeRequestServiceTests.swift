@@ -22,6 +22,8 @@ private actor MergeRequestGitServiceStub: GitServicing {
     func clone(repositoryURL: String, into directory: String) async throws {}
     func pull(in directory: String) async throws {}
     func push(in directory: String) async throws {}
+    func stash(in directory: String) async throws {}
+    func stashPop(in directory: String) async throws {}
     func isGitAvailable() async -> Bool { true }
     func defaultBranch(for remoteURL: String) async -> String? { defaultBranchForResult }
     func defaultBranch(in directory: String) async -> String? { defaultBranchInResult }

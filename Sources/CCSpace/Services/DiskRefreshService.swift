@@ -29,11 +29,20 @@ struct DiskRefreshService {
     }
 
     func refresh(rootPath: String) async {
+        var retryCount = 0
         while Task.isCancelled == false {
             let snapshot = currentSnapshot()
             let refreshResults = await refreshCalculator(snapshot, rootPath)
             guard Task.isCancelled == false else { return }
-            guard snapshot == currentSnapshot() else { continue }
+            retryCount += 1
+            guard snapshot == currentSnapshot(), retryCount <= 3 else {
+                if retryCount > 3 {
+                    workplaceStore.applyDiskRefreshResult(refreshResults.workplaceResult)
+                    repositoryStore.applyDeduplicationResult(refreshResults.repositoryResult)
+                    return
+                }
+                continue
+            }
 
             workplaceStore.applyDiskRefreshResult(refreshResults.workplaceResult)
             repositoryStore.applyDeduplicationResult(refreshResults.repositoryResult)

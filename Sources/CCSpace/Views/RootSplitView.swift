@@ -131,6 +131,7 @@ struct RootSplitView: View {
             await updateChecker.check()
         }
         .onReceive(Timer.publish(every: 3600, on: .main, in: .common).autoconnect()) { _ in
+            guard scenePhase == .active else { return }
             Task { await updateChecker.check() }
         }
         .onAppear {

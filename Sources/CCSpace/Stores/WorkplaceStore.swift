@@ -299,11 +299,20 @@ final class WorkplaceStore: ObservableObject {
         for i in updatedWorkplaces.indices {
             if updatedWorkplaces[i].selectedRepositoryIDs.contains(repositoryID) {
                 updatedWorkplaces[i].selectedRepositoryIDs.removeAll { $0 == repositoryID }
+                updatedWorkplaces[i].updatedAt = .now
                 changed = true
             }
         }
         if updatedSyncStates.contains(where: { $0.repositoryID == repositoryID }) {
             updatedSyncStates.removeAll { $0.repositoryID == repositoryID }
+            changed = true
+        }
+        let emptyWorkplaceIDs = Set(
+            updatedWorkplaces.filter { $0.selectedRepositoryIDs.isEmpty }.map(\.id)
+        )
+        if !emptyWorkplaceIDs.isEmpty {
+            updatedWorkplaces.removeAll { emptyWorkplaceIDs.contains($0.id) }
+            updatedSyncStates.removeAll { emptyWorkplaceIDs.contains($0.workplaceID) }
             changed = true
         }
         guard changed else { return }
@@ -463,10 +472,11 @@ final class WorkplaceStore: ObservableObject {
         updatedWorkplaces[index].updatedAt = .now
 
         var updatedSyncStates = syncStates
-        let oldPrefix = oldPath + "/"
+        let normalizedOldPrefix = Self.normalizedPath(oldPath) + "/"
         for i in updatedSyncStates.indices where updatedSyncStates[i].workplaceID == id {
-            if updatedSyncStates[i].localPath.hasPrefix(oldPrefix) {
-                let remaining = String(updatedSyncStates[i].localPath.dropFirst(oldPrefix.count))
+            let normalizedLocalPath = Self.normalizedPath(updatedSyncStates[i].localPath)
+            if normalizedLocalPath.hasPrefix(normalizedOldPrefix) {
+                let remaining = String(normalizedLocalPath.dropFirst(normalizedOldPrefix.count))
                 updatedSyncStates[i].localPath = newPath + "/" + remaining
             }
         }

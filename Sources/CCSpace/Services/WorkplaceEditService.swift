@@ -191,24 +191,53 @@ struct WorkplaceEditService {
             } catch {
                 editServiceLog.error("event=rollback_cleanup_failed reason=\(error.localizedDescription)")
             }
-            do {
-                try await restoreCheckedOutBranches(branchRollbacks)
-            } catch {
-                editServiceLog.error("event=rollback_branch_restore_failed reason=\(error.localizedDescription)")
-            }
-            do {
-                try restoreStagedItems(stagedRemovals)
-            } catch {
-                editServiceLog.error("event=rollback_restore_failed reason=\(error.localizedDescription)")
-            }
-            try? syncCoordinator.fileSystemService.removeItemIfExists(at: removalStagingRoot.path)
             if renamed {
                 do {
                     try FileManager.default.moveItem(atPath: newPath, toPath: oldPath)
                 } catch {
                     editServiceLog.error("event=rollback_rename_failed reason=\(error.localizedDescription)")
                 }
+                let rollbackBranches = branchRollbacks.map { rollback in
+                    WorkplaceEditBranchRollback(
+                        path: rollback.path.replacingOccurrences(
+                            of: newPath,
+                            with: oldPath
+                        ),
+                        branch: rollback.branch
+                    )
+                }
+                let rollbackStagedRemovals = stagedRemovals.map { item in
+                    (
+                        originalPath: item.originalPath.replacingOccurrences(
+                            of: newPath,
+                            with: oldPath
+                        ),
+                        stagedPath: item.stagedPath
+                    )
+                }
+                do {
+                    try await restoreCheckedOutBranches(rollbackBranches)
+                } catch {
+                    editServiceLog.error("event=rollback_branch_restore_failed reason=\(error.localizedDescription)")
+                }
+                do {
+                    try restoreStagedItems(rollbackStagedRemovals)
+                } catch {
+                    editServiceLog.error("event=rollback_restore_failed reason=\(error.localizedDescription)")
+                }
+            } else {
+                do {
+                    try await restoreCheckedOutBranches(branchRollbacks)
+                } catch {
+                    editServiceLog.error("event=rollback_branch_restore_failed reason=\(error.localizedDescription)")
+                }
+                do {
+                    try restoreStagedItems(stagedRemovals)
+                } catch {
+                    editServiceLog.error("event=rollback_restore_failed reason=\(error.localizedDescription)")
+                }
             }
+            try? syncCoordinator.fileSystemService.removeItemIfExists(at: removalStagingRoot.path)
             throw error
         }
     }

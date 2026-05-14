@@ -123,7 +123,7 @@ final class WorkplaceDetailFeedbackFactoryTests: XCTestCase {
         )
 
         XCTAssertEqual(feedback.style, .info)
-        XCTAssertEqual(feedback.message, "blog 当前不是默认分支，已跳过同步")
+        XCTAssertEqual(feedback.message, "blog 未关联远端分支，已跳过同步")
     }
 
     func test_switchBranchReturnsSuccessFeedback() {

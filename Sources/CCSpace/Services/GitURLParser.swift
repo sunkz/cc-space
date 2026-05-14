@@ -54,7 +54,9 @@ enum GitURLParser {
 
         switch location.provider {
         case .github:
-            components.path = "/\(location.repositoryPath)/compare/\(trimmedTargetBranch)...\(trimmedSourceBranch)"
+            let encodedTarget = trimmedTargetBranch.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? trimmedTargetBranch
+            let encodedSource = trimmedSourceBranch.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? trimmedSourceBranch
+            components.path = "/\(location.repositoryPath)/compare/\(encodedTarget)...\(encodedSource)"
             components.queryItems = [URLQueryItem(name: "expand", value: "1")]
         case .gitlab:
             components.path = "/\(location.repositoryPath)/merge_requests/new"

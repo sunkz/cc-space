@@ -230,26 +230,9 @@ extension WorkplaceSystemActions {
         }
 
         let process = Process()
-        let errorPipe = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         process.arguments = ["-a", editor.applicationURL.path, normalizedPath]
-        process.standardError = errorPipe
+        process.standardError = FileHandle.nullDevice
         try process.run()
-        process.waitUntilExit()
-
-        guard process.terminationStatus == 0 else {
-            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-            let errorMessage = String(data: errorData, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            throw NSError(
-                domain: "WorkplaceSystemActions",
-                code: Int(process.terminationStatus),
-                userInfo: [
-                    NSLocalizedDescriptionKey: errorMessage?.isEmpty == false
-                        ? errorMessage!
-                        : "无法使用 \(editor.displayName) 打开目录",
-                ]
-            )
-        }
     }
 }

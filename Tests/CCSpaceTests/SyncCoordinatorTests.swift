@@ -114,7 +114,15 @@ struct PullConcurrencyGitServiceSpy: GitServicing {
         await simulateGitWork()
         return "main"
     }
-    func branchStatus(in directory: String) async -> GitBranchStatusSnapshot? { nil }
+    func branchStatus(in directory: String) async -> GitBranchStatusSnapshot? {
+        GitBranchStatusSnapshot(
+            currentBranch: "main",
+            hasRemoteTrackingBranch: true,
+            hasUncommittedChanges: false,
+            hasUnpushedCommits: false,
+            isBehindRemote: false
+        )
+    }
     func branches(in directory: String) async -> [String] { [] }
     func remoteURL(in directory: String) async -> String? { nil }
     func checkoutBranch(_ branch: String, in directory: String) async throws {}
@@ -130,6 +138,13 @@ struct GitServiceStub: GitServicing {
     var defaultBranchResult: String? = "main"
     var currentBranchResult: String? = "main"
     var remoteURLResult: String? = "git@github.com:test/repo.git"
+    var branchStatusResult: GitBranchStatusSnapshot? = GitBranchStatusSnapshot(
+        currentBranch: "main",
+        hasRemoteTrackingBranch: true,
+        hasUncommittedChanges: false,
+        hasUnpushedCommits: false,
+        isBehindRemote: false
+    )
     let recorder = GitServiceRecorder()
 
     func clone(repositoryURL: String, into directory: String) async throws {
@@ -174,13 +189,7 @@ struct GitServiceStub: GitServicing {
     func defaultBranch(in directory: String) async -> String? { defaultBranchResult }
     func currentBranch(in directory: String) async -> String? { currentBranchResult }
     func branchStatus(in directory: String) async -> GitBranchStatusSnapshot? {
-        GitBranchStatusSnapshot(
-            currentBranch: currentBranchResult,
-            hasRemoteTrackingBranch: true,
-            hasUncommittedChanges: false,
-            hasUnpushedCommits: false,
-            isBehindRemote: false
-        )
+        branchStatusResult
     }
     func branches(in directory: String) async -> [String] { ["main"] }
     func remoteURL(in directory: String) async -> String? { remoteURLResult }
@@ -505,7 +514,7 @@ final class SyncCoordinatorTests: XCTestCase {
         )
     }
 
-    func test_pullMarksRepositoryFailedWhenCurrentBranchCannotBeResolved() async throws {
+    func test_pullMarksRepositoryFailedWhenBranchStatusCannotBeResolved() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let fileStore = JSONFileStore(rootDirectory: root)
@@ -532,9 +541,7 @@ final class SyncCoordinatorTests: XCTestCase {
 
         let gitService = GitServiceStub(
             behavior: .success,
-            defaultBranchResult: "main",
-            currentBranchResult: nil,
-            remoteURLResult: "git@github.com:org/api.git"
+            branchStatusResult: nil
         )
         let coordinator = SyncCoordinator(
             gitService: gitService,
@@ -550,7 +557,7 @@ final class SyncCoordinatorTests: XCTestCase {
         let pulledDirectories = await gitService.recorder.pulledDirectories
 
         XCTAssertEqual(syncResult?.status, .failed)
-        XCTAssertEqual(syncResult?.lastError, "无法识别当前分支")
+        XCTAssertEqual(syncResult?.lastError, "无法读取仓库 Git 状态")
         XCTAssertTrue(pulledDirectories.isEmpty)
         XCTAssertEqual(
             pullResult,
@@ -558,7 +565,7 @@ final class SyncCoordinatorTests: XCTestCase {
         )
     }
 
-    func test_pullMarksRepositoryFailedWhenDefaultBranchCannotBeResolved() async throws {
+    func test_pullSkipsRepositoryWhenNoRemoteTrackingBranch() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let fileStore = JSONFileStore(rootDirectory: root)
@@ -568,7 +575,7 @@ final class SyncCoordinatorTests: XCTestCase {
             repoName: "api", createdAt: .now, updatedAt: .now
         )
         let workplace = try store.createWorkplace(
-            name: "pull-default-branch-missing",
+            name: "pull-no-tracking",
             rootPath: workspaceRoot.path,
             selectedRepositories: [repository]
         )
@@ -585,9 +592,13 @@ final class SyncCoordinatorTests: XCTestCase {
 
         let gitService = GitServiceStub(
             behavior: .success,
-            defaultBranchResult: nil,
-            currentBranchResult: "main",
-            remoteURLResult: "git@github.com:org/api.git"
+            branchStatusResult: GitBranchStatusSnapshot(
+                currentBranch: "feature",
+                hasRemoteTrackingBranch: false,
+                hasUncommittedChanges: false,
+                hasUnpushedCommits: false,
+                isBehindRemote: false
+            )
         )
         let coordinator = SyncCoordinator(
             gitService: gitService,
@@ -599,15 +610,12 @@ final class SyncCoordinatorTests: XCTestCase {
             workplaceStore: store
         )
 
-        let syncResult = store.syncStates.first { $0.workplaceID == workplace.id && $0.repositoryID == repository.id }
         let pulledDirectories = await gitService.recorder.pulledDirectories
 
-        XCTAssertEqual(syncResult?.status, .failed)
-        XCTAssertEqual(syncResult?.lastError, "无法识别仓库默认分支")
-        XCTAssertTrue(pulledDirectories.isEmpty)
+        XCTAssertTrue(pulledDirectories.isEmpty, "无远端追踪分支不应执行 git pull")
         XCTAssertEqual(
             pullResult,
-            RepositoryPullResult(successCount: 0, failedCount: 1, skippedCount: 0)
+            RepositoryPullResult(successCount: 0, failedCount: 0, skippedCount: 1)
         )
     }
 
@@ -662,7 +670,7 @@ final class SyncCoordinatorTests: XCTestCase {
         )
     }
 
-    func test_pullSkipsSuccessRepositoryWhenCurrentBranchIsNotDefaultBranch() async throws {
+    func test_pullSkipsRepositoryWithoutTrackingBranchAndPreservesStatus() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let fileStore = JSONFileStore(rootDirectory: root)
@@ -693,9 +701,13 @@ final class SyncCoordinatorTests: XCTestCase {
 
         let gitService = GitServiceStub(
             behavior: .success,
-            defaultBranchResult: "main",
-            currentBranchResult: "feature/test",
-            remoteURLResult: "git@github.com:org/api.git"
+            branchStatusResult: GitBranchStatusSnapshot(
+                currentBranch: "feature/test",
+                hasRemoteTrackingBranch: false,
+                hasUncommittedChanges: false,
+                hasUnpushedCommits: false,
+                isBehindRemote: false
+            )
         )
         let coordinator = SyncCoordinator(
             gitService: gitService,
@@ -711,15 +723,15 @@ final class SyncCoordinatorTests: XCTestCase {
         let pulledDirectories = await gitService.recorder.pulledDirectories
 
         XCTAssertEqual(syncResult?.status, .success)
-        XCTAssertNil(syncResult?.lastSyncedAt, "非默认分支不应触发刷新")
-        XCTAssertTrue(pulledDirectories.isEmpty, "非默认分支仓库不应执行 git pull")
+        XCTAssertNil(syncResult?.lastSyncedAt, "无远端追踪分支不应触发刷新")
+        XCTAssertTrue(pulledDirectories.isEmpty, "无远端追踪分支仓库不应执行 git pull")
         XCTAssertEqual(
             pullResult,
             RepositoryPullResult(successCount: 0, failedCount: 0, skippedCount: 1)
         )
     }
 
-    func test_pullPreservesFailedRepositoryWhenCurrentBranchIsNotDefaultBranch() async throws {
+    func test_pullSkipsFailedRepositoryWithoutTrackingBranch() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let fileStore = JSONFileStore(rootDirectory: root)
         let store = WorkplaceStore(fileStore: fileStore)
@@ -754,9 +766,13 @@ final class SyncCoordinatorTests: XCTestCase {
 
         let gitService = GitServiceStub(
             behavior: .success,
-            defaultBranchResult: "main",
-            currentBranchResult: "feature/test",
-            remoteURLResult: "git@github.com:org/api.git"
+            branchStatusResult: GitBranchStatusSnapshot(
+                currentBranch: "feature/test",
+                hasRemoteTrackingBranch: false,
+                hasUncommittedChanges: false,
+                hasUnpushedCommits: false,
+                isBehindRemote: false
+            )
         )
         let coordinator = SyncCoordinator(
             gitService: gitService,

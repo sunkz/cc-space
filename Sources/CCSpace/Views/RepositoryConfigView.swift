@@ -63,6 +63,7 @@ struct RepositorySettingsSection: View {
                 pendingNewRepositoryID = newRepo.id
                 scrollToRepositoryID = newRepo.id
                 try? await Task.sleep(for: .milliseconds(350))
+                guard !Task.isCancelled else { return }
                 startEditing(newRepo)
             }
         } catch {
@@ -527,7 +528,7 @@ struct RepositorySettingsSection: View {
         fetchDefaultBranchTask?.cancel()
         fetchDefaultBranchTask = nil
         if let pendingID = pendingNewRepositoryID, editingRepositoryID == pendingID {
-            try? repositoryStore.removeRepository(id: pendingID)
+            try? repositoryStore.removeRepository(id: pendingID, workplaceStore: workplaceStore)
             pendingNewRepositoryID = nil
         }
         withAnimation(.easeInOut(duration: 0.2)) {

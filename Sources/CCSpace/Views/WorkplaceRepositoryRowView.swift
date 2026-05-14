@@ -30,6 +30,7 @@ struct WorkplaceRepositoryRowView: View {
     @State private var showingCommitLog = false
     @State private var commitLogEntries: [GitCommitEntry] = []
     @State private var isLoadingCommitLog = false
+    @State private var commitLogTask: Task<Void, Never>?
 
     private var presentationState: WorkplaceRepositoryRowPresentationState {
         WorkplaceRepositoryRowPresentationState(
@@ -216,11 +217,13 @@ struct WorkplaceRepositoryRowView: View {
     }
 
     private func loadCommitLog() {
+        commitLogTask?.cancel()
         isLoadingCommitLog = true
         commitLogEntries = []
         let localPath = state.localPath
-        Task {
+        commitLogTask = Task {
             let entries = await gitService.recentCommits(in: localPath, count: 20)
+            guard !Task.isCancelled else { return }
             isLoadingCommitLog = false
             commitLogEntries = entries
         }

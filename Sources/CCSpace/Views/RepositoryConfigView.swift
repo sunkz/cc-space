@@ -42,7 +42,8 @@ struct RepositorySettingsSection: View {
             editingRepositoryID: editingRepositoryID,
             editingGitURL: editingGitURL,
             editingMRBranches: editingMRBranches,
-            isPendingNew: pendingNewRepositoryID == repository.id
+            isPendingNew: pendingNewRepositoryID == repository.id,
+            isFetchingDefaultBranch: fetchingDefaultBranchForID == repository.id
         )
     }
 

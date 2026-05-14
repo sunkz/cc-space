@@ -45,7 +45,8 @@ struct RepositoryEditPresentationState {
         editingRepositoryID: UUID?,
         editingGitURL: String,
         editingMRBranches: [String] = [],
-        isPendingNew: Bool = false
+        isPendingNew: Bool = false,
+        isFetchingDefaultBranch: Bool = false
     ) {
         let trimmedGitURL = editingGitURL.trimmingCharacters(in: .whitespacesAndNewlines)
         isEditing = editingRepositoryID == repository.id
@@ -53,7 +54,7 @@ struct RepositoryEditPresentationState {
         let gitURLChanged = trimmedGitURL != repository.gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let mrBranchesChanged = editingMRBranches != repository.mrTargetBranches
         if isPendingNew {
-            canSubmit = isEditing && !trimmedGitURL.isEmpty
+            canSubmit = isEditing && !trimmedGitURL.isEmpty && !isFetchingDefaultBranch
         } else {
             canSubmit =
                 isEditing &&

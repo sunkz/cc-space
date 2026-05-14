@@ -111,6 +111,34 @@ final class RepositoryConfigPresentationStateTests: XCTestCase {
         XCTAssertFalse(nothingChangedState.canSubmit)
     }
 
+    func test_editStatePendingNewBlocksSubmitWhileFetchingDefaultBranch() {
+        let repository = RepositoryConfig(
+            id: UUID(),
+            gitURL: "git@github.com:org/blog.git",
+            repoName: "blog",
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+
+        let fetchingState = RepositoryEditPresentationState(
+            repository: repository,
+            editingRepositoryID: repository.id,
+            editingGitURL: "git@github.com:org/blog.git",
+            isPendingNew: true,
+            isFetchingDefaultBranch: true
+        )
+        let readyState = RepositoryEditPresentationState(
+            repository: repository,
+            editingRepositoryID: repository.id,
+            editingGitURL: "git@github.com:org/blog.git",
+            isPendingNew: true,
+            isFetchingDefaultBranch: false
+        )
+
+        XCTAssertFalse(fetchingState.canSubmit)
+        XCTAssertTrue(readyState.canSubmit)
+    }
+
     func test_backupExportStateUsesTimestampedDefaultName() {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .gmt

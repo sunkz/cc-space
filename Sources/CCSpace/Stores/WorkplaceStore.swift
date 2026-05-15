@@ -112,14 +112,11 @@ final class WorkplaceStore: ObservableObject {
         workplaces newWorkplaces: [Workplace],
         syncStates newSyncStates: [RepositorySyncState]
     ) throws {
-        let previousWorkplaces = workplaces
-        try fileStore.save(newWorkplaces, as: "workplaces.json")
-        do {
-            try fileStore.save(newSyncStates, as: "sync-states.json")
-        } catch {
-            try? fileStore.save(previousWorkplaces, as: "workplaces.json")
-            throw error
-        }
+        let documents = try [
+            fileStore.document(for: newWorkplaces, as: "workplaces.json"),
+            fileStore.document(for: newSyncStates, as: "sync-states.json"),
+        ]
+        try fileStore.save(documents)
 
         workplaces = newWorkplaces
         syncStates = newSyncStates

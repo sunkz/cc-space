@@ -2,30 +2,11 @@ import Foundation
 
 enum GitURLParser {
     static func repositoryName(from gitURL: String) throws -> String {
-        guard let tail = gitURL.split(separator: "/").last.map({
-            let segment = String($0)
-            if let colonIndex = segment.lastIndex(of: ":") {
-                return segment[segment.index(after: colonIndex)...]
-            }
-            return segment[...]
-        }) ?? gitURL.split(separator: ":").last else {
-            throw NSError(
-                domain: "GitURLParser",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "无法解析仓库名称"]
-            )
+        if let location = try? repositoryWebLocation(from: gitURL) {
+            return try repositoryName(fromRepositoryPath: location.repositoryPath)
         }
 
-        let repositoryName = tail.hasSuffix(".git") ? String(tail.dropLast(4)) : String(tail)
-        guard repositoryName.isEmpty == false else {
-            throw NSError(
-                domain: "GitURLParser",
-                code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "仓库名称不能为空"]
-            )
-        }
-
-        return repositoryName
+        return try repositoryNameFromLegacyTail(gitURL)
     }
 
     static func mergeRequestURL(
@@ -128,6 +109,35 @@ private extension GitURLParser {
             return String(trimmedPath.dropLast(4))
         }
         return trimmedPath
+    }
+
+    static func repositoryName(fromRepositoryPath repositoryPath: String) throws -> String {
+        guard let tail = repositoryPath.split(separator: "/").last else {
+            throw gitURLParserError("无法解析仓库名称")
+        }
+        let repositoryName = String(tail)
+        guard repositoryName.isEmpty == false else {
+            throw gitURLParserError("仓库名称不能为空")
+        }
+        return repositoryName
+    }
+
+    static func repositoryNameFromLegacyTail(_ gitURL: String) throws -> String {
+        guard let tail = gitURL.split(separator: "/").last.map({
+            let segment = String($0)
+            if let colonIndex = segment.lastIndex(of: ":") {
+                return segment[segment.index(after: colonIndex)...]
+            }
+            return segment[...]
+        }) ?? gitURL.split(separator: ":").last else {
+            throw gitURLParserError("无法解析仓库名称")
+        }
+
+        let repositoryName = tail.hasSuffix(".git") ? String(tail.dropLast(4)) : String(tail)
+        guard repositoryName.isEmpty == false else {
+            throw gitURLParserError("仓库名称不能为空")
+        }
+        return repositoryName
     }
 
     static func scpStyleRepositoryLocation(

@@ -9,6 +9,13 @@ final class GitURLParserTests: XCTestCase {
         )
     }
 
+    func test_extractsRepositoryNameFromNestedHTTPSURL() throws {
+        XCTAssertEqual(
+            try GitURLParser.repositoryName(from: "https://gitlab.example.com/mobile/ios/client.git"),
+            "client"
+        )
+    }
+
     func test_buildsGitLabMergeRequestURLFromSSHURL() throws {
         let url = try GitURLParser.mergeRequestURL(
             from: "git@code.example.com:mobile/app.git",

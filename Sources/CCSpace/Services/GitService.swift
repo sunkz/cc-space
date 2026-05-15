@@ -114,6 +114,8 @@ enum GitWorktreeBlockedOperation: Equatable, Sendable {
 enum GitWorktreeSafetyError: LocalizedError, Equatable, Sendable {
     case unreadableStatus
     case uncommittedChanges(blockedOperation: GitWorktreeBlockedOperation)
+    case stashRestoreFailed(reason: String)
+    case operationAndStashRestoreFailed(operationReason: String, restoreReason: String)
 
     var errorDescription: String? {
         switch self {
@@ -126,6 +128,10 @@ enum GitWorktreeSafetyError: LocalizedError, Equatable, Sendable {
             case .mergeDefaultBranchIntoCurrent:
                 return "仓库有未提交的改动，无法合并默认分支"
             }
+        case .stashRestoreFailed(let reason):
+            return "操作已完成，但恢复临时保存的本地改动失败：\(reason)"
+        case .operationAndStashRestoreFailed(let operationReason, let restoreReason):
+            return "操作失败：\(operationReason)。同时恢复临时保存的本地改动失败：\(restoreReason)"
         }
     }
 }
@@ -164,15 +170,28 @@ enum GitWorktreeSafety {
 
         do {
             try await body()
-        } catch {
+        } catch let operationError {
             if didStash {
-                try? await gitService.stashPop(in: directory)
+                do {
+                    try await gitService.stashPop(in: directory)
+                } catch let restoreError {
+                    throw GitWorktreeSafetyError.operationAndStashRestoreFailed(
+                        operationReason: operationError.localizedDescription,
+                        restoreReason: restoreError.localizedDescription
+                    )
+                }
             }
-            throw error
+            throw operationError
         }
 
         if didStash {
-            try? await gitService.stashPop(in: directory)
+            do {
+                try await gitService.stashPop(in: directory)
+            } catch {
+                throw GitWorktreeSafetyError.stashRestoreFailed(
+                    reason: error.localizedDescription
+                )
+            }
         }
     }
 }
@@ -206,7 +225,14 @@ struct GitService: GitServicing {
     }
 
     func stash(in directory: String) async throws {
-        try await runGit(arguments: ["-C", directory, "stash"])
+        try await runGit(arguments: [
+            "-C", directory,
+            "stash",
+            "push",
+            "--include-untracked",
+            "--message",
+            "CCSpace temporary worktree safety stash",
+        ])
     }
 
     func stashPop(in directory: String) async throws {
@@ -512,83 +538,12 @@ struct GitService: GitServicing {
         captureStderr: Bool,
         timeout: TimeInterval = 60
     ) async throws -> GitProcessResult {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["git"] + arguments
-
-        var environment = ProcessInfo.processInfo.environment
-        environment["GIT_TERMINAL_PROMPT"] = "0"
-        environment["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes"
-        process.environment = environment
-
-        let stdoutPipe = captureStdout ? Pipe() : nil
-        let stderrPipe = captureStderr ? Pipe() : nil
-        process.standardOutput = stdoutPipe ?? FileHandle.nullDevice
-        process.standardError = stderrPipe ?? FileHandle.nullDevice
-        process.standardInput = FileHandle.nullDevice
-
-        let processBox = SendableProcessBox(process)
-
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                let stdoutBox = SendableDataBox()
-                let stderrBox = SendableDataBox()
-                let readGroup = DispatchGroup()
-
-                if let pipe = stdoutPipe {
-                    readGroup.enter()
-                    DispatchQueue.global().async {
-                        stdoutBox.data = pipe.fileHandleForReading.readDataToEndOfFile()
-                        readGroup.leave()
-                    }
-                }
-
-                if let pipe = stderrPipe {
-                    readGroup.enter()
-                    DispatchQueue.global().async {
-                        stderrBox.data = pipe.fileHandleForReading.readDataToEndOfFile()
-                        readGroup.leave()
-                    }
-                }
-
-                nonisolated(unsafe) let timeoutWork = DispatchWorkItem { [processBox] in
-                    guard processBox.process.isRunning else { return }
-                    processBox.process.terminate()
-                }
-
-                process.terminationHandler = { completedProcess in
-                    timeoutWork.cancel()
-                    readGroup.notify(queue: .global()) {
-                        continuation.resume(
-                            returning: GitProcessResult(
-                                terminationStatus: completedProcess.terminationStatus,
-                                stdoutData: stdoutBox.data,
-                                stderrData: stderrBox.data
-                            )
-                        )
-                    }
-                }
-
-                do {
-                    try process.run()
-                } catch {
-                    process.terminationHandler = nil
-                    timeoutWork.cancel()
-                    stdoutPipe?.fileHandleForReading.closeFile()
-                    stderrPipe?.fileHandleForReading.closeFile()
-                    continuation.resume(throwing: error)
-                    return
-                }
-
-                DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timeoutWork)
-            }
-        } onCancel: {
-            if processBox.process.isRunning {
-                processBox.process.terminate()
-            }
-            stdoutPipe?.fileHandleForReading.closeFile()
-            stderrPipe?.fileHandleForReading.closeFile()
-        }
+        try await GitProcessRunner().run(
+            arguments: arguments,
+            captureStdout: captureStdout,
+            captureStderr: captureStderr,
+            timeout: timeout
+        )
     }
 
     private func parseDefaultBranch(lsRemoteOutput output: String) -> String? {
@@ -609,29 +564,5 @@ struct GitService: GitServicing {
             code: -1,
             userInfo: [NSLocalizedDescriptionKey: message]
         )
-    }
-}
-
-private struct GitProcessResult {
-    let terminationStatus: Int32
-    let stdoutData: Data
-    let stderrData: Data
-}
-
-private final class SendableProcessBox: @unchecked Sendable {
-    let process: Process
-
-    init(_ process: Process) {
-        self.process = process
-    }
-}
-
-private final class SendableDataBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var _data = Data()
-
-    var data: Data {
-        get { lock.lock(); defer { lock.unlock() }; return _data }
-        set { lock.lock(); defer { lock.unlock() }; _data = newValue }
     }
 }

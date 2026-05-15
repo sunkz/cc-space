@@ -18,6 +18,7 @@ private actor WorkplaceRuntimeGitServiceSpy: GitServicing {
     var checkoutErrorsByDirectory: [String: Error] = [:]
     var pushErrorsByDirectory: [String: Error] = [:]
     var mergeErrorsByDirectory: [String: Error] = [:]
+    var stashPopErrorsByDirectory: [String: Error] = [:]
     var mergeOutcomesByDirectory: [String: GitMergeDefaultBranchOutcome] = [:]
     var branchStatusesByDirectory: [String: GitBranchStatusSnapshot] = [:]
     var unreadableBranchStatusDirectories: Set<String> = []
@@ -52,6 +53,9 @@ private actor WorkplaceRuntimeGitServiceSpy: GitServicing {
     }
     func stashPop(in directory: String) async throws {
         stashPopCalls.append(directory)
+        if let error = stashPopErrorsByDirectory[directory] {
+            throw error
+        }
     }
 
     func isGitAvailable() async -> Bool { true }
@@ -154,6 +158,10 @@ private actor WorkplaceRuntimeGitServiceSpy: GitServicing {
 
     func setPushError(_ error: Error?, for directory: String) {
         pushErrorsByDirectory[directory] = error
+    }
+
+    func setStashPopError(_ error: Error?, for directory: String) {
+        stashPopErrorsByDirectory[directory] = error
     }
 
     func setDefaultBranchResult(_ result: String?) {
@@ -1092,6 +1100,60 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         let stashPopCalls = await gitService.stashPoppedDirectories()
         XCTAssertEqual(stashPopCalls, [localPath])
+    }
+
+    func test_switchBranchPersistsFailureWhenStashRestoreFails() async throws {
+        let stores = try makeServiceStores()
+        let repositoryStore = stores.repositoryStore
+        let workplaceStore = stores.workplaceStore
+        let workspaceRoot = stores.workspaceRoot
+
+        try repositoryStore.addRepository(gitURL: "git@github.com:org/blog.git")
+        let repository = try XCTUnwrap(repositoryStore.repositories.first)
+        let workplace = try workplaceStore.createWorkplace(
+            name: "blog",
+            rootPath: workspaceRoot.path,
+            selectedRepositories: [repository]
+        )
+
+        let localPath = URL(fileURLWithPath: workplace.path).appendingPathComponent(repository.repoName).path
+        try FileManager.default.createDirectory(
+            atPath: localPath,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+
+        var state = try XCTUnwrap(syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore))
+        state.status = .success
+        state.localPath = localPath
+        try workplaceStore.updateSyncState(state)
+
+        let gitService = WorkplaceRuntimeGitServiceSpy()
+        await gitService.setCurrentBranch("main", for: localPath)
+        await gitService.setBranchStatus(
+            makeBranchStatus(currentBranch: "main", hasUncommittedChanges: true),
+            for: localPath
+        )
+        await gitService.setStashPopError(
+            WorkplaceRuntimeStubError(message: "stash pop conflict"),
+            for: localPath
+        )
+        let service = WorkplaceRuntimeService(
+            workplaceStore: workplaceStore,
+            syncCoordinator: SyncCoordinator(gitService: gitService),
+            workplaceRootPath: workspaceRoot.path
+        )
+
+        await XCTAssertThrowsErrorAsync {
+            try await service.switchBranch(for: state, in: workplace, to: "release")
+        }
+
+        let persistedState = try XCTUnwrap(
+            syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore)
+        )
+        XCTAssertEqual(persistedState.status, .failed)
+        XCTAssertTrue(persistedState.lastError?.contains("恢复临时保存的本地改动失败") == true)
+        XCTAssertTrue(persistedState.lastError?.contains("stash pop conflict") == true)
     }
 
     func test_switchBranchSkipsCheckoutWhenRepositoryAlreadyOnTargetBranch() async throws {

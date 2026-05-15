@@ -252,6 +252,61 @@ final class GitServiceTests: XCTestCase {
         XCTAssertEqual(remoteHead, localHead)
     }
 
+    func test_stashIncludesUntrackedFilesAndRestoresThem() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let repository = root.appendingPathComponent("repo")
+
+        _ = try shell(["git", "init", repository.path])
+        _ = try shell(["git", "-C", repository.path, "config", "user.email", "test@example.com"])
+        _ = try shell(["git", "-C", repository.path, "config", "user.name", "test"])
+        FileManager.default.createFile(
+            atPath: repository.appendingPathComponent("README.md").path,
+            contents: Data("hello".utf8)
+        )
+        _ = try shell(["git", "-C", repository.path, "add", "README.md"])
+        _ = try shell(["git", "-C", repository.path, "commit", "-m", "init"])
+
+        try Data("changed".utf8).write(to: repository.appendingPathComponent("README.md"))
+        FileManager.default.createFile(
+            atPath: repository.appendingPathComponent("notes.txt").path,
+            contents: Data("untracked".utf8)
+        )
+
+        let service = GitService()
+        try await service.stash(in: repository.path)
+
+        let cleanStatus = try shell(["git", "-C", repository.path, "status", "--porcelain"])
+        XCTAssertTrue(cleanStatus.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repository.appendingPathComponent("notes.txt").path))
+
+        try await service.stashPop(in: repository.path)
+
+        let restoredStatus = try shell(["git", "-C", repository.path, "status", "--porcelain"])
+        XCTAssertTrue(restoredStatus.contains("M README.md"))
+        XCTAssertTrue(restoredStatus.contains("?? notes.txt"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: repository.appendingPathComponent("notes.txt").path))
+    }
+
+    func test_gitProcessRunnerReportsTimeoutWithSafeCommandDescription() async throws {
+        do {
+            _ = try await GitProcessRunner().run(
+                arguments: [
+                    "-c",
+                    "alias.ccspace-sleep=!sleep 2",
+                    "ccspace-sleep",
+                ],
+                captureStdout: true,
+                captureStderr: true,
+                timeout: 0.1
+            )
+            XCTFail("Expected timeout")
+        } catch let error as GitProcessExecutionError {
+            XCTAssertTrue(error.localizedDescription.contains("git 命令超时"))
+            XCTAssertTrue(error.localizedDescription.contains("git -c"))
+        }
+    }
+
     private func shell(_ arguments: [String]) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")

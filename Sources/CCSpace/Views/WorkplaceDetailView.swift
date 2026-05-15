@@ -36,6 +36,8 @@ struct WorkplaceDetailView: View {
     @State private var showingDeleteConfirmation = false
     @State private var periodicRefreshSeed = 0
     @State private var manualRefreshSeed = 0
+    @State private var branchRefreshTask: Task<Void, Never>?
+    @State private var hasQueuedBranchRefresh = false
 
     private var workplaceSyncStates: [RepositorySyncState] {
         syncStates.filter { $0.workplaceID == workplace.id }
@@ -210,8 +212,13 @@ struct WorkplaceDetailView: View {
             guard workplaceSyncStates.contains(where: \.hasLocalDirectory) else { return }
             periodicRefreshSeed += 1
         }
-        .task(id: branchRefreshToken) {
-            await loadBranches()
+        .onChange(of: branchRefreshToken, initial: true) { _, _ in
+            scheduleBranchSnapshotRefresh()
+        }
+        .onDisappear {
+            branchRefreshTask?.cancel()
+            branchRefreshTask = nil
+            hasQueuedBranchRefresh = false
         }
     }
 
@@ -367,6 +374,22 @@ struct WorkplaceDetailView: View {
         )
         guard Task.isCancelled == false else { return }
         branchSnapshots = snapshots
+    }
+
+    private func scheduleBranchSnapshotRefresh() {
+        guard branchRefreshTask == nil else {
+            hasQueuedBranchRefresh = true
+            return
+        }
+
+        branchRefreshTask = Task { @MainActor in
+            repeat {
+                hasQueuedBranchRefresh = false
+                await loadBranches()
+            } while hasQueuedBranchRefresh && Task.isCancelled == false
+
+            branchRefreshTask = nil
+        }
     }
 
     private var repositorySection: some View {

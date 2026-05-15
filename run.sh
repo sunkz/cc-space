@@ -5,12 +5,13 @@ APP_NAME="CCSpace"
 BUILD_DIR=".build"
 
 usage() {
-    echo "Usage: $0 [build|run|test|clean|readme-screenshots|help] [args]"
+    echo "Usage: $0 [build|run|test|lint|clean|readme-screenshots|help] [args]"
     echo ""
     echo "Commands:"
     echo "  build             - Build the debug executable with SwiftPM"
     echo "  run               - Build and launch the app bundle"
     echo "  test              - Run unit tests"
+    echo "  lint              - Validate shell scripts and compile with warnings as errors"
     echo "  clean             - Remove SwiftPM build artifacts"
     echo "  readme-screenshots - Recreate only the README-referenced screenshots"
     echo "  help              - Show this help message"
@@ -36,52 +37,16 @@ cmd_run() {
     local build_binary="${BUILD_DIR}/debug/${APP_NAME}"
     local dist_dir="./dist"
     local app_bundle="${dist_dir}/${APP_NAME}.app"
-    local app_contents="${app_bundle}/Contents"
-    local app_macos="${app_contents}/MacOS"
-    local app_binary="${app_macos}/${APP_NAME}"
-    local info_plist="${app_contents}/Info.plist"
 
     # Derive version from latest git tag
     local version
     version="$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")"
     version="${version#v}"
 
-    rm -rf "${app_bundle}"
-    mkdir -p "${app_macos}"
-    cp "${build_binary}" "${app_binary}"
-    chmod +x "${app_binary}"
-
-    # Copy app icon
-    local app_resources="${app_contents}/Resources"
-    mkdir -p "${app_resources}"
-    cp "Resources/AppIcon.icns" "${app_resources}/AppIcon.icns"
-
-    cat >"${info_plist}" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleExecutable</key>
-  <string>${APP_NAME}</string>
-  <key>CFBundleIdentifier</key>
-  <string>com.ccspace.app</string>
-  <key>CFBundleIconFile</key>
-  <string>AppIcon</string>
-  <key>CFBundleName</key>
-  <string>${APP_NAME}</string>
-  <key>CFBundlePackageType</key>
-  <string>APPL</string>
-  <key>CFBundleShortVersionString</key>
-  <string>${version}</string>
-  <key>CFBundleVersion</key>
-  <string>${version}</string>
-  <key>LSMinimumSystemVersion</key>
-  <string>14.0</string>
-  <key>NSPrincipalClass</key>
-  <string>NSApplication</string>
-</dict>
-</plist>
-PLIST
+    ./script/package_app.sh \
+        --binary "${build_binary}" \
+        --output "${app_bundle}" \
+        --version "${version}" >/dev/null
 
     /usr/bin/open -n "${app_bundle}"
 }
@@ -89,6 +54,17 @@ PLIST
 cmd_test() {
     echo "=> Running tests..."
     swift test
+}
+
+cmd_lint() {
+    echo "=> Validating shell scripts..."
+    bash -n ./run.sh
+    bash -n ./release.sh
+    bash -n ./script/package_app.sh
+    bash -n ./script/generate_readme_screenshots.sh
+
+    echo "=> Building with warnings as errors..."
+    swift build --product "${APP_NAME}" -Xswiftc -warnings-as-errors
 }
 
 cmd_clean() {
@@ -109,6 +85,7 @@ case "${COMMAND}" in
     build) cmd_build ;;
     run) cmd_run ;;
     test) cmd_test ;;
+    lint) cmd_lint ;;
     clean) cmd_clean ;;
     readme-screenshots) cmd_readme_screenshots "$@" ;;
     help|-h|--help) usage ;;

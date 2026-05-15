@@ -20,8 +20,8 @@ jobs:
       - name: Select latest Xcode
         run: sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)/Contents/Developer"
 
-      - name: Validate scripts
-        run: bash -n ./release.sh
+      - name: Validate scripts and lint
+        run: ./run.sh lint
 
       - name: Run tests
         run: swift test
@@ -116,7 +116,6 @@ jobs:
 
           APP_NAME="CCSpace"
           DISPLAY_NAME="CCSpace"
-          BUNDLE_ID="com.ccspace.app"
           VERSION="${TAG_NAME#v}"
           DIST_DIR="./dist"
 
@@ -135,28 +134,11 @@ jobs:
 
           # Assemble app bundle
           APP_BUNDLE="${DIST_DIR}/${DISPLAY_NAME}.app"
-          APP_MACOS="${APP_BUNDLE}/Contents/MacOS"
-          mkdir -p "${APP_MACOS}"
-          mv "${DIST_DIR}/${APP_NAME}" "${APP_MACOS}/${APP_NAME}"
-          chmod +x "${APP_MACOS}/${APP_NAME}"
-
-          # Copy app icon
-          APP_RESOURCES="${APP_BUNDLE}/Contents/Resources"
-          mkdir -p "${APP_RESOURCES}"
-          cp "Resources/AppIcon.icns" "${APP_RESOURCES}/AppIcon.icns"
-
-          /usr/libexec/PlistBuddy \
-            -c "Clear dict" \
-            -c "Add :CFBundleExecutable string ${APP_NAME}" \
-            -c "Add :CFBundleIdentifier string ${BUNDLE_ID}" \
-            -c "Add :CFBundleIconFile string AppIcon" \
-            -c "Add :CFBundleName string CCSpace" \
-            -c "Add :CFBundlePackageType string APPL" \
-            -c "Add :CFBundleShortVersionString string ${VERSION}" \
-            -c "Add :CFBundleVersion string ${VERSION}" \
-            -c "Add :LSMinimumSystemVersion string 14.0" \
-            -c "Add :NSPrincipalClass string NSApplication" \
-            "${APP_BUNDLE}/Contents/Info.plist"
+          ./script/package_app.sh \
+            --binary "${DIST_DIR}/${APP_NAME}" \
+            --output "${APP_BUNDLE}" \
+            --version "${VERSION}" >/dev/null
+          rm -f "${DIST_DIR}/${APP_NAME}"
 
           # Code sign if identity is available
           if [ -n "${SIGNING_IDENTITY:-}" ]; then

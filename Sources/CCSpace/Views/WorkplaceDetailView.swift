@@ -227,7 +227,7 @@ struct WorkplaceDetailView: View {
             Button {
                 onEdit()
             } label: {
-                Image(systemName: "pencil")
+                Image(systemName: "square.and.pencil")
             }
             .accessibilityLabel("编辑工作区")
             .ccspaceToolbarActionButton(prominent: true)

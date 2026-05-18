@@ -138,39 +138,9 @@ private func normalizedBranches(
 
 enum WorkplaceSystemActions {
     static func openTerminal(at path: String) throws {
-        let isTerminalRunning = NSWorkspace.shared.runningApplications.contains {
-            $0.bundleIdentifier == "com.apple.Terminal"
-        }
-
-        if isTerminalRunning {
-            try openTerminalTab(at: path)
-        } else {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-            process.arguments = ["-a", "Terminal", path]
-            try process.run()
-        }
-    }
-
-    private static func openTerminalTab(at path: String) throws {
-        let escapedPath = path.replacingOccurrences(of: "'", with: "'\\''")
-        let source = """
-            tell application "Terminal"
-                activate
-                if (count of windows) > 0 then
-                    tell application "System Events" to tell process "Terminal"
-                        keystroke "t" using command down
-                    end tell
-                    delay 0.3
-                    do script "cd '\(escapedPath)'" in front window
-                else
-                    do script "cd '\(escapedPath)'"
-                end if
-            end tell
-            """
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", source]
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = ["-a", "Terminal", path]
         try process.run()
     }
 

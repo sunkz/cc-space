@@ -51,11 +51,18 @@ final class WorkplaceStore: ObservableObject {
 
     init(fileStore: JSONFileStore) {
         self.fileStore = fileStore
-        self.workplaces =
-            (try? fileStore.loadIfPresent([Workplace].self, from: "workplaces.json", default: [])) ?? []
-        self.syncStates =
-            (try? fileStore.loadIfPresent([RepositorySyncState].self, from: "sync-states.json", default: []))
-            ?? []
+        do {
+            self.workplaces = try fileStore.loadIfPresent([Workplace].self, from: "workplaces.json", default: [])
+        } catch {
+            workplaceStoreLog.error("event=load_workplaces_failed reason=\(error.localizedDescription)")
+            self.workplaces = []
+        }
+        do {
+            self.syncStates = try fileStore.loadIfPresent([RepositorySyncState].self, from: "sync-states.json", default: [])
+        } catch {
+            workplaceStoreLog.error("event=load_sync_states_failed reason=\(error.localizedDescription)")
+            self.syncStates = []
+        }
     }
 
     nonisolated static func normalizedPath(_ path: String) -> String {
@@ -191,15 +198,44 @@ final class WorkplaceStore: ObservableObject {
         return workplace
     }
 
-    func updateRepositories(for workplaceID: UUID, selectedRepositoryIDs: [UUID]) throws {
+    func updateRepositories(
+        for workplaceID: UUID,
+        selectedRepositoryIDs: [UUID],
+        repositories: [RepositoryConfig] = []
+    ) throws {
         guard let index = workplaces.firstIndex(where: { $0.id == workplaceID }) else { return }
         let selectedSet = Set(selectedRepositoryIDs)
+        let workplacePath = workplaces[index].path
 
         var updatedWorkplaces = workplaces
         updatedWorkplaces[index].selectedRepositoryIDs = selectedRepositoryIDs
         updatedWorkplaces[index].updatedAt = .now
-        let updatedSyncStates = syncStates.filter {
+
+        var updatedSyncStates = syncStates.filter {
             $0.workplaceID != workplaceID || selectedSet.contains($0.repositoryID)
+        }
+
+        let existingSyncStateRepoIDs = Set(
+            syncStates.filter { $0.workplaceID == workplaceID }.map(\.repositoryID)
+        )
+        let newlyAddedIDs = selectedSet.subtracting(existingSyncStateRepoIDs)
+        if !newlyAddedIDs.isEmpty {
+            let reposByID = Dictionary(uniqueKeysWithValues: repositories.map { ($0.id, $0) })
+            for repoID in newlyAddedIDs {
+                let repoName = reposByID[repoID]?.repoName ?? repoID.uuidString
+                let localPath = (try? Self.repositoryPath(
+                    workplacePath: workplacePath,
+                    repositoryName: repoName
+                )) ?? "\(workplacePath)/\(repoName)"
+                updatedSyncStates.append(RepositorySyncState(
+                    workplaceID: workplaceID,
+                    repositoryID: repoID,
+                    status: .idle,
+                    localPath: localPath,
+                    lastError: nil,
+                    lastSyncedAt: nil
+                ))
+            }
         }
 
         try persist(workplaces: updatedWorkplaces, syncStates: updatedSyncStates)
@@ -288,7 +324,8 @@ final class WorkplaceStore: ObservableObject {
         try persistWorkplaces(updatedWorkplaces)
     }
 
-    func removeRepositoryAssociations(repositoryID: UUID) {
+    @discardableResult
+    func removeRepositoryAssociations(repositoryID: UUID) -> Bool {
         var changed = false
         var updatedWorkplaces = workplaces
         var updatedSyncStates = syncStates
@@ -312,14 +349,16 @@ final class WorkplaceStore: ObservableObject {
             updatedSyncStates.removeAll { emptyWorkplaceIDs.contains($0.workplaceID) }
             changed = true
         }
-        guard changed else { return }
+        guard changed else { return true }
         do {
             try persist(
                 workplaces: updatedWorkplaces,
                 syncStates: updatedSyncStates
             )
+            return true
         } catch {
-            workplaceStoreLog.error("event=remove_repository_associations_save_failed reason=\(error.localizedDescription)")
+            workplaceStoreLog.error("event=remove_repository_associations_save_failed repository_id=\(repositoryID) reason=\(error.localizedDescription)")
+            return false
         }
     }
 
@@ -485,7 +524,11 @@ final class WorkplaceStore: ObservableObject {
             )
         } catch {
             // Roll back filesystem rename before rethrowing
-            try? FileManager.default.moveItem(atPath: newPath, toPath: oldPath)
+            do {
+                try FileManager.default.moveItem(atPath: newPath, toPath: oldPath)
+            } catch let rollbackError {
+                workplaceStoreLog.error("event=rename_rollback_failed from=\(newPath) to=\(oldPath) reason=\(rollbackError.localizedDescription)")
+            }
             throw error
         }
     }

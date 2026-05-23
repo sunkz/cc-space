@@ -26,6 +26,7 @@ struct WorkplaceDetailView: View {
     let onMergeDefaultBranchIntoCurrent: () -> Void
     let onSwitchAllRepositoriesToDefaultBranch: () -> Void
     let onSwitchAllRepositoriesToWorkBranch: () -> Void
+    let onCancelAction: () -> Void
     let isPerformingAction: Bool
     let branchRefreshSeed: Int
     let gitService: GitServicing
@@ -85,6 +86,7 @@ struct WorkplaceDetailView: View {
     private var feedbackBanner: some View {
         if let feedback {
             CCSpaceFeedbackBanner(feedback: feedback)
+                .transition(.move(edge: .top).combined(with: .opacity))
                 .ccspaceAutoDismissFeedback($feedback)
         }
     }
@@ -133,6 +135,7 @@ struct WorkplaceDetailView: View {
         onMergeDefaultBranchIntoCurrent: @escaping () -> Void = {},
         onSwitchAllRepositoriesToDefaultBranch: @escaping () -> Void = {},
         onSwitchAllRepositoriesToWorkBranch: @escaping () -> Void = {},
+        onCancelAction: @escaping () -> Void = {},
         isPerformingAction: Bool = false,
         branchRefreshSeed: Int = 0,
         feedback: Binding<CCSpaceFeedback?> = .constant(nil),
@@ -159,6 +162,7 @@ struct WorkplaceDetailView: View {
         self.onMergeDefaultBranchIntoCurrent = onMergeDefaultBranchIntoCurrent
         self.onSwitchAllRepositoriesToDefaultBranch = onSwitchAllRepositoriesToDefaultBranch
         self.onSwitchAllRepositoriesToWorkBranch = onSwitchAllRepositoriesToWorkBranch
+        self.onCancelAction = onCancelAction
         self.isPerformingAction = isPerformingAction
         self.branchRefreshSeed = branchRefreshSeed
         self._feedback = feedback
@@ -170,6 +174,7 @@ struct WorkplaceDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 feedbackBanner
+                    .animation(.snappy(duration: 0.25), value: feedback)
                 repositorySection
             }
             .frame(maxWidth: 980, alignment: .topLeading)
@@ -189,7 +194,7 @@ struct WorkplaceDetailView: View {
             deleteToolbarItem
         }
         .animation(.snappy(duration: 0.22), value: repositories.count)
-        .animation(.snappy(duration: 0.22), value: syncStates)
+        .animation(.snappy(duration: 0.22), value: syncStates.count)
         .alert(
             deleteConfirmationState.title,
             isPresented: $showingDeleteConfirmation
@@ -240,9 +245,20 @@ struct WorkplaceDetailView: View {
     private var operationProgressToolbarItem: some ToolbarContent {
         if presentationState.showsOperationProgress {
             ToolbarItem(placement: .primaryAction) {
-                ProgressView()
-                    .ccspaceToolbarStatusIndicator()
-                    .ccspaceQuickHelp("工作区操作进行中")
+                HStack(spacing: 4) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Button {
+                        onCancelAction()
+                    } label: {
+                        Image(systemName: "xmark.circle")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .ccspaceQuickHelp("取消当前操作")
+                }
+                .frame(minWidth: 30, minHeight: 28)
+                .padding(.horizontal, 2)
             }
         }
     }
@@ -254,7 +270,7 @@ struct WorkplaceDetailView: View {
             } label: {
                 Image(systemName: "square.and.arrow.up")
             }
-            .accessibilityLabel("推送仓库")
+            .accessibilityLabel("Push 所有仓库")
             .ccspaceToolbarActionButton(prominent: true)
             .disabled(!presentationState.canPushAllRepositories)
             .ccspaceQuickHelp(presentationState.pushHelp)
@@ -282,7 +298,7 @@ struct WorkplaceDetailView: View {
             } label: {
                 Image(systemName: "square.and.arrow.down")
             }
-            .accessibilityLabel("Pull 工作区")
+            .accessibilityLabel("Pull 所有仓库")
             .ccspaceToolbarActionButton(prominent: true)
             .disabled(!presentationState.canSyncAllRepositories)
             .ccspaceQuickHelp(presentationState.syncHelp)
@@ -294,7 +310,7 @@ struct WorkplaceDetailView: View {
             Button {
                 onSwitchAllRepositoriesToDefaultBranch()
             } label: {
-                Label("默认分支", systemImage: "arrow.uturn.backward.circle")
+                Label("切到默认分支", systemImage: "arrow.uturn.backward.circle")
             }
             .ccspaceToolbarActionButton(prominent: true)
             .disabled(!presentationState.canSwitchRepositoriesToDefaultBranch)
@@ -307,7 +323,7 @@ struct WorkplaceDetailView: View {
             Button {
                 onSwitchAllRepositoriesToWorkBranch()
             } label: {
-                Label("工作分支名称", systemImage: "hammer.circle")
+                Label("切到工作分支", systemImage: "hammer.circle")
             }
             .ccspaceToolbarActionButton(prominent: true)
             .disabled(!presentationState.canSwitchRepositoriesToWorkBranch)
@@ -405,7 +421,7 @@ struct WorkplaceDetailView: View {
             if workplaceSyncStates.isEmpty {
                 CCSpaceEmptyStateCard(
                     title: "暂无仓库",
-                    subtitle: "",
+                    subtitle: "点击编辑按钮添加仓库到此工作区",
                     systemImage: "shippingbox",
                     tint: .accentColor
                 ) {
@@ -465,6 +481,7 @@ struct WorkplaceDetailView: View {
                                 onDeleteRepository(state, repositoryName)
                             }
                         )
+                        .transition(.opacity.combined(with: .scale(scale: 0.95)))
                     }
                 }
             }

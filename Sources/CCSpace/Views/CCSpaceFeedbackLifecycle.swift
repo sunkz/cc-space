@@ -35,7 +35,7 @@ private struct CCSpaceFeedbackAutoDismissModifier: ViewModifier {
 
     private func scheduleAutoDismissIfNeeded(for feedback: CCSpaceFeedback?) {
         dismissTask?.cancel()
-        guard feedback != nil else { return }
+        guard let feedback, feedback.style != .error else { return }
 
         dismissTask = Task {
             try? await Task.sleep(for: .seconds(delay))

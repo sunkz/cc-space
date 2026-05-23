@@ -20,9 +20,18 @@ struct WorkplaceCreateSeed: Equatable {
 }
 
 extension WorkplaceCreateSeed {
-    static func duplicate(from workplace: Workplace) -> WorkplaceCreateSeed {
-        WorkplaceCreateSeed(
-            name: "\(workplace.name) 副本",
+    static func duplicate(from workplace: Workplace, existingNames: [String] = []) -> WorkplaceCreateSeed {
+        let baseName = "\(workplace.name) 副本"
+        var candidateName = baseName
+        if existingNames.contains(candidateName) {
+            var counter = 2
+            repeat {
+                candidateName = "\(workplace.name) 副本 \(counter)"
+                counter += 1
+            } while existingNames.contains(candidateName)
+        }
+        return WorkplaceCreateSeed(
+            name: candidateName,
             branch: workplace.branch ?? "",
             selectedRepositoryIDs: Set(workplace.selectedRepositoryIDs)
         )

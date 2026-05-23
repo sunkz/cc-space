@@ -103,7 +103,7 @@ enum RootSplitWorkplaceActions {
     ) {
         var result: RepositoryPullResult?
         coordinator.run(
-            actionName: "同步工作区",
+            actionName: "Pull 工作区",
             successFeedback: {
                 guard let result else { return nil }
                 return WorkplaceDetailFeedbackFactory.syncAll(result: result)

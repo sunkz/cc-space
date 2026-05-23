@@ -202,19 +202,19 @@ struct WorkplaceDetailPresentationState {
             !isActionLocked
         canOpenDirectory = actionState.canOpenDirectory
         canDeleteWorkplace = !isActionLocked
-        editHelp = isActionLocked ? "工作区操作进行中" : "编辑工作区"
-        refreshHelp = isActionLocked ? "工作区操作进行中" : "刷新全部本地仓库状态"
-        syncHelp = isActionLocked ? "工作区操作进行中" : "同步全部已克隆仓库"
-        pushHelp = isActionLocked ? "工作区操作进行中" : "推送全部需要推送的仓库"
-        mergeDefaultBranchHelp = isActionLocked ? "工作区操作进行中" : "将默认分支代码合并到当前分支"
-        switchDefaultBranchHelp = isActionLocked ? "工作区操作进行中" : "全部切换到默认分支"
+        editHelp = isActionLocked ? "工作区操作进行中" : "编辑工作区名称、分支和仓库配置"
+        refreshHelp = isActionLocked ? "工作区操作进行中" : "重新读取所有仓库的本地 Git 状态"
+        syncHelp = isActionLocked ? "工作区操作进行中" : "Pull 所有仓库：从远端拉取最新代码并合并到当前分支"
+        pushHelp = isActionLocked ? "工作区操作进行中" : "Push 所有仓库：将未推送的提交推送到远端"
+        mergeDefaultBranchHelp = isActionLocked ? "工作区操作进行中" : "合并所有仓库的默认分支到当前分支（等同于 git merge main）"
+        switchDefaultBranchHelp = isActionLocked ? "工作区操作进行中" : "切到默认分支：将所有仓库切到各自配置的默认分支（如 main/master）"
         switchWorkBranchHelp =
             isActionLocked
             ? "工作区操作进行中"
             : hasConfiguredWorkBranch
-                ? "切换全部本地仓库到工作分支：\(normalizedWorkBranch)"
-                : "请先配置工作分支名称"
-        deleteHelp = isActionLocked ? "工作区操作进行中" : "删除工作区"
+                ? "切到工作分支：将所有仓库切到 \(normalizedWorkBranch)"
+                : "请先在编辑中配置工作分支名称"
+        deleteHelp = isActionLocked ? "工作区操作进行中" : "删除工作区及其本地文件目录"
     }
 }
 
@@ -457,71 +457,79 @@ enum WorkplaceDetailFeedbackFactory {
     static func switchAllToDefaultBranch(
         result: WorkplaceBulkBranchSwitchResult
     ) -> CCSpaceFeedback {
-        batchSwitchBranches(
+        var feedback = batchSwitchBranches(
             result: result,
             successMessage: "已将 \(result.successCount) 个仓库切换到默认分支",
             mixedMessage: "切换到默认分支完成，\(result.successCount) 个成功，\(result.failedCount) 个失败",
             failureMessage: "切换到默认分支失败，\(result.failedCount) 个仓库失败"
         )
+        feedback.details = failedNamesDetails(result.failedNames)
+        return feedback
     }
 
     static func switchAllToWorkBranch(
         branch: String,
         result: WorkplaceBulkBranchSwitchResult
     ) -> CCSpaceFeedback {
-        batchSwitchBranches(
+        var feedback = batchSwitchBranches(
             result: result,
             successMessage: "已将 \(result.successCount) 个仓库切换到工作分支 \(branch)",
             mixedMessage: "切换到工作分支 \(branch) 完成，\(result.successCount) 个成功，\(result.failedCount) 个失败",
             failureMessage: "切换到工作分支 \(branch) 失败，\(result.failedCount) 个仓库失败"
         )
+        feedback.details = failedNamesDetails(result.failedNames)
+        return feedback
     }
 
     static func mergeDefaultBranchIntoCurrent(
         result: WorkplaceBulkBranchSwitchResult
     ) -> CCSpaceFeedback {
+        var feedback: CCSpaceFeedback
         if result.failedCount > 0 && (result.successCount > 0 || result.skippedCount > 0) {
-            return CCSpaceFeedback(
+            feedback = CCSpaceFeedback(
                 style: .warning,
                 message: "合并默认分支完成，\(result.successCount) 个成功，\(result.skippedCount) 个跳过，\(result.failedCount) 个失败"
             )
-        }
-        if result.failedCount > 0 {
-            return CCSpaceFeedback(
+        } else if result.failedCount > 0 {
+            feedback = CCSpaceFeedback(
                 style: .error,
                 message: "合并默认分支失败，\(result.failedCount) 个仓库失败"
             )
-        }
-        if result.successCount > 0 && result.skippedCount > 0 {
-            return CCSpaceFeedback(
+        } else if result.successCount > 0 && result.skippedCount > 0 {
+            feedback = CCSpaceFeedback(
                 style: .success,
                 message: "合并默认分支完成，\(result.successCount) 个成功，\(result.skippedCount) 个跳过"
             )
-        }
-        if result.skippedCount > 0 {
-            return CCSpaceFeedback(
+        } else if result.skippedCount > 0 {
+            feedback = CCSpaceFeedback(
                 style: .info,
                 message: "已跳过 \(result.skippedCount) 个默认分支仓库"
             )
+        } else {
+            feedback = CCSpaceFeedbackFactory.actionSuccess("已将默认分支代码合并到 \(result.successCount) 个仓库")
         }
-        return CCSpaceFeedbackFactory.actionSuccess("已将默认分支代码合并到 \(result.successCount) 个仓库")
+        feedback.details = failedNamesDetails(result.failedNames)
+        return feedback
     }
 
     static func syncAll(
         result: RepositoryPullResult
     ) -> CCSpaceFeedback {
-        return CCSpaceFeedbackFactory.bulkSyncSummary(
+        var feedback = CCSpaceFeedbackFactory.bulkSyncSummary(
             successCount: result.successCount,
             failedCount: result.failedCount,
             skippedCount: result.skippedCount
         )
+        feedback.details = failedNamesDetails(result.failedNames)
+        return feedback
     }
 
     static func pushAll(
         result: RepositoryPushResult
     ) -> CCSpaceFeedback {
+        var feedback: CCSpaceFeedback
         if result.failedCount > 0 && result.successCount > 0 {
-            return CCSpaceFeedback(
+            feedback = CCSpaceFeedback(
                 style: .warning,
                 message: bulkPushMessage(
                     successCount: result.successCount,
@@ -529,34 +537,33 @@ enum WorkplaceDetailFeedbackFactory {
                     skippedCount: result.skippedCount
                 )
             )
-        }
-        if result.failedCount > 0 {
-            return CCSpaceFeedback(
+        } else if result.failedCount > 0 {
+            feedback = CCSpaceFeedback(
                 style: .error,
                 message: result.skippedCount > 0
                     ? "推送失败，\(result.failedCount) 个失败，\(result.skippedCount) 个跳过"
                     : "推送失败，\(result.failedCount) 个仓库失败"
             )
-        }
-        if result.successCount > 0 && result.skippedCount > 0 {
-            return CCSpaceFeedback(
+        } else if result.successCount > 0 && result.skippedCount > 0 {
+            feedback = CCSpaceFeedback(
                 style: .info,
                 message: "已推送 \(result.successCount) 个仓库，跳过 \(result.skippedCount) 个"
             )
-        }
-        if result.skippedCount > 0 {
-            return CCSpaceFeedback(
+        } else if result.skippedCount > 0 {
+            feedback = CCSpaceFeedback(
                 style: .info,
                 message: "没有需要推送的仓库"
             )
-        }
-        if result.successCount == 0 {
-            return CCSpaceFeedback(
+        } else if result.successCount == 0 {
+            feedback = CCSpaceFeedback(
                 style: .info,
                 message: "没有可推送的仓库"
             )
+        } else {
+            feedback = CCSpaceFeedbackFactory.actionSuccess("已推送 \(result.successCount) 个仓库")
         }
-        return CCSpaceFeedbackFactory.actionSuccess("已推送 \(result.successCount) 个仓库")
+        feedback.details = failedNamesDetails(result.failedNames)
+        return feedback
     }
 
     private static func batchSwitchBranches(
@@ -565,11 +572,14 @@ enum WorkplaceDetailFeedbackFactory {
         mixedMessage: String,
         failureMessage: String
     ) -> CCSpaceFeedback {
-        if result.failedCount > 0 && result.successCount > 0 {
+        if result.failedCount > 0 && (result.successCount > 0 || result.skippedCount > 0) {
             return CCSpaceFeedback(style: .warning, message: mixedMessage)
         }
         if result.failedCount > 0 {
             return CCSpaceFeedback(style: .error, message: failureMessage)
+        }
+        if result.successCount == 0 && result.skippedCount > 0 {
+            return CCSpaceFeedback(style: .info, message: "所有仓库已在目标分支")
         }
         return CCSpaceFeedbackFactory.actionSuccess(successMessage)
     }
@@ -583,6 +593,11 @@ enum WorkplaceDetailFeedbackFactory {
             return "推送完成，\(successCount) 个成功，\(failedCount) 个失败，\(skippedCount) 个跳过"
         }
         return "推送完成，\(successCount) 个成功，\(failedCount) 个失败"
+    }
+
+    private static func failedNamesDetails(_ names: [String]) -> String? {
+        guard !names.isEmpty else { return nil }
+        return "失败仓库：" + names.joined(separator: "、")
     }
 }
 

@@ -6,7 +6,13 @@ struct WorkplaceFormFieldsSection: View {
     @Binding var name: String
     @Binding var branch: String
     let isDisabled: Bool
+    var branchValidationError: String? = nil
+    var autoFocusName: Bool = false
+    var nameHint: String? = nil
+    var branchHint: String? = nil
     let onInputChanged: () -> Void
+
+    @FocusState private var isNameFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -19,22 +25,50 @@ struct WorkplaceFormFieldsSection: View {
             )
 
             HStack(spacing: 8) {
-                TextField("工作区名称", text: $name)
-                    .textFieldStyle(.roundedBorder)
-                    .onChange(of: name) { _, _ in
-                        onInputChanged()
+                VStack(alignment: .leading, spacing: 3) {
+                    TextField("工作区名称", text: $name)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($isNameFocused)
+                        .onChange(of: name) { _, _ in
+                            onInputChanged()
+                        }
+                    if let nameHint {
+                        Text(nameHint)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
+                }
 
-                TextField("工作分支名称", text: $branch)
-                    .textFieldStyle(.roundedBorder)
-                    .ccspaceQuickHelp(branchQuickHelp)
-                    .onChange(of: branch) { _, _ in
-                        onInputChanged()
+                VStack(alignment: .leading, spacing: 3) {
+                    TextField("工作分支名称", text: $branch)
+                        .textFieldStyle(.roundedBorder)
+                        .ccspaceQuickHelp(branchQuickHelp)
+                        .onChange(of: branch) { _, _ in
+                            onInputChanged()
+                        }
+                    if let branchHint {
+                        Text(branchHint)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
+                }
             }
             .disabled(isDisabled)
+
+            if let branchValidationError {
+                Text(branchValidationError)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
         }
         .ccspacePanel(background: .clear, cornerRadius: 12, padding: 12, borderOpacity: 0.03)
+        .onAppear {
+            if autoFocusName {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    isNameFocused = true
+                }
+            }
+        }
     }
 }
 
@@ -137,6 +171,7 @@ struct WorkplaceFormFooter: View {
                         .foregroundStyle(.secondary)
                 }
                 .ccspacePanel(background: .clear, cornerRadius: 12, padding: 12, borderOpacity: 0.03)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
 
             HStack {
@@ -160,7 +195,7 @@ struct WorkplaceFormFooter: View {
                         Text(submitTitle)
                     }
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.borderedProminent)
                 .controlSize(.regular)
                 .disabled(isSubmitDisabled)
                 .keyboardShortcut(.defaultAction)
@@ -168,6 +203,7 @@ struct WorkplaceFormFooter: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
+        .animation(.snappy(duration: 0.25), value: progress != nil)
     }
 }
 

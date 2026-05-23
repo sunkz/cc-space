@@ -1,5 +1,56 @@
 import Foundation
 
+enum BranchNameValidation {
+    static func validate(_ branch: String) -> String? {
+        let trimmed = branch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        if trimmed.contains(" ") {
+            return "分支名不能包含空格"
+        }
+        if trimmed.contains("~") {
+            return "分支名不能包含 ~"
+        }
+        if trimmed.contains("^") {
+            return "分支名不能包含 ^"
+        }
+        if trimmed.contains(":") {
+            return "分支名不能包含 :"
+        }
+        if trimmed.contains("?") {
+            return "分支名不能包含 ?"
+        }
+        if trimmed.contains("*") {
+            return "分支名不能包含 *"
+        }
+        if trimmed.contains("[") {
+            return "分支名不能包含 ["
+        }
+        if trimmed.contains("\\") {
+            return "分支名不能包含 \\"
+        }
+        if trimmed.contains("..") {
+            return "分支名不能包含连续的 .."
+        }
+        if trimmed.hasSuffix(".") {
+            return "分支名不能以 . 结尾"
+        }
+        if trimmed.hasSuffix("/") {
+            return "分支名不能以 / 结尾"
+        }
+        if trimmed.hasPrefix("/") {
+            return "分支名不能以 / 开头"
+        }
+        if trimmed.contains("@{") {
+            return "分支名不能包含 @{"
+        }
+        if trimmed.hasSuffix(".lock") {
+            return "分支名不能以 .lock 结尾"
+        }
+        return nil
+    }
+}
+
 enum WorkplaceFormTextNormalization {
     static func normalizedText(_ text: String) -> String {
         text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -183,6 +234,7 @@ struct WorkplaceCreatePresentationState {
     let selectedRepositorySubtitle: String
     let branchStrategyFeedback: CCSpaceFeedback?
     let missingRootPathFeedback: CCSpaceFeedback?
+    let branchValidationError: String?
 
     init(
         name: String,
@@ -194,11 +246,13 @@ struct WorkplaceCreatePresentationState {
         let trimmedName = WorkplaceFormTextNormalization.normalizedText(name)
         let trimmedBranch = WorkplaceFormTextNormalization.normalizedText(branch)
         let trimmedRootPath = WorkplaceFormTextNormalization.normalizedText(rootPath)
+        branchValidationError = BranchNameValidation.validate(branch)
         canSubmit =
             !isSubmitting &&
             !trimmedName.isEmpty &&
             selectedRepositoryCount > 0 &&
-            !trimmedRootPath.isEmpty
+            !trimmedRootPath.isEmpty &&
+            branchValidationError == nil
         selectedRepositorySubtitle = selectedRepositoryCount == 0 ? "" : "\(selectedRepositoryCount) 个已选"
         branchStrategyFeedback =
             trimmedBranch.isEmpty
@@ -236,6 +290,7 @@ struct WorkplaceEditPresentationState {
     let removalWarningFeedback: CCSpaceFeedback?
     let changeSummaryFeedback: CCSpaceFeedback?
     let branchChangeFeedback: CCSpaceFeedback?
+    let branchValidationError: String?
 
     init(
         originalName: String,
@@ -256,12 +311,14 @@ struct WorkplaceEditPresentationState {
         let nameChanged = trimmedName != trimmedOriginalName
         let branchChanged = normalizedBranch != normalizedOriginalBranch
         let hasChanges = nameChanged || addedCount > 0 || removedCount > 0 || branchChanged
+        branchValidationError = BranchNameValidation.validate(branch)
 
         canSubmit =
             !isSaving &&
             !trimmedName.isEmpty &&
             selectedRepositoryIDs.isEmpty == false &&
-            hasChanges
+            hasChanges &&
+            branchValidationError == nil
         selectedRepositorySubtitle = selectedRepositoryIDs.isEmpty ? "" : "\(selectedRepositoryIDs.count) 个已选"
         removalWarningFeedback =
             removedCount > 0

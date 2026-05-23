@@ -60,11 +60,13 @@ final class UpdateChecker: ObservableObject {
         do {
             let (data, response) = try await dataLoader(request)
             guard let httpResponse = response as? HTTPURLResponse else {
+                latestVersion = nil
                 lastErrorMessage = "检查更新失败：响应无效"
                 return
             }
 
             guard httpResponse.statusCode == 200 else {
+                latestVersion = nil
                 lastErrorMessage = "检查更新失败：HTTP \(httpResponse.statusCode)"
                 return
             }
@@ -76,6 +78,7 @@ final class UpdateChecker: ObservableObject {
             lastErrorMessage = nil
             updateCheckerLog.notice("event=update_check status=success version=\(version)")
         } catch {
+            latestVersion = nil
             lastErrorMessage = "检查更新失败：\(error.localizedDescription)"
             updateCheckerLog.error("event=update_check status=failed reason=\(error.localizedDescription)")
         }

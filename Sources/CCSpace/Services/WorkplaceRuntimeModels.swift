@@ -87,11 +87,13 @@ struct WorkplaceBulkBranchSwitchResult: Equatable {
     let successCount: Int
     let failedCount: Int
     let skippedCount: Int
+    let failedNames: [String]
 
-    init(successCount: Int, failedCount: Int, skippedCount: Int = 0) {
+    init(successCount: Int, failedCount: Int, skippedCount: Int = 0, failedNames: [String] = []) {
         self.successCount = successCount
         self.failedCount = failedCount
         self.skippedCount = skippedCount
+        self.failedNames = failedNames
     }
 
     var attemptedCount: Int {
@@ -103,6 +105,14 @@ struct RepositoryPushResult: Equatable {
     let successCount: Int
     let failedCount: Int
     let skippedCount: Int
+    let failedNames: [String]
+
+    init(successCount: Int, failedCount: Int, skippedCount: Int, failedNames: [String] = []) {
+        self.successCount = successCount
+        self.failedCount = failedCount
+        self.skippedCount = skippedCount
+        self.failedNames = failedNames
+    }
 
     var attemptedCount: Int {
         successCount + failedCount + skippedCount
@@ -122,6 +132,7 @@ enum BatchPushOperationResult: Sendable {
 
 enum BatchBranchSwitchOperationResult: Sendable {
     case success(RepositorySyncState)
+    case skipped(RepositorySyncState)
     case failed(RepositorySyncState)
 }
 
@@ -163,13 +174,18 @@ extension BatchPushOperationResult {
 extension BatchBranchSwitchOperationResult {
     var updatedState: RepositorySyncState {
         switch self {
-        case .success(let state), .failed(let state):
+        case .success(let state), .skipped(let state), .failed(let state):
             return state
         }
     }
 
     var isSuccess: Bool {
         if case .success = self { return true }
+        return false
+    }
+
+    var isSkipped: Bool {
+        if case .skipped = self { return true }
         return false
     }
 

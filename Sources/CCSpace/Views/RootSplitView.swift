@@ -236,7 +236,7 @@ struct RootSplitView: View {
             onPush: {
                 var result: RepositoryPushResult?
                 detailActionCoordinator.run(
-                    actionName: "推送工作区",
+                    actionName: "Push 工作区",
                     successFeedback: {
                         guard let result else { return nil }
                         return WorkplaceDetailFeedbackFactory.pushAll(result: result)
@@ -248,7 +248,7 @@ struct RootSplitView: View {
             onPull: { repository in
                 var result: RepositoryPullResult?
                 detailActionCoordinator.run(
-                    actionName: "同步仓库",
+                    actionName: "Pull 仓库",
                     successFeedback: {
                         WorkplaceDetailFeedbackFactory.syncRepository(
                             repositoryName: repository.repoName,
@@ -269,7 +269,7 @@ struct RootSplitView: View {
             onPushRepository: { state, repositoryName in
                 var outcome: RepositoryPushOutcome?
                 detailActionCoordinator.run(
-                    actionName: "推送仓库",
+                    actionName: "Push 仓库",
                     refreshBranches: true,
                     successFeedback: {
                         guard let outcome else { return nil }
@@ -310,7 +310,7 @@ struct RootSplitView: View {
             onSwitchRepositoryToDefaultBranch: { state, repositoryName in
                 var defaultBranch = ""
                 detailActionCoordinator.run(
-                    actionName: "切换到默认分支",
+                    actionName: "切到默认分支",
                     refreshBranches: true,
                     successFeedback: {
                         WorkplaceDetailFeedbackFactory.switchRepositoryToDefaultBranch(
@@ -328,7 +328,7 @@ struct RootSplitView: View {
             onSwitchRepositoryToWorkBranch: { state, repositoryName in
                 let workBranch = latestWorkplace(for: workplace.id)?.branch?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 detailActionCoordinator.run(
-                    actionName: "切换到工作分支",
+                    actionName: "切到工作分支",
                     refreshBranches: true,
                     successFeedback: {
                         WorkplaceDetailFeedbackFactory.switchRepositoryToWorkBranch(
@@ -423,7 +423,7 @@ struct RootSplitView: View {
             onSwitchAllRepositoriesToDefaultBranch: {
                 var result: WorkplaceBulkBranchSwitchResult?
                 detailActionCoordinator.run(
-                    actionName: "批量切换到默认分支",
+                    actionName: "批量切到默认分支",
                     refreshBranches: true,
                     successFeedback: {
                         guard let result else { return nil }
@@ -437,7 +437,7 @@ struct RootSplitView: View {
                 let workBranch = latestWorkplace(for: workplace.id)?.branch?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 var result: WorkplaceBulkBranchSwitchResult?
                 detailActionCoordinator.run(
-                    actionName: "批量切换到工作分支",
+                    actionName: "批量切到工作分支",
                     refreshBranches: true,
                     successFeedback: {
                         guard let result else { return nil }
@@ -449,6 +449,9 @@ struct RootSplitView: View {
                 ) {
                     result = try await workplaceRuntimeService.switchRepositoriesToWorkBranch(in: workplace)
                 }
+            },
+            onCancelAction: {
+                detailActionCoordinator.cancelRunningAction()
             },
             isPerformingAction: detailActionCoordinator.isRunningAction,
             branchRefreshSeed: detailActionCoordinator.branchRefreshSeed,
@@ -463,13 +466,45 @@ struct RootSplitView: View {
 
     private var emptyWorkplaceState: some View {
         VStack {
-            ContentUnavailableView {
-                Label("选择工作区", systemImage: "folder")
-            } actions: {
-                Button("新建") {
-                    presentCreateWorkplace()
+            if workplaceStore.workplaces.isEmpty {
+                ContentUnavailableView {
+                    Label("欢迎使用 CCSpace", systemImage: "sparkles")
+                } description: {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("CCSpace 帮你集中管理多个 Git 仓库，快速切换分支、同步代码。")
+                            .multilineTextAlignment(.center)
+                        Text("快速开始：")
+                            .fontWeight(.medium)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Label("前往设置，选择工作区根目录", systemImage: "1.circle")
+                            Label("添加常用的 Git 仓库地址", systemImage: "2.circle")
+                            Label("创建工作区，勾选仓库开始工作", systemImage: "3.circle")
+                        }
+                        .font(.callout)
+                    }
+                } actions: {
+                    HStack(spacing: 12) {
+                        Button("前往设置") {
+                            appViewModel.showRoute(.settings)
+                        }
+                        .ccspaceSecondaryActionButton()
+                        Button("创建工作区") {
+                            presentCreateWorkplace()
+                        }
+                        .ccspacePrimaryActionButton()
+                    }
                 }
-                .ccspacePrimaryActionButton()
+            } else {
+                ContentUnavailableView {
+                    Label("选择工作区", systemImage: "folder")
+                } description: {
+                    Text("从左侧列表选择一个工作区查看详情，或创建新的工作区。")
+                } actions: {
+                    Button("新建") {
+                        presentCreateWorkplace()
+                    }
+                    .ccspacePrimaryActionButton()
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -525,7 +560,8 @@ struct RootSplitView: View {
 
     @MainActor
     private func duplicateWorkplace(_ workplace: Workplace) {
-        presentCreateWorkplace(seed: .duplicate(from: workplace))
+        let existingNames = workplaceStore.workplaces.map(\.name)
+        presentCreateWorkplace(seed: .duplicate(from: workplace, existingNames: existingNames))
     }
 
     @MainActor

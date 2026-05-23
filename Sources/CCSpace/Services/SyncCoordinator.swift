@@ -1,9 +1,23 @@
 import Foundation
+import os
+
+private let syncCoordinatorLog = Logger(
+    subsystem: "com.ccspace.app",
+    category: "SyncCoordinator"
+)
 
 struct RepositoryPullResult: Equatable {
     let successCount: Int
     let failedCount: Int
     let skippedCount: Int
+    let failedNames: [String]
+
+    init(successCount: Int, failedCount: Int, skippedCount: Int, failedNames: [String] = []) {
+        self.successCount = successCount
+        self.failedCount = failedCount
+        self.skippedCount = skippedCount
+        self.failedNames = failedNames
+    }
 
     var attemptedCount: Int {
         successCount + failedCount + skippedCount
@@ -157,7 +171,11 @@ struct SyncCoordinator: Sendable {
             pullingState.lastError = nil
             return pullingState
         }
-        try? workplaceStore.updateSyncStates(preparation.normalized + preparation.failed + pullingStates)
+        do {
+            try workplaceStore.updateSyncStates(preparation.normalized + preparation.failed + pullingStates)
+        } catch {
+            syncCoordinatorLog.error("event=update_pulling_states_failed reason=\(error.localizedDescription)")
+        }
 
         let gitService = gitService
         var successCount = 0
@@ -191,12 +209,21 @@ struct SyncCoordinator: Sendable {
             }
             resultStates.append(resultState)
         }
-        try? workplaceStore.updateSyncStates(resultStates)
+        do {
+            try workplaceStore.updateSyncStates(resultStates)
+        } catch {
+            syncCoordinatorLog.error("event=update_result_states_failed reason=\(error.localizedDescription)")
+        }
+
+        let failedNames = resultStates
+            .filter { $0.status == .failed }
+            .map { URL(fileURLWithPath: $0.localPath).lastPathComponent }
 
         return RepositoryPullResult(
             successCount: successCount,
             failedCount: failedCount,
-            skippedCount: preparation.skippedCount
+            skippedCount: preparation.skippedCount,
+            failedNames: failedNames
         )
     }
 

@@ -31,6 +31,8 @@ struct WorkplaceRepositoryRowView: View {
     @State private var commitLogEntries: [GitCommitEntry] = []
     @State private var isLoadingCommitLog = false
     @State private var commitLogTask: Task<Void, Never>?
+    @State private var commitLogError: String?
+    @State private var isErrorExpanded = false
 
     private var presentationState: WorkplaceRepositoryRowPresentationState {
         WorkplaceRepositoryRowPresentationState(
@@ -81,7 +83,6 @@ struct WorkplaceRepositoryRowView: View {
                             Text(displayName)
                                 .font(.body.weight(.medium))
                                 .lineLimit(1)
-                                .fixedSize()
                             if let branchPillState {
                                 RepositoryBranchPill(
                                     title: branchPillState.title,
@@ -118,7 +119,7 @@ struct WorkplaceRepositoryRowView: View {
                             }
                             .ccspaceIconActionButton()
                             .disabled(!presentationState.canRetryClone)
-                            .ccspaceQuickHelp("重试克隆")
+                            .ccspaceQuickHelp("重新克隆")
                         }
 
                         if presentationState.canOpenLocalActions {
@@ -193,6 +194,14 @@ struct WorkplaceRepositoryRowView: View {
                     Text(lastError)
                         .font(.footnote)
                         .foregroundStyle(.red)
+                        .lineLimit(isErrorExpanded ? nil : 2)
+                        .truncationMode(.tail)
+                        .onTapGesture {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                isErrorExpanded.toggle()
+                            }
+                        }
+                        .textSelection(.enabled)
                 }
             }
         }
@@ -211,8 +220,14 @@ struct WorkplaceRepositoryRowView: View {
             CommitLogPopoverView(
                 repositoryName: displayName,
                 commits: commitLogEntries,
-                isLoading: isLoadingCommitLog
+                isLoading: isLoadingCommitLog,
+                error: commitLogError,
+                onRetry: loadCommitLog
             )
+        }
+        .onDisappear {
+            commitLogTask?.cancel()
+            commitLogTask = nil
         }
     }
 
@@ -220,8 +235,15 @@ struct WorkplaceRepositoryRowView: View {
         commitLogTask?.cancel()
         isLoadingCommitLog = true
         commitLogEntries = []
+        commitLogError = nil
         let localPath = state.localPath
         commitLogTask = Task {
+            guard FileManager.default.fileExists(atPath: localPath) else {
+                guard !Task.isCancelled else { return }
+                isLoadingCommitLog = false
+                commitLogError = "本地目录不存在：\(localPath)"
+                return
+            }
             let entries = await gitService.recentCommits(in: localPath, count: 20)
             guard !Task.isCancelled else { return }
             isLoadingCommitLog = false
@@ -387,6 +409,8 @@ struct RepositoryBranchPill: View {
         self.isDefault = isDefault
     }
 
+    @State private var isHovering = false
+
     private var tint: Color { isDefault ? .orange : .accentColor }
     private var icon: String { isDefault ? "star.fill" : "arrow.triangle.branch" }
 
@@ -403,7 +427,9 @@ struct RepositoryBranchPill: View {
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
-        .background(tint.opacity(0.1), in: Capsule())
+        .background(tint.opacity(isHovering ? 0.18 : 0.1), in: Capsule())
+        .animation(.snappy(duration: 0.18), value: isHovering)
+        .onHover { isHovering = $0 }
     }
 }
 
@@ -425,6 +451,7 @@ private struct RepositoryOverflowMenuLabel: View {
             .opacity(isHovering && isEnabled ? 0.92 : 0.68)
         .animation(.snappy(duration: 0.18), value: isHovering)
         .onHover { isHovering = $0 }
+        .accessibilityLabel("更多操作")
     }
 }
 
@@ -448,10 +475,13 @@ private struct RepositoryBranchStatusView: View {
                 .font(.caption)
                 .foregroundStyle(summary.activityTint)
                 .accessibilityLabel("状态：\(activityTitle)")
+            } else if summary.showsShimmer {
+                CCSpaceShimmerPill()
+                    .accessibilityLabel("状态加载中")
             } else {
                 HStack(spacing: 4) {
                     ForEach(summary.pills) { pill in
-                        RepositoryBranchStatePill(title: pill.title, tint: pill.tint)
+                        RepositoryBranchStatePill(title: pill.title, tint: pill.tint, quickHelp: pill.quickHelp)
                     }
                 }
                 .accessibilityElement(children: .combine)
@@ -479,34 +509,38 @@ private struct RepositoryBranchStatusSummary {
         activityTitle != nil
     }
 
+    var showsShimmer: Bool {
+        branchStatus == nil && syncStatus == .success
+    }
+
     var pills: [RepositoryBranchStatePillModel] {
         if let branchStatus {
             var pills: [RepositoryBranchStatePillModel] = []
             if branchStatus.hasUncommittedChanges {
-                pills.append(.init(title: "未提交", tint: .orange))
+                pills.append(.init(title: "未提交", tint: .orange, quickHelp: "有文件修改但尚未 commit"))
             }
             if branchStatus.hasUnpushedCommits {
-                pills.append(.init(title: "未推送", tint: .blue))
+                pills.append(.init(title: "未推送", tint: .blue, quickHelp: "有本地 commit 尚未 push 到远端"))
             }
             if branchStatus.isBehindRemote {
-                pills.append(.init(title: "落后远端", tint: .secondary))
+                pills.append(.init(title: "落后远端", tint: .secondary, quickHelp: "远端有新的 commit，建议 pull"))
             }
             if branchStatus.hasRemoteTrackingBranch == false {
-                pills.append(.init(title: "未关联远端", tint: .secondary))
+                pills.append(.init(title: "未关联远端", tint: .secondary, quickHelp: "当前分支没有对应的远程跟踪分支"))
             }
             if pills.isEmpty {
-                pills.append(.init(title: "干净", tint: .green))
+                pills.append(.init(title: "干净", tint: .green, quickHelp: "没有未提交或未推送的变更"))
             }
             return pills
         }
 
         switch syncStatus {
         case .idle:
-            return [.init(title: "未克隆", tint: .secondary)]
+            return [.init(title: "未克隆", tint: .secondary, quickHelp: "仓库尚未克隆到本地")]
         case .failed:
-            return [.init(title: "异常", tint: .red)]
+            return [.init(title: "异常", tint: .red, quickHelp: "上次操作失败，可尝试重试")]
         case .success:
-            return [.init(title: "状态未知", tint: .secondary)]
+            return [.init(title: "状态未知", tint: .secondary, quickHelp: nil)]
         case .cloning, .pulling, .removing:
             return []
         }
@@ -540,6 +574,7 @@ private enum PillTint {
 private struct RepositoryBranchStatePillModel: Identifiable {
     let title: String
     let tint: PillTint
+    let quickHelp: String?
 
     var id: String { title }
 }
@@ -547,6 +582,7 @@ private struct RepositoryBranchStatePillModel: Identifiable {
 private struct RepositoryBranchStatePill: View {
     let title: String
     let tint: PillTint
+    var quickHelp: String? = nil
 
     var body: some View {
         Text(title)
@@ -555,6 +591,7 @@ private struct RepositoryBranchStatePill: View {
             .padding(.vertical, 2)
             .background(tint.background, in: Capsule())
             .foregroundStyle(tint.foreground)
+            .ccspaceQuickHelp(quickHelp)
     }
 }
 

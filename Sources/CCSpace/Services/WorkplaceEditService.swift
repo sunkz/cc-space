@@ -199,18 +199,20 @@ struct WorkplaceEditService {
                 }
                 let rollbackBranches = branchRollbacks.map { rollback in
                     WorkplaceEditBranchRollback(
-                        path: rollback.path.replacingOccurrences(
-                            of: newPath,
-                            with: oldPath
+                        path: Self.replacePathPrefix(
+                            rollback.path,
+                            oldPrefix: newPath,
+                            newPrefix: oldPath
                         ),
                         branch: rollback.branch
                     )
                 }
                 let rollbackStagedRemovals = stagedRemovals.map { item in
                     (
-                        originalPath: item.originalPath.replacingOccurrences(
-                            of: newPath,
-                            with: oldPath
+                        originalPath: Self.replacePathPrefix(
+                            item.originalPath,
+                            oldPrefix: newPath,
+                            newPrefix: oldPath
                         ),
                         stagedPath: item.stagedPath
                     )
@@ -351,11 +353,31 @@ struct WorkplaceEditService {
     private func restoreCheckedOutBranches(
         _ rollbacks: [WorkplaceEditBranchRollback]
     ) async throws {
+        var firstError: Error?
         for rollback in rollbacks.reversed() {
-            try await gitService.checkoutBranch(
-                rollback.branch,
-                in: rollback.path
-            )
+            do {
+                try await gitService.checkoutBranch(
+                    rollback.branch,
+                    in: rollback.path
+                )
+            } catch {
+                editServiceLog.error("event=rollback_single_branch_failed path=\(rollback.path) branch=\(rollback.branch) reason=\(error.localizedDescription)")
+                if firstError == nil {
+                    firstError = error
+                }
+            }
         }
+        if let firstError {
+            throw firstError
+        }
+    }
+
+    private static func replacePathPrefix(
+        _ path: String,
+        oldPrefix: String,
+        newPrefix: String
+    ) -> String {
+        guard path.hasPrefix(oldPrefix) else { return path }
+        return newPrefix + path.dropFirst(oldPrefix.count)
     }
 }

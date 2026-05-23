@@ -18,8 +18,11 @@ extension FileSystemServicing {
     }
 
     func removeItemIfExists(at path: String) throws {
-        guard FileManager.default.fileExists(atPath: path) else { return }
-        try removeItem(at: path)
+        do {
+            try removeItem(at: path)
+        } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError {
+            // File already removed — nothing to do
+        }
     }
 }
 

@@ -59,6 +59,7 @@ struct SidebarView: View {
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
+                    .keyboardShortcut("n", modifiers: .command)
                     .offset(x: -11)
                 }
                 .padding(.bottom, 6)
@@ -98,6 +99,7 @@ struct SidebarView: View {
                     .foregroundStyle(.secondary)
                     .opacity(rowPresentationState.showsPinnedIndicator ? 1 : 0)
                     .frame(width: rowPresentationState.pinIndicatorColumnWidth)
+                    .accessibilityHidden(!rowPresentationState.showsPinnedIndicator)
                 if let color = rowPresentationState.statusIndicatorColor {
                     Circle()
                         .fill(color)
@@ -118,16 +120,18 @@ struct SidebarView: View {
                 onTogglePinned(workplace)
             } label: {
                 Label(
-                    workplace.isPinned ? "取消置顶" : "置顶",
+                    workplace.isPinned ? "取消置顶" : "置顶工作区",
                     systemImage: workplace.isPinned ? "pin.slash" : "pin"
                 )
             }
+            .help(workplace.isPinned ? "取消后按字母排序" : "置顶后始终显示在列表顶部")
 
             Button {
                 onDuplicateWorkplace(workplace)
             } label: {
                 Label("复制工作区", systemImage: "doc.on.doc")
             }
+            .help("以当前配置为模板创建新工作区")
 
             Button {
                 onToggleArchived(workplace)
@@ -137,6 +141,7 @@ struct SidebarView: View {
                     systemImage: workplace.isArchived ? "tray.and.arrow.up" : "archivebox"
                 )
             }
+            .help(workplace.isArchived ? "从归档中恢复到活跃列表" : "归档后工作区不会被删除，可随时恢复")
         }
     }
 }

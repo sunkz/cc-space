@@ -321,7 +321,11 @@ struct GitService: GitServicing {
         do {
             try await runGit(arguments: ["-C", directory, "checkout", branch])
             return
-        } catch {
+        } catch let checkoutError {
+            guard isBranchNotFoundError(checkoutError) else {
+                throw checkoutError
+            }
+
             if try await checkoutRemoteTrackingBranchIfAvailable(branch, in: directory) {
                 return
             }
@@ -499,6 +503,15 @@ struct GitService: GitServicing {
         return message.contains("couldn't find remote ref") ||
             message.contains("could not find remote ref") ||
             message.contains("remote ref does not exist") ||
+            message.contains("is not a commit and a branch") ||
+            message.contains("invalid reference")
+    }
+
+    private func isBranchNotFoundError(_ error: Error) -> Bool {
+        let message = error.localizedDescription.lowercased()
+        return message.contains("did not match any") ||
+            message.contains("pathspec") ||
+            message.contains("not a valid branch name") ||
             message.contains("is not a commit and a branch") ||
             message.contains("invalid reference")
     }

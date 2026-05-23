@@ -19,6 +19,6 @@ struct RepositorySyncState: Codable, Equatable, Identifiable, Sendable {
     var lastSyncedAt: Date?
 
     var hasLocalDirectory: Bool {
-        FileSystemService().directoryExists(at: localPath)
+        FileManager.default.fileExists(atPath: localPath)
     }
 }

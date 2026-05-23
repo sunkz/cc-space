@@ -510,7 +510,7 @@ final class SyncCoordinatorTests: XCTestCase {
         XCTAssertNotNil(syncResult?.lastError)
         XCTAssertEqual(
             pullResult,
-            RepositoryPullResult(successCount: 0, failedCount: 1, skippedCount: 0)
+            RepositoryPullResult(successCount: 0, failedCount: 1, skippedCount: 0, failedNames: ["api"])
         )
     }
 
@@ -561,7 +561,7 @@ final class SyncCoordinatorTests: XCTestCase {
         XCTAssertTrue(pulledDirectories.isEmpty)
         XCTAssertEqual(
             pullResult,
-            RepositoryPullResult(successCount: 0, failedCount: 1, skippedCount: 0)
+            RepositoryPullResult(successCount: 0, failedCount: 1, skippedCount: 0, failedNames: ["api"])
         )
     }
 

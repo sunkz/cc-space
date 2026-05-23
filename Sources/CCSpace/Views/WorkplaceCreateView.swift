@@ -102,6 +102,10 @@ struct WorkplaceCreateView: View {
                         name: $name,
                         branch: $branch,
                         isDisabled: isSubmitting,
+                        branchValidationError: presentationState.branchValidationError,
+                        autoFocusName: true,
+                        nameHint: "名称会作为根目录下的文件夹名",
+                        branchHint: "选填，统一切换分支时使用此名称",
                         onInputChanged: clearFeedback
                     )
 
@@ -109,7 +113,7 @@ struct WorkplaceCreateView: View {
                         subtitle: presentationState.selectedRepositorySubtitle,
                         repositories: repositoryOptions,
                         selectedIDs: selectedIDs,
-                        emptySubtitle: "请先到仓库配置页添加 Git 仓库地址。",
+                        emptySubtitle: "请先到设置页添加 Git 仓库地址，然后回来勾选需要包含的仓库。",
                         searchText: $repositorySearchText,
                         isDisabled: isSubmitting,
                         onToggle: toggleSelection

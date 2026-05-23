@@ -142,8 +142,6 @@ struct RepositorySettingsSection: View {
         VStack(alignment: .leading, spacing: 12) {
             headerSection
 
-            backupActionSection
-
             if let feedback {
                 CCSpaceFeedbackBanner(feedback: feedback)
                     .ccspaceAutoDismissFeedback($feedback)
@@ -152,9 +150,16 @@ struct RepositorySettingsSection: View {
             addRepositorySection
 
             if repositories.isEmpty == false {
-                TextField("搜索仓库名称或地址", text: $searchText)
-                    .textFieldStyle(.roundedBorder)
-                    .padding(.top, 2)
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    TextField("搜索仓库名称或地址", text: $searchText)
+                        .textFieldStyle(.plain)
+                }
+                .padding(.vertical, 6)
+                .padding(.horizontal, 10)
+                .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
 
             if searchPresentationState.filteredRepositories.isEmpty {
@@ -183,6 +188,7 @@ struct RepositorySettingsSection: View {
                     }
                 }
             }
+
         }
         .alert(
             deletePresentationState?.title ?? "",
@@ -206,13 +212,17 @@ struct RepositorySettingsSection: View {
         } message: {
             Text(deletePresentationState?.message ?? "")
         }
+        .onDisappear {
+            fetchDefaultBranchTask?.cancel()
+            fetchDefaultBranchTask = nil
+        }
     }
 
     private var headerSection: some View {
         HStack(alignment: .top, spacing: 12) {
             CCSpaceSectionTitle(
                 title: "Git 仓库",
-                subtitle: "集中维护常用 Git URL，并支持导入导出备份。",
+                subtitle: "在此添加的仓库可在创建工作区时直接勾选。",
                 titleFont: .title3,
                 titleWeight: .semibold,
                 titleColor: .primary
@@ -225,37 +235,19 @@ struct RepositorySettingsSection: View {
                 systemImage: "shippingbox",
                 tint: .secondary
             )
-        }
-    }
 
-    private var backupActionSection: some View {
-        HStack(alignment: .center, spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("仓库备份")
-                    .font(.subheadline.weight(.medium))
-                Text("导出为 JSON 备份文件，或从已有备份中恢复仓库配置。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer(minLength: 8)
-
-            Button("导入备份") {
+            Button("导入") {
                 importRepositoriesBackup()
             }
             .ccspaceSecondaryActionButton()
+            .ccspaceQuickHelp("从 JSON 文件导入仓库配置")
 
-            Button("导出备份") {
+            Button("导出") {
                 exportRepositoriesBackup()
             }
-            .ccspacePrimaryActionButton()
+            .ccspaceSecondaryActionButton()
+            .ccspaceQuickHelp("将当前仓库配置导出为 JSON 备份")
         }
-        .ccspaceInsetPanel(
-            background: Color.primary.opacity(0.02),
-            cornerRadius: 12,
-            padding: 10,
-            borderOpacity: 0.04
-        )
     }
 
     private var addRepositorySection: some View {
@@ -278,6 +270,7 @@ struct RepositorySettingsSection: View {
             }
             .ccspacePrimaryActionButton()
             .disabled(!addPresentationState.canSubmit)
+            .ccspaceQuickHelp("支持 HTTPS 和 SSH 格式")
         }
         .ccspaceInsetPanel(
             background: Color.primary.opacity(0.02),
@@ -291,87 +284,96 @@ struct RepositorySettingsSection: View {
     private func repositoryRow(_ repository: RepositoryConfig) -> some View {
         let presentationState = editPresentationState(for: repository)
         if presentationState.isEditing {
-            CCSpaceInteractiveCard(selected: true) {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(alignment: .top, spacing: 8) {
-                        Image(systemName: "shippingbox.fill")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .frame(width: 14, height: 20)
+            HStack(spacing: 0) {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.accentColor)
+                    .frame(width: 3)
+                    .padding(.vertical, 4)
 
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack(spacing: 6) {
-                                Text(repository.repoName)
-                                    .font(.body.weight(.medium))
+                CCSpaceInteractiveCard(selected: true) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "shippingbox.fill")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .frame(width: 14, height: 20)
 
-                                if fetchingDefaultBranchForID == repository.id {
-                                    HStack(spacing: 4) {
-                                        ProgressView()
-                                            .controlSize(.mini)
-                                        Text("正在获取默认分支…")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                }
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack(spacing: 6) {
+                                    Text(repository.repoName)
+                                        .font(.body.weight(.medium))
 
-                                ForEach(editingMRBranches, id: \.self) { branch in
-                                    let isDefault = branch == repository.defaultBranch
-                                    let tint: Color = isDefault ? .orange : .accentColor
-                                    HStack(spacing: 4) {
-                                        if isDefault {
-                                            Image(systemName: "star.fill")
-                                                .font(.system(size: 7))
+                                    if fetchingDefaultBranchForID == repository.id {
+                                        HStack(spacing: 4) {
+                                            ProgressView()
+                                                .controlSize(.mini)
+                                            Text("正在获取默认分支…")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
                                         }
-                                        Text(branch)
-                                            .font(.footnote)
-                                        if !isDefault {
-                                            Button {
-                                                editingMRBranches.removeAll { $0 == branch }
-                                            } label: {
-                                                Image(systemName: "xmark")
-                                                    .font(.caption2)
+                                    }
+
+                                    ForEach(editingMRBranches, id: \.self) { branch in
+                                        let isDefault = branch == repository.defaultBranch
+                                        let tint: Color = isDefault ? .orange : .accentColor
+                                        HStack(spacing: 4) {
+                                            if isDefault {
+                                                Image(systemName: "star.fill")
+                                                    .font(.system(size: 7))
                                             }
-                                            .buttonStyle(.plain)
+                                            Text(isDefault ? "\(branch) (默认)" : branch)
+                                                .font(.footnote)
+                                            if !isDefault {
+                                                Button {
+                                                    editingMRBranches.removeAll { $0 == branch }
+                                                } label: {
+                                                    Image(systemName: "xmark")
+                                                        .font(.caption2)
+                                                }
+                                                .buttonStyle(.plain)
+                                            }
                                         }
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 4)
+                                        .background(tint.opacity(0.1), in: Capsule())
+                                        .foregroundStyle(tint)
+                                        .ccspaceQuickHelp(isDefault ? "默认分支不可移除" : nil)
                                     }
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(tint.opacity(0.1), in: Capsule())
-                                    .foregroundStyle(tint)
-                                }
-                            }
-
-                            TextField("Git 仓库地址", text: $editingGitURL)
-                                .textFieldStyle(.roundedBorder)
-                                .onChange(of: editingGitURL) { _, _ in
-                                    feedback = nil
-                                }
-                                .onSubmit {
-                                    saveEditing(repository)
                                 }
 
-                            HStack(spacing: 6) {
-                                TextField("添加 MR 目标分支", text: $mrBranchInput)
+                                TextField("Git 仓库地址", text: $editingGitURL)
                                     .textFieldStyle(.roundedBorder)
+                                    .onChange(of: editingGitURL) { _, _ in
+                                        feedback = nil
+                                    }
                                     .onSubmit {
+                                        saveEditing(repository)
+                                    }
+
+                                HStack(spacing: 6) {
+                                    TextField("添加 MR 目标分支", text: $mrBranchInput)
+                                        .textFieldStyle(.roundedBorder)
+                                        .ccspaceQuickHelp("创建 MR 时可选的目标分支")
+                                        .onSubmit {
+                                            addEditingMRBranch()
+                                        }
+                                    Button("添加") {
                                         addEditingMRBranch()
                                     }
-                                Button("添加") {
-                                    addEditingMRBranch()
-                                }
-                                .ccspaceSecondaryActionButton()
-                                .disabled(!editingMRBranchAddState.canSubmit)
+                                    .ccspaceSecondaryActionButton()
+                                    .disabled(!editingMRBranchAddState.canSubmit)
 
-                                Button("取消") {
-                                    cancelEditing()
-                                }
-                                .ccspaceSecondaryActionButton()
+                                    Button("取消") {
+                                        cancelEditing()
+                                    }
+                                    .ccspaceSecondaryActionButton()
 
-                                Button("保存") {
-                                    saveEditing(repository)
+                                    Button("保存") {
+                                        saveEditing(repository)
+                                    }
+                                    .ccspacePrimaryActionButton()
+                                    .disabled(!presentationState.canSubmit)
                                 }
-                                .ccspacePrimaryActionButton()
-                                .disabled(!presentationState.canSubmit)
                             }
                         }
                     }

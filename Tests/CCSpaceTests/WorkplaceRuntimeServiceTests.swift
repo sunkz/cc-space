@@ -579,7 +579,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         )
         let pushedDirectories = await gitService.pushedDirectories()
 
-        XCTAssertEqual(result, RepositoryPushResult(successCount: 0, failedCount: 1, skippedCount: 0))
+        XCTAssertEqual(result, RepositoryPushResult(successCount: 0, failedCount: 1, skippedCount: 0, failedNames: ["api"]))
         XCTAssertEqual(persistedState.status, .failed)
         XCTAssertEqual(persistedState.lastError, "无法读取仓库 Git 状态")
         XCTAssertTrue(pushedDirectories.isEmpty)
@@ -626,7 +626,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         let persistedState = try XCTUnwrap(
             syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore)
         )
-        XCTAssertEqual(result, RepositoryPushResult(successCount: 0, failedCount: 1, skippedCount: 0))
+        XCTAssertEqual(result, RepositoryPushResult(successCount: 0, failedCount: 1, skippedCount: 0, failedNames: ["api"]))
         XCTAssertEqual(persistedState.status, .failed)
         XCTAssertEqual(persistedState.lastError, "push failed")
 
@@ -1512,7 +1512,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         let result = try await service.switchRepositoriesToDefaultBranch(in: workplace)
 
-        XCTAssertEqual(result, WorkplaceBulkBranchSwitchResult(successCount: 0, failedCount: 1))
+        XCTAssertEqual(result, WorkplaceBulkBranchSwitchResult(successCount: 0, failedCount: 1, failedNames: ["api"]))
         let persistedState = try XCTUnwrap(
             syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore)
         )
@@ -1729,7 +1729,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         XCTAssertEqual(
             result,
-            WorkplaceBulkBranchSwitchResult(successCount: 0, failedCount: 1, skippedCount: 0)
+            WorkplaceBulkBranchSwitchResult(successCount: 0, failedCount: 1, skippedCount: 0, failedNames: ["api"])
         )
         let persistedState = try XCTUnwrap(
             syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore)

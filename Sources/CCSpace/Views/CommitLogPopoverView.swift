@@ -4,6 +4,8 @@ struct CommitLogPopoverView: View {
     let repositoryName: String
     let commits: [GitCommitEntry]
     let isLoading: Bool
+    var error: String? = nil
+    var onRetry: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -11,13 +13,15 @@ struct CommitLogPopoverView: View {
             Divider()
             if isLoading {
                 loadingView
+            } else if let error {
+                errorView(error)
             } else if commits.isEmpty {
                 emptyView
             } else {
                 commitList
             }
         }
-        .frame(width: 420, height: 360)
+        .frame(idealWidth: 420, maxWidth: 520, idealHeight: 360, maxHeight: 480)
     }
 
     private var header: some View {
@@ -54,6 +58,30 @@ struct CommitLogPopoverView: View {
             Spacer()
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private func errorView(_ message: String) -> some View {
+        VStack(spacing: 8) {
+            Spacer()
+            Image(systemName: "exclamationmark.triangle")
+                .font(.title3)
+                .foregroundStyle(.red)
+            Text("加载提交记录失败")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.red)
+                .lineLimit(3)
+                .multilineTextAlignment(.center)
+            if let onRetry {
+                Button("重试", action: onRetry)
+                    .controlSize(.small)
+            }
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 12)
     }
 
     private var commitList: some View {
@@ -101,6 +129,12 @@ private struct CommitRowView: View {
 }
 
 private extension Date {
+    private static let dateOnlyFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
+
     var relativeDescription: String {
         let now = Date.now
         let interval = now.timeIntervalSince(self)
@@ -115,8 +149,6 @@ private extension Date {
         if hours < 24 { return "\(hours) 小时前" }
         if days < 30 { return "\(days) 天前" }
 
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.string(from: self)
+        return Self.dateOnlyFormatter.string(from: self)
     }
 }

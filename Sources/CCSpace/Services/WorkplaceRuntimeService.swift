@@ -90,11 +90,16 @@ struct WorkplaceRuntimeService {
         let successCount = results.filter { $0.isPushed }.count
         let failedCount = results.filter { $0.isFailed }.count
         let skippedCount = results.filter { $0.isSkipped }.count
+        let failedNames = results.compactMap { result -> String? in
+            guard result.isFailed else { return nil }
+            return URL(fileURLWithPath: result.updatedState.localPath).lastPathComponent
+        }
 
         return RepositoryPushResult(
             successCount: successCount,
             failedCount: failedCount,
-            skippedCount: skippedCount
+            skippedCount: skippedCount,
+            failedNames: failedNames
         )
     }
 
@@ -274,11 +279,16 @@ struct WorkplaceRuntimeService {
         let successCount = results.filter { $0.isMerged }.count
         let failedCount = results.filter { $0.isFailed }.count
         let skippedCount = results.filter { $0.isSkipped }.count
+        let failedNames = results.compactMap { result -> String? in
+            guard result.isFailed else { return nil }
+            return URL(fileURLWithPath: result.updatedState.localPath).lastPathComponent
+        }
 
         return WorkplaceBulkBranchSwitchResult(
             successCount: successCount,
             failedCount: failedCount,
-            skippedCount: skippedCount
+            skippedCount: skippedCount,
+            failedNames: failedNames
         )
     }
 
@@ -435,7 +445,7 @@ struct WorkplaceRuntimeService {
             case .success(let branch):
                 do {
                     if await Self.isCurrentBranch(branch, for: state, gitService: gitService) {
-                        return .success(Self.succeededState(from: state))
+                        return .skipped(Self.succeededState(from: state))
                     }
 
                     try await GitWorktreeSafety.withCleanWorkingTree(
@@ -468,10 +478,17 @@ struct WorkplaceRuntimeService {
 
         let successCount = results.filter { $0.isSuccess }.count
         let failedCount = results.filter { $0.isFailed }.count
+        let skippedCount = results.filter { $0.isSkipped }.count
+        let failedNames = results.compactMap { result -> String? in
+            guard result.isFailed else { return nil }
+            return URL(fileURLWithPath: result.updatedState.localPath).lastPathComponent
+        }
 
         return WorkplaceBulkBranchSwitchResult(
             successCount: successCount,
-            failedCount: failedCount
+            failedCount: failedCount,
+            skippedCount: skippedCount,
+            failedNames: failedNames
         )
     }
 

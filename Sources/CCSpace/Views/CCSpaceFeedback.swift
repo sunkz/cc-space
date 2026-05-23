@@ -49,20 +49,50 @@ enum CCSpaceFeedbackStyle: Equatable {
 struct CCSpaceFeedback: Equatable {
     let style: CCSpaceFeedbackStyle
     let message: String
+    var details: String?
 
     var systemImage: String {
         style.systemImage
+    }
+
+    init(style: CCSpaceFeedbackStyle, message: String, details: String? = nil) {
+        self.style = style
+        self.message = message
+        self.details = details
     }
 }
 
 struct CCSpaceFeedbackBanner: View {
     let feedback: CCSpaceFeedback
+    @State private var isDetailsExpanded = false
 
     var body: some View {
-        Label(feedback.message, systemImage: feedback.systemImage)
-            .font(.callout)
-            .foregroundStyle(feedback.style.foregroundColor)
-            .ccspaceInsetPanel(background: feedback.style.backgroundColor)
+        VStack(alignment: .leading, spacing: 4) {
+            Label(feedback.message, systemImage: feedback.systemImage)
+                .font(.callout)
+                .foregroundStyle(feedback.style.foregroundColor)
+
+            if let details = feedback.details {
+                if isDetailsExpanded {
+                    Text(details)
+                        .font(.caption)
+                        .foregroundStyle(feedback.style.foregroundColor.opacity(0.85))
+                        .textSelection(.enabled)
+                } else {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            isDetailsExpanded = true
+                        }
+                    } label: {
+                        Text("展开详情")
+                            .font(.caption)
+                            .foregroundStyle(feedback.style.foregroundColor.opacity(0.7))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .ccspaceInsetPanel(background: feedback.style.backgroundColor)
     }
 }
 

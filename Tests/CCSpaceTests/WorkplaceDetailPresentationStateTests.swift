@@ -71,12 +71,12 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
         XCTAssertFalse(presentationState.canSwitchRepositoriesToWorkBranch)
         XCTAssertTrue(presentationState.canOpenDirectory)
         XCTAssertTrue(presentationState.canDeleteWorkplace)
-        XCTAssertEqual(presentationState.editHelp, "编辑工作区")
-        XCTAssertEqual(presentationState.refreshHelp, "刷新全部本地仓库状态")
-        XCTAssertEqual(presentationState.syncHelp, "同步全部已克隆仓库")
-        XCTAssertEqual(presentationState.pushHelp, "推送全部需要推送的仓库")
-        XCTAssertEqual(presentationState.switchWorkBranchHelp, "请先配置工作分支名称")
-        XCTAssertEqual(presentationState.deleteHelp, "删除工作区")
+        XCTAssertEqual(presentationState.editHelp, "编辑工作区名称、分支和仓库配置")
+        XCTAssertEqual(presentationState.refreshHelp, "重新读取所有仓库的本地 Git 状态")
+        XCTAssertEqual(presentationState.syncHelp, "Pull 所有仓库：从远端拉取最新代码并合并到当前分支")
+        XCTAssertEqual(presentationState.pushHelp, "Push 所有仓库：将未推送的提交推送到远端")
+        XCTAssertEqual(presentationState.switchWorkBranchHelp, "请先在编辑中配置工作分支名称")
+        XCTAssertEqual(presentationState.deleteHelp, "删除工作区及其本地文件目录")
     }
 
     func test_performingActionLocksEditSyncAndDeleteImmediately() throws {
@@ -245,8 +245,8 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
         XCTAssertTrue(presentationState.canPushAllRepositories)
         XCTAssertTrue(presentationState.canSwitchRepositoriesToDefaultBranch)
         XCTAssertTrue(presentationState.canSwitchRepositoriesToWorkBranch)
-        XCTAssertEqual(presentationState.refreshHelp, "刷新全部本地仓库状态")
-        XCTAssertEqual(presentationState.switchWorkBranchHelp, "切换全部本地仓库到工作分支：88")
+        XCTAssertEqual(presentationState.refreshHelp, "重新读取所有仓库的本地 Git 状态")
+        XCTAssertEqual(presentationState.switchWorkBranchHelp, "切到工作分支：将所有仓库切到 88")
     }
 
     private func makeWorkplace(

@@ -5,22 +5,24 @@ struct JSONFileStoreDocument {
     let data: Data
 }
 
-struct JSONFileStore: @unchecked Sendable {
+struct JSONFileStore: Sendable {
     let rootDirectory: URL
-    private let encoder: JSONEncoder
-    private let decoder: JSONDecoder
 
     init(rootDirectory: URL) {
         self.rootDirectory = rootDirectory
+    }
 
+    private func makeEncoder() -> JSONEncoder {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
-        self.encoder = encoder
+        return encoder
+    }
 
+    private func makeDecoder() -> JSONDecoder {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        self.decoder = decoder
+        return decoder
     }
 
     func save<T: Encodable>(_ value: T, as fileName: String) throws {
@@ -30,7 +32,7 @@ struct JSONFileStore: @unchecked Sendable {
     func document<T: Encodable>(for value: T, as fileName: String) throws -> JSONFileStoreDocument {
         JSONFileStoreDocument(
             fileName: fileName,
-            data: try encoder.encode(value)
+            data: try makeEncoder().encode(value)
         )
     }
 
@@ -40,7 +42,9 @@ struct JSONFileStore: @unchecked Sendable {
         try FileManager.default.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
         let stagingDirectory = rootDirectory
             .appendingPathComponent(".ccspace-json-write-\(UUID().uuidString)", isDirectory: true)
+        let backupDirectory = stagingDirectory.appendingPathComponent("backup", isDirectory: true)
         try FileManager.default.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: backupDirectory, withIntermediateDirectories: true)
 
         do {
             for document in documents {
@@ -48,19 +52,39 @@ struct JSONFileStore: @unchecked Sendable {
                 try document.data.write(to: stagedURL, options: .atomic)
             }
 
-            for document in documents {
-                let stagedURL = stagingDirectory.appendingPathComponent(document.fileName)
-                let destinationURL = rootDirectory.appendingPathComponent(document.fileName)
-                if FileManager.default.fileExists(atPath: destinationURL.path) {
-                    _ = try FileManager.default.replaceItemAt(
-                        destinationURL,
-                        withItemAt: stagedURL,
-                        backupItemName: nil,
-                        options: []
-                    )
-                } else {
-                    try FileManager.default.moveItem(at: stagedURL, to: destinationURL)
+            var movedDocuments: [JSONFileStoreDocument] = []
+            do {
+                for document in documents {
+                    let stagedURL = stagingDirectory.appendingPathComponent(document.fileName)
+                    let destinationURL = rootDirectory.appendingPathComponent(document.fileName)
+                    if FileManager.default.fileExists(atPath: destinationURL.path) {
+                        let backupURL = backupDirectory.appendingPathComponent(document.fileName)
+                        try FileManager.default.copyItem(at: destinationURL, to: backupURL)
+                        _ = try FileManager.default.replaceItemAt(
+                            destinationURL,
+                            withItemAt: stagedURL,
+                            backupItemName: nil,
+                            options: []
+                        )
+                    } else {
+                        try FileManager.default.moveItem(at: stagedURL, to: destinationURL)
+                    }
+                    movedDocuments.append(document)
                 }
+            } catch {
+                for moved in movedDocuments.reversed() {
+                    let backupURL = backupDirectory.appendingPathComponent(moved.fileName)
+                    let destinationURL = rootDirectory.appendingPathComponent(moved.fileName)
+                    if FileManager.default.fileExists(atPath: backupURL.path) {
+                        _ = try? FileManager.default.replaceItemAt(
+                            destinationURL,
+                            withItemAt: backupURL,
+                            backupItemName: nil,
+                            options: []
+                        )
+                    }
+                }
+                throw error
             }
         } catch {
             try? FileManager.default.removeItem(at: stagingDirectory)
@@ -73,7 +97,7 @@ struct JSONFileStore: @unchecked Sendable {
     func load<T: Decodable>(_ type: T.Type, from fileName: String) throws -> T {
         let fileURL = rootDirectory.appendingPathComponent(fileName)
         let data = try Data(contentsOf: fileURL)
-        return try decoder.decode(type, from: data)
+        return try makeDecoder().decode(type, from: data)
     }
 
     func loadIfPresent<T: Decodable>(_ type: T.Type, from fileName: String, default defaultValue: @autoclosure () -> T) throws -> T {

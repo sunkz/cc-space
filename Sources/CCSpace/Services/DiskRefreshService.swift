@@ -35,12 +35,8 @@ struct DiskRefreshService {
             let refreshResults = await refreshCalculator(snapshot, rootPath)
             guard Task.isCancelled == false else { return }
             retryCount += 1
-            guard snapshot == currentSnapshot(), retryCount <= 3 else {
-                if retryCount > 3 {
-                    workplaceStore.applyDiskRefreshResult(refreshResults.workplaceResult)
-                    repositoryStore.applyDeduplicationResult(refreshResults.repositoryResult)
-                    return
-                }
+            guard snapshot == currentSnapshot() else {
+                guard retryCount <= 3 else { return }
                 continue
             }
 

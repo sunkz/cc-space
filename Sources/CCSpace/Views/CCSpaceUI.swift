@@ -59,12 +59,7 @@ extension View {
     }
 
     func ccspaceIconActionButton() -> some View {
-        buttonStyle(.plain)
-            .controlSize(.small)
-            .font(.footnote.weight(.medium))
-            .foregroundStyle(.secondary)
-            .frame(width: 24, height: 24)
-            .contentShape(Rectangle())
+        modifier(CCSpaceIconActionButtonModifier())
     }
 
     @ViewBuilder
@@ -180,10 +175,10 @@ struct CCSpaceInteractiveCard<Content: View>: View {
 
     private var backgroundColor: Color {
         if selected {
-            return accent.opacity(0.03)
+            return accent.opacity(0.05)
         }
         if isHovering {
-            return Color.primary.opacity(0.008)
+            return Color.primary.opacity(0.04)
         }
         return .clear
     }
@@ -223,5 +218,38 @@ private struct CCSpaceScreenBackground: View {
     var body: some View {
         Color(nsColor: .windowBackgroundColor)
             .ignoresSafeArea()
+    }
+}
+
+private struct CCSpaceIconActionButtonModifier: ViewModifier {
+    @State private var isHovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .buttonStyle(.plain)
+            .controlSize(.small)
+            .font(.footnote.weight(.medium))
+            .foregroundStyle(isHovering ? Color.primary : .secondary)
+            .frame(width: 24, height: 24)
+            .contentShape(Rectangle())
+            .animation(.snappy(duration: 0.18), value: isHovering)
+            .onHover { isHovering = $0 }
+    }
+}
+
+struct CCSpaceShimmerPill: View {
+    @State private var shimmerPhase = false
+
+    var body: some View {
+        Capsule()
+            .fill(Color.primary.opacity(shimmerPhase ? 0.06 : 0.03))
+            .frame(width: 48, height: 18)
+            .animation(
+                .easeInOut(duration: 1.0).repeatForever(autoreverses: true),
+                value: shimmerPhase
+            )
+            .onAppear {
+                shimmerPhase = true
+            }
     }
 }

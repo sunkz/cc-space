@@ -72,6 +72,6 @@ struct Workplace: Codable, Equatable, Identifiable, Sendable {
     }
 
     var hasLocalDirectory: Bool {
-        FileSystemService().directoryExists(at: path)
+        FileManager.default.fileExists(atPath: path)
     }
 }

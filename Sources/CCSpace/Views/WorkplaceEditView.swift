@@ -105,6 +105,10 @@ struct WorkplaceEditView: View {
                         name: $name,
                         branch: $branch,
                         isDisabled: isSaving,
+                        branchValidationError: presentationState.branchValidationError,
+                        autoFocusName: true,
+                        nameHint: "名称会作为根目录下的文件夹名",
+                        branchHint: "选填，统一切换分支时使用此名称",
                         onInputChanged: clearFeedback
                     )
 

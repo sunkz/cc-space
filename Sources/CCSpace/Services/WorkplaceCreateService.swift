@@ -26,6 +26,8 @@ struct WorkplaceCreateService {
             branch: normalizedBranch
         )
 
+        let directoryExistedBefore = FileManager.default.fileExists(atPath: workplace.path)
+
         do {
             let states = try await syncCoordinator.cloneRepositories(
                 repositories: selectedRepositories,
@@ -36,7 +38,9 @@ struct WorkplaceCreateService {
             return workplace
         } catch {
             try? workplaceStore.deleteWorkplace(workplace.id)
-            try? syncCoordinator.fileSystemService.removeItemIfExists(at: workplace.path)
+            if !directoryExistedBefore {
+                try? syncCoordinator.fileSystemService.removeItemIfExists(at: workplace.path)
+            }
             throw error
         }
     }

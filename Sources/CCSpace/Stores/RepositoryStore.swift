@@ -10,6 +10,25 @@ struct RepositoryBackupEntry: Codable, Equatable, Sendable {
     let gitURL: String
     var defaultBranch: String?
     var mrTargetBranches: [String] = []
+
+    private enum CodingKeys: String, CodingKey {
+        case gitURL
+        case defaultBranch
+        case mrTargetBranches
+    }
+
+    init(gitURL: String, defaultBranch: String? = nil, mrTargetBranches: [String] = []) {
+        self.gitURL = gitURL
+        self.defaultBranch = defaultBranch
+        self.mrTargetBranches = mrTargetBranches
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        gitURL = try container.decode(String.self, forKey: .gitURL)
+        defaultBranch = try container.decodeIfPresent(String.self, forKey: .defaultBranch)
+        mrTargetBranches = try container.decodeIfPresent([String].self, forKey: .mrTargetBranches) ?? []
+    }
 }
 
 struct RepositoryBackupDocument: Codable, Equatable {
@@ -90,8 +109,12 @@ final class RepositoryStore: ObservableObject {
 
     init(fileStore: JSONFileStore) {
         self.fileStore = fileStore
-        self.repositories =
-            (try? fileStore.loadIfPresent([RepositoryConfig].self, from: "repositories.json", default: [])) ?? []
+        do {
+            self.repositories = try fileStore.loadIfPresent([RepositoryConfig].self, from: "repositories.json", default: [])
+        } catch {
+            repositoryStoreLog.error("event=load_repositories_failed reason=\(error.localizedDescription)")
+            self.repositories = []
+        }
     }
 
     private func persistRepositories(_ newRepositories: [RepositoryConfig]) throws {

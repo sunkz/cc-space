@@ -6,18 +6,21 @@ struct SettingsView: View {
     @ObservedObject var repositoryStore: RepositoryStore
     @ObservedObject var workplaceStore: WorkplaceStore
     let gitService: GitServicing
+    @Binding var showOnboarding: Bool
     @State private var saveFeedback: CCSpaceFeedback?
 
     init(
         settingsStore: SettingsStore,
         repositoryStore: RepositoryStore,
         workplaceStore: WorkplaceStore,
-        gitService: GitServicing
+        gitService: GitServicing,
+        showOnboarding: Binding<Bool>
     ) {
         self.settingsStore = settingsStore
         self.repositoryStore = repositoryStore
         self.workplaceStore = workplaceStore
         self.gitService = gitService
+        self._showOnboarding = showOnboarding
     }
 
     private var savedPath: String {
@@ -41,6 +44,8 @@ struct SettingsView: View {
                             padding: 12,
                             borderOpacity: 0.03
                         )
+
+                    restartOnboardingSection
 
                     if repositoryStore.repositories.count > 8 {
                         HStack {
@@ -141,6 +146,31 @@ struct SettingsView: View {
                     .ccspaceAutoDismissFeedback($saveFeedback)
             }
         }
+        .ccspacePanel(
+            background: .clear,
+            cornerRadius: 12,
+            padding: 12,
+            borderOpacity: 0.03
+        )
+    }
+
+    private var restartOnboardingSection: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.counterclockwise")
+                .foregroundStyle(.secondary)
+                .font(.caption)
+            Text("重新体验新手引导流程")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button("重新开始引导") {
+                try? settingsStore.updateHasCompletedOnboarding(false)
+                showOnboarding = true
+            }
+            .ccspaceSecondaryActionButton()
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
         .ccspacePanel(
             background: .clear,
             cornerRadius: 12,

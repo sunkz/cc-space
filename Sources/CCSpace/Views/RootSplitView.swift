@@ -12,6 +12,7 @@ struct RootSplitView: View {
     @State private var createWorkplaceSheet: WorkplaceCreateSheetPresentation?
     @State private var refreshTask: Task<Void, Never>?
     @State private var hasAppliedLaunchConfiguration = false
+    @State private var showOnboarding = false
     private let launchConfiguration: CCSpaceLaunchConfiguration
     private let syncCoordinator: SyncCoordinator
     private let gitService: GitService
@@ -19,6 +20,13 @@ struct RootSplitView: View {
     private var selectedWorkplace: Workplace? {
         guard let selectedID = appViewModel.selectedWorkplaceID else { return nil }
         return workplaceStore.workplaces.first { $0.id == selectedID }
+    }
+
+    private var shouldShowOnboarding: Bool {
+        !settingsStore.settings.hasCompletedOnboarding
+            && settingsStore.settings.workplaceRootPath.isEmpty
+            && repositoryStore.repositories.isEmpty
+            && workplaceStore.workplaces.isEmpty
     }
 
     private var workplaceEditService: WorkplaceEditService {
@@ -114,7 +122,8 @@ struct RootSplitView: View {
                     settingsStore: settingsStore,
                     repositoryStore: repositoryStore,
                     workplaceStore: workplaceStore,
-                    gitService: gitService
+                    gitService: gitService,
+                    showOnboarding: $showOnboarding
                 )
             case .workplaces:
                 if let workplace = selectedWorkplace {
@@ -137,6 +146,9 @@ struct RootSplitView: View {
         .onAppear {
             applyLaunchConfigurationIfNeeded()
             scheduleDiskRefresh()
+            if shouldShowOnboarding {
+                showOnboarding = true
+            }
         }
         .onReceive(Timer.publish(every: 120, on: .main, in: .common).autoconnect()) { _ in
             scheduleDiskRefresh()
@@ -181,6 +193,16 @@ struct RootSplitView: View {
                     createWorkplaceSheet = nil
                 }
             )
+        }
+        .sheet(isPresented: $showOnboarding) {
+            OnboardingView(
+                settingsStore: settingsStore,
+                repositoryStore: repositoryStore,
+                onComplete: {
+                    showOnboarding = false
+                }
+            )
+            .interactiveDismissDisabled()
         }
     }
 

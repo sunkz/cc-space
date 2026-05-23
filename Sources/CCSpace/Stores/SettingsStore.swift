@@ -50,4 +50,10 @@ final class SettingsStore: ObservableObject {
         updatedSettings.preferredOpenActionID = actionID
         try persistSettings(updatedSettings)
     }
+
+    func updateHasCompletedOnboarding(_ value: Bool) throws {
+        var updatedSettings = settings
+        updatedSettings.hasCompletedOnboarding = value
+        try persistSettings(updatedSettings)
+    }
 }

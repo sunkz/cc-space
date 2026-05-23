@@ -31,7 +31,9 @@ enum LocalPathSafety {
         }
         guard trimmedComponent != ".",
               trimmedComponent != "..",
-              trimmedComponent.contains("/") == false else {
+              trimmedComponent.contains("/") == false,
+              trimmedComponent.contains("\0") == false,
+              trimmedComponent.contains(":") == false else {
             throw LocalPathSafetyError.invalidComponent(fieldName: fieldName)
         }
         return trimmedComponent

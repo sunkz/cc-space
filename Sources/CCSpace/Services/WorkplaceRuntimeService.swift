@@ -390,7 +390,11 @@ struct WorkplaceRuntimeService {
     }
 
     private func isManagedWorkplace(_ workplace: Workplace) -> Bool {
-        LocalPathSafety.isWithinDirectory(
+        if workplaceRootPath.isEmpty {
+            workplaceRuntimeLog.warning("event=empty_root_path workplace_id=\(workplace.id) action=skipped")
+            return false
+        }
+        return LocalPathSafety.isWithinDirectory(
             workplace.path,
             rootPath: workplaceRootPath
         )

@@ -40,7 +40,7 @@ struct GitProcessRunner {
         process.standardInput = FileHandle.nullDevice
 
         let processBox = SendableProcessBox(process)
-        let didTimeout = SendableBoolBox()
+        let continuationClaim = ContinuationClaimBox()
         let commandDescription = Self.safeCommandDescription(arguments: arguments)
 
         return try await withTaskCancellationHandler {
@@ -65,25 +65,24 @@ struct GitProcessRunner {
                     }
                 }
 
-                nonisolated(unsafe) let timeoutWork = DispatchWorkItem { [processBox, didTimeout] in
+                nonisolated(unsafe) let timeoutWork = DispatchWorkItem { [processBox, continuationClaim] in
                     guard processBox.process.isRunning else { return }
-                    didTimeout.value = true
+                    guard continuationClaim.claim() else { return }
                     processBox.process.terminate()
+                    readGroup.notify(queue: .global()) {
+                        continuation.resume(
+                            throwing: GitProcessExecutionError.timedOut(
+                                command: commandDescription,
+                                timeout: timeout
+                            )
+                        )
+                    }
                 }
 
                 process.terminationHandler = { completedProcess in
                     timeoutWork.cancel()
+                    guard continuationClaim.claim() else { return }
                     readGroup.notify(queue: .global()) {
-                        if didTimeout.value {
-                            continuation.resume(
-                                throwing: GitProcessExecutionError.timedOut(
-                                    command: commandDescription,
-                                    timeout: timeout
-                                )
-                            )
-                            return
-                        }
-
                         continuation.resume(
                             returning: GitProcessResult(
                                 terminationStatus: completedProcess.terminationStatus,
@@ -99,6 +98,7 @@ struct GitProcessRunner {
                 } catch {
                     process.terminationHandler = nil
                     timeoutWork.cancel()
+                    guard continuationClaim.claim() else { return }
                     stdoutPipe?.fileHandleForReading.closeFile()
                     stderrPipe?.fileHandleForReading.closeFile()
                     continuation.resume(throwing: error)
@@ -152,12 +152,15 @@ private final class SendableDataBox: @unchecked Sendable {
     }
 }
 
-private final class SendableBoolBox: @unchecked Sendable {
+private final class ContinuationClaimBox: @unchecked Sendable {
     private let lock = NSLock()
-    private var _value = false
+    private var claimed = false
 
-    var value: Bool {
-        get { lock.lock(); defer { lock.unlock() }; return _value }
-        set { lock.lock(); defer { lock.unlock() }; _value = newValue }
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !claimed else { return false }
+        claimed = true
+        return true
     }
 }

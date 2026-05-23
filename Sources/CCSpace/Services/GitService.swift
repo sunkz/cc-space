@@ -319,7 +319,7 @@ struct GitService: GitServicing {
 
     func checkoutBranch(_ branch: String, in directory: String) async throws {
         do {
-            try await runGit(arguments: ["-C", directory, "checkout", branch])
+            try await runGit(arguments: ["-C", directory, "switch", branch])
             return
         } catch let checkoutError {
             guard isBranchNotFoundError(checkoutError) else {
@@ -401,7 +401,7 @@ struct GitService: GitServicing {
     }
 
     func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] {
-        let separator = "<<CCSPACE_SEP>>"
+        let separator = "\u{00}"
         let format = ["%H", "%s", "%an", "%aI"].joined(separator: separator)
         guard let output = try? await runGitOutput(arguments: [
             "-C", directory,

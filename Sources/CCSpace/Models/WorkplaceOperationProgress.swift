@@ -21,8 +21,8 @@ struct WorkplaceOperationProgress: Equatable, Sendable {
         activeRepositoryNames: [String]
     ) {
         self.step = step
-        self.completedCount = max(0, min(completedCount, totalCount))
         self.totalCount = max(0, totalCount)
+        self.completedCount = max(0, min(completedCount, self.totalCount))
         self.activeRepositoryNames = activeRepositoryNames.compactMap { name in
             let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmedName.isEmpty ? nil : trimmedName

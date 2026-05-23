@@ -332,16 +332,23 @@ struct WorkplaceEditService {
     }
 
     private func restoreStagedItems(_ stagedItems: [(originalPath: String, stagedPath: String)]) throws {
+        var firstError: Error?
         for item in stagedItems.reversed() {
             guard FileManager.default.fileExists(atPath: item.stagedPath) else { continue }
             let parentDirectory = (item.originalPath as NSString).deletingLastPathComponent
-            try FileManager.default.createDirectory(
-                atPath: parentDirectory,
-                withIntermediateDirectories: true,
-                attributes: nil
-            )
-            try FileManager.default.moveItem(atPath: item.stagedPath, toPath: item.originalPath)
+            do {
+                try FileManager.default.createDirectory(
+                    atPath: parentDirectory,
+                    withIntermediateDirectories: true,
+                    attributes: nil
+                )
+                try FileManager.default.moveItem(atPath: item.stagedPath, toPath: item.originalPath)
+            } catch {
+                editServiceLog.error("event=restore_staged_item_failed path=\(item.originalPath) reason=\(error.localizedDescription)")
+                if firstError == nil { firstError = error }
+            }
         }
+        if let firstError { throw firstError }
     }
 
     private func removeClonedItemsIfNeeded(_ states: [RepositorySyncState]) throws {
@@ -377,7 +384,10 @@ struct WorkplaceEditService {
         oldPrefix: String,
         newPrefix: String
     ) -> String {
-        guard path.hasPrefix(oldPrefix) else { return path }
-        return newPrefix + path.dropFirst(oldPrefix.count)
+        let normalizedPath = WorkplaceStore.normalizedPath(path)
+        let normalizedOldPrefix = WorkplaceStore.normalizedPath(oldPrefix)
+        guard normalizedPath.hasPrefix(normalizedOldPrefix) else { return path }
+        let suffix = normalizedPath.dropFirst(normalizedOldPrefix.count)
+        return newPrefix + suffix
     }
 }

@@ -23,17 +23,18 @@ enum OpenActionItem: Identifiable, Equatable {
     }
 
     var icon: NSImage {
-        let image: NSImage
+        let original: NSImage
         switch self {
         case .finder:
-            image = NSWorkspace.shared.icon(forFile: "/System/Library/CoreServices/Finder.app")
+            original = NSWorkspace.shared.icon(forFile: "/System/Library/CoreServices/Finder.app")
         case .terminal:
-            image = NSWorkspace.shared.icon(forFile: "/System/Applications/Utilities/Terminal.app")
+            original = NSWorkspace.shared.icon(forFile: "/System/Applications/Utilities/Terminal.app")
         case .editor(let editor):
-            image = editor.appIcon
+            original = editor.appIcon
         }
-        image.size = NSSize(width: 16, height: 16)
-        return image
+        let copy = original.copy() as! NSImage
+        copy.size = NSSize(width: 16, height: 16)
+        return copy
     }
 }
 

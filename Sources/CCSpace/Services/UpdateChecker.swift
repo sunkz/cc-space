@@ -56,9 +56,11 @@ final class UpdateChecker: ObservableObject {
         var request = URLRequest(url: latestReleaseAPIURL)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("CCSpace/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 15
 
         do {
             let (data, response) = try await dataLoader(request)
+            guard !Task.isCancelled else { return }
             guard let httpResponse = response as? HTTPURLResponse else {
                 latestVersion = nil
                 lastErrorMessage = "检查更新失败：响应无效"

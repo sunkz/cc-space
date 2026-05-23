@@ -423,6 +423,17 @@ final class WorkplaceStore: ObservableObject {
         }
 
         let diskPaths = Set(diskFolders.map { Self.normalizedPath($0.path) })
+
+        // Safety: if disk shows zero folders but we have workplaces, the root may be
+        // temporarily unavailable (e.g. network volume). Skip removal to avoid data loss.
+        if diskPaths.isEmpty && !workplaces.isEmpty {
+            return WorkplaceDiskRefreshResult(
+                workplaces: workplaces,
+                syncStates: syncStates,
+                changed: false
+            )
+        }
+
         var refreshedWorkplaces = workplaces
         var refreshedSyncStates = syncStates
         var changed = false
@@ -527,7 +538,10 @@ final class WorkplaceStore: ObservableObject {
             do {
                 try FileManager.default.moveItem(atPath: newPath, toPath: oldPath)
             } catch let rollbackError {
-                workplaceStoreLog.error("event=rename_rollback_failed from=\(newPath) to=\(oldPath) reason=\(rollbackError.localizedDescription)")
+                workplaceStoreLog.fault("event=rename_rollback_failed from=\(newPath) to=\(oldPath) reason=\(rollbackError.localizedDescription)")
+                // Filesystem has new name but persist failed — best-effort persist to avoid data loss
+                try? persistWorkplaces(updatedWorkplaces)
+                try? persistSyncStates(updatedSyncStates)
             }
             throw error
         }

@@ -477,9 +477,9 @@ struct OnboardingView: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
         do {
-            let countBefore = repositoryStore.repositories.count
+            let idsBefore = Set(repositoryStore.repositories.map(\.id))
             let result = try repositoryStore.importBackup(from: url)
-            let newRepos = repositoryStore.repositories.suffix(repositoryStore.repositories.count - countBefore)
+            let newRepos = repositoryStore.repositories.filter { !idsBefore.contains($0.id) }
             withAnimation(.snappy(duration: 0.25)) {
                 addedRepositoryIDs.append(contentsOf: newRepos.map(\.id))
             }

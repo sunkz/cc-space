@@ -150,7 +150,7 @@ final class RepositoryStore: ObservableObject {
     func addRepository(gitURL: String) throws {
         let normalizedGitURL = gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        guard repositories.contains(where: { $0.gitURL == normalizedGitURL }) == false else {
+        guard repositories.contains(where: { Self.gitURLsMatch($0.gitURL, normalizedGitURL) }) == false else {
             throw RepositoryStoreError.duplicateURL
         }
 
@@ -171,6 +171,23 @@ final class RepositoryStore: ObservableObject {
         var updatedRepositories = repositories
         updatedRepositories.append(repository)
         try persistRepositories(updatedRepositories)
+    }
+
+    nonisolated private static func gitURLsMatch(_ lhs: String, _ rhs: String) -> Bool {
+        normalizedGitURLForComparison(lhs) == normalizedGitURLForComparison(rhs)
+    }
+
+    nonisolated private static func normalizedGitURLForComparison(_ url: String) -> String {
+        var normalized = url
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if normalized.hasSuffix(".git") {
+            normalized = String(normalized.dropLast(4))
+        }
+        if normalized.hasSuffix("/") {
+            normalized = String(normalized.dropLast())
+        }
+        return normalized
     }
 
     func removeRepository(id: UUID, workplaceStore: WorkplaceStore? = nil) throws {

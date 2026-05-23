@@ -53,6 +53,7 @@ struct JSONFileStore: Sendable {
             }
 
             var movedDocuments: [JSONFileStoreDocument] = []
+            var newlyCreatedURLs: [URL] = []
             do {
                 for document in documents {
                     let stagedURL = stagingDirectory.appendingPathComponent(document.fileName)
@@ -68,10 +69,14 @@ struct JSONFileStore: Sendable {
                         )
                     } else {
                         try FileManager.default.moveItem(at: stagedURL, to: destinationURL)
+                        newlyCreatedURLs.append(destinationURL)
                     }
                     movedDocuments.append(document)
                 }
             } catch {
+                for url in newlyCreatedURLs.reversed() {
+                    try? FileManager.default.removeItem(at: url)
+                }
                 for moved in movedDocuments.reversed() {
                     let backupURL = backupDirectory.appendingPathComponent(moved.fileName)
                     let destinationURL = rootDirectory.appendingPathComponent(moved.fileName)

@@ -37,6 +37,7 @@ struct DiskRefreshService {
             retryCount += 1
             guard snapshot == currentSnapshot() else {
                 guard retryCount <= 3 else { return }
+                try? await Task.sleep(for: .milliseconds(100))
                 continue
             }
 

@@ -165,6 +165,9 @@ private extension GitURLParser {
         if normalizedHost.contains("github") {
             return .github
         }
+        if normalizedHost.contains("gitlab") {
+            return .gitlab
+        }
         if normalizedHost.contains("bitbucket") {
             return .unsupported("Bitbucket")
         }
@@ -174,6 +177,7 @@ private extension GitURLParser {
         if normalizedHost.contains("dev.azure") || normalizedHost.contains("visualstudio") {
             return .unsupported("Azure DevOps")
         }
+        // Default to GitLab MR format for self-hosted instances (most common)
         return .gitlab
     }
 

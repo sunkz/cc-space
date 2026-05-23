@@ -238,15 +238,14 @@ struct WorkplaceRepositoryRowView: View {
         commitLogError = nil
         let localPath = state.localPath
         commitLogTask = Task {
+            defer { isLoadingCommitLog = false }
             guard FileManager.default.fileExists(atPath: localPath) else {
                 guard !Task.isCancelled else { return }
-                isLoadingCommitLog = false
                 commitLogError = "本地目录不存在：\(localPath)"
                 return
             }
             let entries = await gitService.recentCommits(in: localPath, count: 20)
             guard !Task.isCancelled else { return }
-            isLoadingCommitLog = false
             commitLogEntries = entries
         }
     }

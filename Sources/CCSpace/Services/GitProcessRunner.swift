@@ -1,4 +1,5 @@
 import Foundation
+import ObjCExceptionCatch
 
 struct GitProcessResult {
     let terminationStatus: Int32
@@ -18,15 +19,34 @@ enum GitProcessExecutionError: LocalizedError, Equatable {
 }
 
 struct GitProcessRunner {
+    private static let gitURL: URL? = {
+        let candidates = ["/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git"]
+        for path in candidates {
+            if FileManager.default.isExecutableFile(atPath: path) {
+                return URL(fileURLWithPath: path)
+            }
+        }
+        return nil
+    }()
+
     func run(
         arguments: [String],
         captureStdout: Bool,
         captureStderr: Bool,
         timeout: TimeInterval = 60
     ) async throws -> GitProcessResult {
+        guard let gitURL = Self.gitURL else {
+            throw NSError(
+                domain: "GitProcessRunner",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "找不到 git 可执行文件"]
+            )
+        }
+
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["git"] + arguments
+        process.executableURL = gitURL
+        process.arguments = arguments
+        process.currentDirectoryURL = URL(fileURLWithPath: NSTemporaryDirectory())
 
         var environment = ProcessInfo.processInfo.environment
         environment["GIT_TERMINAL_PROMPT"] = "0"
@@ -94,7 +114,18 @@ struct GitProcessRunner {
                 }
 
                 do {
-                    try process.run()
+                    var launchException: NSException?
+                    let launched = ObjCExceptionCatchTryRun({
+                        try? process.run()
+                    }, &launchException)
+                    if !launched || !process.isRunning {
+                        let message = launchException?.reason ?? "进程启动失败"
+                        throw NSError(
+                            domain: "GitProcessRunner",
+                            code: 2,
+                            userInfo: [NSLocalizedDescriptionKey: message]
+                        )
+                    }
                 } catch {
                     process.terminationHandler = nil
                     timeoutWork.cancel()

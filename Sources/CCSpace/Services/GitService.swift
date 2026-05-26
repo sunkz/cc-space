@@ -401,8 +401,8 @@ struct GitService: GitServicing {
     }
 
     func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] {
-        let separator = "\u{00}"
-        let format = ["%H", "%s", "%an", "%aI"].joined(separator: separator)
+        let format = "%H%x1f%s%x1f%an%x1f%aI"
+        let separator = "\u{1F}"
         guard let output = try? await runGitOutput(arguments: [
             "-C", directory,
             "log",

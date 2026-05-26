@@ -101,6 +101,7 @@ struct CommitLogPopoverView: View {
 
 private struct CommitRowView: View {
     let commit: GitCommitEntry
+    @State private var copied = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -109,9 +110,34 @@ private struct CommitRowView: View {
                 .lineLimit(2)
                 .truncationMode(.tail)
             HStack(spacing: 6) {
-                Text(commit.shortHash)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.blue)
+                HStack(spacing: 3) {
+                    Text(commit.shortHash)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.blue)
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(commit.hash, forType: .string)
+                        copied = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                            copied = false
+                        }
+                    } label: {
+                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                            .font(.system(size: 9))
+                            .foregroundStyle(copied ? .green : .blue)
+                    }
+                    .buttonStyle(.plain)
+                    .help("复制完整 commit ID")
+
+                    if copied {
+                        Text("已复制")
+                            .font(.caption2)
+                            .foregroundStyle(.green)
+                            .transition(.opacity)
+                    }
+                }
+                .animation(.easeInOut(duration: 0.2), value: copied)
+
                 Text(commit.author)
                     .font(.caption)
                     .foregroundStyle(.secondary)

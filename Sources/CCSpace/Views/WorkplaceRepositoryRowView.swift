@@ -238,15 +238,20 @@ struct WorkplaceRepositoryRowView: View {
         commitLogError = nil
         let localPath = state.localPath
         commitLogTask = Task {
-            defer { isLoadingCommitLog = false }
             guard FileManager.default.fileExists(atPath: localPath) else {
                 guard !Task.isCancelled else { return }
-                commitLogError = "本地目录不存在：\(localPath)"
+                await MainActor.run {
+                    commitLogError = "本地目录不存在：\(localPath)"
+                    isLoadingCommitLog = false
+                }
                 return
             }
             let entries = await gitService.recentCommits(in: localPath, count: 20)
             guard !Task.isCancelled else { return }
-            commitLogEntries = entries
+            await MainActor.run {
+                commitLogEntries = entries
+                isLoadingCommitLog = false
+            }
         }
     }
 
@@ -381,8 +386,10 @@ struct WorkplaceRepositoryRowView: View {
             }
             Divider()
             Button {
-                showingCommitLog = true
-                loadCommitLog()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    loadCommitLog()
+                    showingCommitLog = true
+                }
             } label: {
                 Label("查看提交记录", systemImage: "clock.arrow.circlepath")
             }

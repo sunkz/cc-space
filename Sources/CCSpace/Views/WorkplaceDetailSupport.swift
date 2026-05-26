@@ -25,7 +25,7 @@ struct RepositoryBranchSnapshot: Equatable {
 }
 
 enum WorkplaceBranchLoader {
-    static let maxConcurrentSnapshotLoads = 4
+    static let maxConcurrentSnapshotLoads = 8
 
     static func loadBranchSnapshots(
         for syncStates: [RepositorySyncState],
@@ -34,39 +34,19 @@ enum WorkplaceBranchLoader {
         let branchStates = syncStates.filter(\.hasLocalDirectory)
         guard branchStates.isEmpty == false else { return [:] }
 
-        var snapshots: [RepositoryBranchCacheKey: RepositoryBranchSnapshot] = [:]
-
-        await withTaskGroup(of: (RepositoryBranchCacheKey, RepositoryBranchSnapshot?).self) { group in
-            let initialTaskCount = min(maxConcurrentSnapshotLoads, branchStates.count)
-            var nextStateIndex = 0
-
-            for _ in 0..<initialTaskCount {
-                let state = branchStates[nextStateIndex]
-                nextStateIndex += 1
-                group.addTask {
-                    await loadBranchSnapshot(for: state, gitService: gitService)
-                }
-            }
-
-            while let (key, snapshot) = await group.next() {
-                if let snapshot {
-                    snapshots[key] = snapshot
-                }
-
-                guard Task.isCancelled == false else {
-                    group.cancelAll()
-                    continue
-                }
-
-                guard nextStateIndex < branchStates.count else { continue }
-                let state = branchStates[nextStateIndex]
-                nextStateIndex += 1
-                group.addTask {
-                    await loadBranchSnapshot(for: state, gitService: gitService)
-                }
-            }
+        let results = await ConcurrencyUtilities.runLimitedTasks(
+            branchStates,
+            maxConcurrentTasks: maxConcurrentSnapshotLoads
+        ) { state in
+            await loadBranchSnapshot(for: state, gitService: gitService)
         }
 
+        var snapshots: [RepositoryBranchCacheKey: RepositoryBranchSnapshot] = [:]
+        for (key, snapshot) in results {
+            if let snapshot {
+                snapshots[key] = snapshot
+            }
+        }
         return snapshots
     }
 
@@ -75,30 +55,14 @@ enum WorkplaceBranchLoader {
         gitService: GitServicing
     ) async -> (RepositoryBranchCacheKey, RepositoryBranchSnapshot?) {
         let key = RepositoryBranchCacheKey(state: state)
-        let localPath = state.localPath
 
         guard Task.isCancelled == false else {
             return (key, nil)
         }
 
-        let status = await gitService.branchStatus(in: localPath)
-
-        guard Task.isCancelled == false else {
+        guard let info = await gitService.branchSnapshotInfo(in: state.localPath) else {
             return (key, nil)
         }
-
-        let currentBranch: String?
-        if let statusBranch = status?.currentBranch {
-            currentBranch = statusBranch
-        } else {
-            currentBranch = await gitService.currentBranch(in: localPath)
-        }
-
-        guard Task.isCancelled == false else {
-            return (key, nil)
-        }
-
-        let branches = await gitService.branches(in: localPath)
 
         guard Task.isCancelled == false else {
             return (key, nil)
@@ -107,12 +71,12 @@ enum WorkplaceBranchLoader {
         return (
             key,
             RepositoryBranchSnapshot(
-                currentBranch: currentBranch,
+                currentBranch: info.currentBranch,
                 branches: normalizedBranches(
-                    branches,
-                    currentBranch: currentBranch
+                    info.branches,
+                    currentBranch: info.currentBranch
                 ),
-                status: status
+                status: info.status
             )
         )
     }

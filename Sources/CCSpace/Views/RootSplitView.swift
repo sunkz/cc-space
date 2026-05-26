@@ -154,8 +154,11 @@ struct RootSplitView: View {
             scheduleDiskRefresh()
         }
         .onChange(of: scenePhase) { _, newPhase in
-            guard newPhase == .active else { return }
-            scheduleDiskRefresh()
+            if newPhase == .active {
+                scheduleDiskRefresh()
+            } else {
+                workplaceStore.flushSyncStates()
+            }
         }
         .onChange(of: appViewModel.selectedWorkplaceID) { _, _ in
             detailActionCoordinator.feedback = nil
@@ -207,11 +210,8 @@ struct RootSplitView: View {
     }
 
     private func detailView(for workplace: Workplace) -> some View {
-        WorkplaceDetailView(
-            workplace: workplace,
-            repositories: repositoryStore.repositories,
-            syncStates: workplaceStore.syncStates,
-            gitService: gitService,
+        let filteredSyncStates = workplaceStore.syncStates.filter { $0.workplaceID == workplace.id }
+        let actions = WorkplaceDetailActions(
             onEdit: {
                 editingWorkplace = workplace
             },
@@ -474,7 +474,14 @@ struct RootSplitView: View {
             },
             onCancelAction: {
                 detailActionCoordinator.cancelRunningAction()
-            },
+            }
+        )
+        return WorkplaceDetailView(
+            workplace: workplace,
+            repositories: repositoryStore.repositories,
+            syncStates: filteredSyncStates,
+            gitService: gitService,
+            actions: actions,
             isPerformingAction: detailActionCoordinator.isRunningAction,
             branchRefreshSeed: detailActionCoordinator.branchRefreshSeed,
             feedback: $detailActionCoordinator.feedback,

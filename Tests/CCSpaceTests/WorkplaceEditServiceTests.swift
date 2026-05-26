@@ -125,6 +125,7 @@ final class WorkplaceEditServiceTests: XCTestCase {
             }
         )
         existingState.status = .success
+        existingState.hasLocalDirectory = true
         existingState.lastSyncedAt = .now
         try workplaceStore.updateSyncState(existingState)
 
@@ -205,6 +206,16 @@ final class WorkplaceEditServiceTests: XCTestCase {
             withIntermediateDirectories: true,
             attributes: nil
         )
+
+        var apiState = try XCTUnwrap(
+            workplaceStore.syncStates.first {
+                $0.workplaceID == workplace.id && $0.repositoryID == apiRepository.id
+            }
+        )
+        apiState.status = .success
+        apiState.hasLocalDirectory = true
+        apiState.localPath = apiPath
+        try workplaceStore.updateSyncState(apiState)
 
         let gitService = WorkplaceEditGitServiceSpy()
         let service = WorkplaceEditService(
@@ -357,6 +368,7 @@ final class WorkplaceEditServiceTests: XCTestCase {
             }
         )
         existingState.status = .success
+        existingState.hasLocalDirectory = true
         existingState.localPath = apiPath
         try workplaceStore.updateSyncState(existingState)
 
@@ -410,6 +422,7 @@ final class WorkplaceEditServiceTests: XCTestCase {
             }
         )
         existingState.status = .failed
+        existingState.hasLocalDirectory = true
         existingState.localPath = apiPath
         existingState.lastError = "stale error"
         try workplaceStore.updateSyncState(existingState)
@@ -473,6 +486,7 @@ final class WorkplaceEditServiceTests: XCTestCase {
             }
         )
         existingState.status = .success
+        existingState.hasLocalDirectory = true
         existingState.localPath = apiPath
         try workplaceStore.updateSyncState(existingState)
 
@@ -602,6 +616,7 @@ final class WorkplaceEditServiceTests: XCTestCase {
             }
         )
         existingState.status = .success
+        existingState.hasLocalDirectory = true
         existingState.localPath = apiPath
         try workplaceStore.updateSyncState(existingState)
 
@@ -736,6 +751,7 @@ final class WorkplaceEditServiceTests: XCTestCase {
             }
         )
         state.status = .success
+        state.hasLocalDirectory = true
         state.localPath = outsidePath
         try workplaceStore.updateSyncState(state)
 

@@ -403,6 +403,7 @@ final class SyncCoordinatorTests: XCTestCase {
                 }
             )
             state.status = .success
+            state.hasLocalDirectory = true
             state.localPath = localPath
             try store.updateSyncState(state)
         }
@@ -443,6 +444,7 @@ final class SyncCoordinatorTests: XCTestCase {
 
         var clonedState = store.syncStates.first { $0.workplaceID == workplace.id }!
         clonedState.status = .success
+        clonedState.hasLocalDirectory = true
         clonedState.localPath = URL(fileURLWithPath: workplace.path).appendingPathComponent("api").path
         try FileManager.default.createDirectory(
             atPath: clonedState.localPath,
@@ -487,6 +489,7 @@ final class SyncCoordinatorTests: XCTestCase {
 
         var clonedState = store.syncStates.first { $0.workplaceID == workplace.id }!
         clonedState.status = .success
+        clonedState.hasLocalDirectory = true
         clonedState.localPath = URL(fileURLWithPath: workplace.path).appendingPathComponent("api").path
         try FileManager.default.createDirectory(
             atPath: clonedState.localPath,
@@ -531,6 +534,7 @@ final class SyncCoordinatorTests: XCTestCase {
 
         var clonedState = store.syncStates.first { $0.workplaceID == workplace.id }!
         clonedState.status = .success
+        clonedState.hasLocalDirectory = true
         clonedState.localPath = URL(fileURLWithPath: workplace.path).appendingPathComponent("api").path
         try FileManager.default.createDirectory(
             atPath: clonedState.localPath,
@@ -582,6 +586,7 @@ final class SyncCoordinatorTests: XCTestCase {
 
         var clonedState = store.syncStates.first { $0.workplaceID == workplace.id }!
         clonedState.status = .success
+        clonedState.hasLocalDirectory = true
         clonedState.localPath = URL(fileURLWithPath: workplace.path).appendingPathComponent("api").path
         try FileManager.default.createDirectory(
             atPath: clonedState.localPath,
@@ -641,6 +646,7 @@ final class SyncCoordinatorTests: XCTestCase {
         // repo1 stays .idle (should be skipped), repo2 is .success (should be pulled)
         var state2 = store.syncStates.first { $0.repositoryID == repo2.id }!
         state2.status = .success
+        state2.hasLocalDirectory = true
         state2.localPath = URL(fileURLWithPath: workplace.path).appendingPathComponent("web").path
         try FileManager.default.createDirectory(
             atPath: state2.localPath,
@@ -690,6 +696,7 @@ final class SyncCoordinatorTests: XCTestCase {
 
         var state = store.syncStates.first { $0.workplaceID == workplace.id }!
         state.status = .success
+        state.hasLocalDirectory = true
         state.localPath = URL(fileURLWithPath: workplace.path).appendingPathComponent("api").path
         state.lastSyncedAt = nil
         try FileManager.default.createDirectory(
@@ -760,6 +767,7 @@ final class SyncCoordinatorTests: XCTestCase {
 
         var state = store.syncStates.first { $0.workplaceID == workplace.id }!
         state.status = .failed
+        state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = "There is no tracking information for the current branch."
         try store.updateSyncState(state)

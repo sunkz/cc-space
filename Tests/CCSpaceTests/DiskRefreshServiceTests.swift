@@ -209,6 +209,95 @@ final class DiskRefreshServiceTests: XCTestCase {
         XCTAssertEqual(persistedState.lastError, "manual failure")
         XCTAssertNil(persistedState.lastSyncedAt)
     }
+
+    func test_refreshRetriesUpToThreeTimesWhenSnapshotChanges() async throws {
+        let appSupportRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(
+            at: workspaceRoot,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+
+        let fileStore = JSONFileStore(rootDirectory: appSupportRoot)
+        let repositoryStore = RepositoryStore(fileStore: fileStore)
+        let workplaceStore = WorkplaceStore(fileStore: fileStore)
+        try repositoryStore.addRepository(gitURL: "git@github.com:org/app.git")
+        let repository = try XCTUnwrap(repositoryStore.repositories.first)
+        let workplace = try workplaceStore.createWorkplace(
+            name: "retry-test",
+            rootPath: workspaceRoot.path,
+            selectedRepositories: [repository]
+        )
+        try FileManager.default.createDirectory(
+            atPath: workplace.path,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+
+        let callCounter = CallCounter()
+        let gate = ResettableRefreshGate()
+        let service = DiskRefreshService(
+            workplaceStore: workplaceStore,
+            repositoryStore: repositoryStore,
+            refreshCalculator: { snapshot, rootPath in
+                let count = await callCounter.increment()
+                if count <= 3 {
+                    await gate.wait()
+                }
+                return DiskRefreshComputationResult(
+                    workplaceResult: WorkplaceStore.diskRefreshResult(
+                        workplaces: snapshot.workplace.workplaces,
+                        syncStates: snapshot.workplace.syncStates,
+                        rootPath: rootPath
+                    ),
+                    repositoryResult: RepositoryStore.deduplicationResult(for: snapshot.repositories)
+                )
+            }
+        )
+
+        let refreshTask = Task {
+            await service.refresh(rootPath: workspaceRoot.path)
+        }
+
+        try await Task.sleep(for: .milliseconds(50))
+
+        var state = try XCTUnwrap(
+            workplaceStore.syncStates.first { $0.workplaceID == workplace.id }
+        )
+        state.status = .success
+        state.lastSyncedAt = .now
+        try workplaceStore.updateSyncState(state)
+        await gate.releaseAndReset()
+
+        try await Task.sleep(for: .milliseconds(200))
+
+        state.lastError = "changed again"
+        try workplaceStore.updateSyncState(state)
+        await gate.releaseAndReset()
+
+        try await Task.sleep(for: .milliseconds(200))
+
+        state.lastError = "changed third time"
+        try workplaceStore.updateSyncState(state)
+        await gate.releaseAndReset()
+
+        await refreshTask.value
+
+        let totalCalls = await callCounter.count
+        XCTAssertGreaterThanOrEqual(totalCalls, 2)
+        XCTAssertLessThanOrEqual(totalCalls, 4)
+    }
+}
+
+private actor CallCounter {
+    private(set) var count = 0
+
+    @discardableResult
+    func increment() -> Int {
+        count += 1
+        return count
+    }
 }
 
 private actor RefreshGate {
@@ -230,5 +319,31 @@ private actor RefreshGate {
         for waiter in waiters {
             waiter.resume()
         }
+    }
+}
+
+private actor ResettableRefreshGate {
+    private var released = false
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard released == false else { return }
+        await withCheckedContinuation { continuation in
+            if released {
+                continuation.resume()
+            } else {
+                continuations.append(continuation)
+            }
+        }
+    }
+
+    func releaseAndReset() {
+        released = true
+        let waiters = continuations
+        continuations.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+        released = false
     }
 }

@@ -5,11 +5,7 @@ private enum WorkplaceDetailRefreshInterval {
     static let activeGitStatus: TimeInterval = 15
 }
 
-struct WorkplaceDetailView: View {
-    @Environment(\.scenePhase) private var scenePhase
-    let workplace: Workplace
-    let repositories: [RepositoryConfig]
-    let syncStates: [RepositorySyncState]
+struct WorkplaceDetailActions {
     let onEdit: () -> Void
     let onDelete: () -> Void
     let onRetry: (RepositoryConfig) -> Void
@@ -27,6 +23,14 @@ struct WorkplaceDetailView: View {
     let onSwitchAllRepositoriesToDefaultBranch: () -> Void
     let onSwitchAllRepositoriesToWorkBranch: () -> Void
     let onCancelAction: () -> Void
+}
+
+struct WorkplaceDetailView: View {
+    @Environment(\.scenePhase) private var scenePhase
+    let workplace: Workplace
+    let repositories: [RepositoryConfig]
+    let syncStates: [RepositorySyncState]
+    let actions: WorkplaceDetailActions
     let isPerformingAction: Bool
     let branchRefreshSeed: Int
     let gitService: GitServicing
@@ -39,9 +43,10 @@ struct WorkplaceDetailView: View {
     @State private var manualRefreshSeed = 0
     @State private var branchRefreshTask: Task<Void, Never>?
     @State private var hasQueuedBranchRefresh = false
+    @State private var lastInteractionTime: Date = .now
 
     private var workplaceSyncStates: [RepositorySyncState] {
-        syncStates.filter { $0.workplaceID == workplace.id }
+        syncStates
     }
 
     private var repositoryByID: [UUID: RepositoryConfig] {
@@ -119,23 +124,25 @@ struct WorkplaceDetailView: View {
         repositories: [RepositoryConfig],
         syncStates: [RepositorySyncState],
         gitService: GitServicing = GitService(),
-        onEdit: @escaping () -> Void = {},
-        onDelete: @escaping () -> Void = {},
-        onRetry: @escaping (RepositoryConfig) -> Void = { _ in },
-        onPullAll: @escaping () -> Void = {},
-        onPush: @escaping () -> Void = {},
-        onPull: @escaping (RepositoryConfig) -> Void = { _ in },
-        onPushRepository: @escaping (RepositorySyncState, String) -> Void = { _, _ in },
-        onSwitchBranch: @escaping (RepositorySyncState, String, String) -> Void = { _, _, _ in },
-        onSwitchRepositoryToDefaultBranch: @escaping (RepositorySyncState, String) -> Void = { _, _ in },
-        onSwitchRepositoryToWorkBranch: @escaping (RepositorySyncState, String) -> Void = { _, _ in },
-        onMergeRepositoryDefaultBranchIntoCurrent: @escaping (RepositorySyncState, String) -> Void = { _, _ in },
-        onCreateMergeRequest: @escaping (RepositorySyncState, RepositoryConfig, String?) -> Void = { _, _, _ in },
-        onDeleteRepository: @escaping (RepositorySyncState, String) -> Void = { _, _ in },
-        onMergeDefaultBranchIntoCurrent: @escaping () -> Void = {},
-        onSwitchAllRepositoriesToDefaultBranch: @escaping () -> Void = {},
-        onSwitchAllRepositoriesToWorkBranch: @escaping () -> Void = {},
-        onCancelAction: @escaping () -> Void = {},
+        actions: WorkplaceDetailActions = WorkplaceDetailActions(
+            onEdit: {},
+            onDelete: {},
+            onRetry: { _ in },
+            onPullAll: {},
+            onPush: {},
+            onPull: { _ in },
+            onPushRepository: { _, _ in },
+            onSwitchBranch: { _, _, _ in },
+            onSwitchRepositoryToDefaultBranch: { _, _ in },
+            onSwitchRepositoryToWorkBranch: { _, _ in },
+            onMergeRepositoryDefaultBranchIntoCurrent: { _, _ in },
+            onCreateMergeRequest: { _, _, _ in },
+            onDeleteRepository: { _, _ in },
+            onMergeDefaultBranchIntoCurrent: {},
+            onSwitchAllRepositoriesToDefaultBranch: {},
+            onSwitchAllRepositoriesToWorkBranch: {},
+            onCancelAction: {}
+        ),
         isPerformingAction: Bool = false,
         branchRefreshSeed: Int = 0,
         feedback: Binding<CCSpaceFeedback?> = .constant(nil),
@@ -146,23 +153,7 @@ struct WorkplaceDetailView: View {
         self.repositories = repositories
         self.syncStates = syncStates
         self.gitService = gitService
-        self.onEdit = onEdit
-        self.onDelete = onDelete
-        self.onRetry = onRetry
-        self.onPullAll = onPullAll
-        self.onPush = onPush
-        self.onPull = onPull
-        self.onPushRepository = onPushRepository
-        self.onSwitchBranch = onSwitchBranch
-        self.onSwitchRepositoryToDefaultBranch = onSwitchRepositoryToDefaultBranch
-        self.onSwitchRepositoryToWorkBranch = onSwitchRepositoryToWorkBranch
-        self.onMergeRepositoryDefaultBranchIntoCurrent = onMergeRepositoryDefaultBranchIntoCurrent
-        self.onCreateMergeRequest = onCreateMergeRequest
-        self.onDeleteRepository = onDeleteRepository
-        self.onMergeDefaultBranchIntoCurrent = onMergeDefaultBranchIntoCurrent
-        self.onSwitchAllRepositoriesToDefaultBranch = onSwitchAllRepositoriesToDefaultBranch
-        self.onSwitchAllRepositoriesToWorkBranch = onSwitchAllRepositoriesToWorkBranch
-        self.onCancelAction = onCancelAction
+        self.actions = actions
         self.isPerformingAction = isPerformingAction
         self.branchRefreshSeed = branchRefreshSeed
         self._feedback = feedback
@@ -200,7 +191,7 @@ struct WorkplaceDetailView: View {
             isPresented: $showingDeleteConfirmation
         ) {
             Button(deleteConfirmationState.confirmLabel, role: .destructive) {
-                onDelete()
+                actions.onDelete()
             }
             Button("取消", role: .cancel) {}
         } message: {
@@ -215,6 +206,7 @@ struct WorkplaceDetailView: View {
         ) { _ in
             guard scenePhase == .active else { return }
             guard workplaceSyncStates.contains(where: \.hasLocalDirectory) else { return }
+            guard Date.now.timeIntervalSince(lastInteractionTime) < 60 else { return }
             periodicRefreshSeed += 1
         }
         .onChange(of: branchRefreshToken, initial: true) { _, _ in
@@ -230,7 +222,7 @@ struct WorkplaceDetailView: View {
     private var editToolbarItem: some ToolbarContent {
         ToolbarItem(placement: .primaryAction) {
             Button {
-                onEdit()
+                actions.onEdit()
             } label: {
                 Image(systemName: "square.and.pencil")
             }
@@ -249,7 +241,7 @@ struct WorkplaceDetailView: View {
                     ProgressView()
                         .controlSize(.small)
                     Button {
-                        onCancelAction()
+                        actions.onCancelAction()
                     } label: {
                         Image(systemName: "xmark.circle")
                     }
@@ -266,7 +258,7 @@ struct WorkplaceDetailView: View {
     private var pushToolbarItem: some ToolbarContent {
         ToolbarItem(placement: .primaryAction) {
             Button {
-                onPush()
+                actions.onPush()
             } label: {
                 Image(systemName: "square.and.arrow.up")
             }
@@ -294,7 +286,7 @@ struct WorkplaceDetailView: View {
     private var pullToolbarItem: some ToolbarContent {
         ToolbarItem(placement: .primaryAction) {
             Button {
-                onPullAll()
+                actions.onPullAll()
             } label: {
                 Image(systemName: "square.and.arrow.down")
             }
@@ -308,7 +300,7 @@ struct WorkplaceDetailView: View {
     private var switchAllToDefaultBranchToolbarItem: some ToolbarContent {
         ToolbarItem(placement: .primaryAction) {
             Button {
-                onSwitchAllRepositoriesToDefaultBranch()
+                actions.onSwitchAllRepositoriesToDefaultBranch()
             } label: {
                 Label("切到默认分支", systemImage: "arrow.uturn.backward.circle")
             }
@@ -321,7 +313,7 @@ struct WorkplaceDetailView: View {
     private var switchAllToWorkBranchToolbarItem: some ToolbarContent {
         ToolbarItem(placement: .primaryAction) {
             Button {
-                onSwitchAllRepositoriesToWorkBranch()
+                actions.onSwitchAllRepositoriesToWorkBranch()
             } label: {
                 Label("切到工作分支", systemImage: "hammer.circle")
             }
@@ -426,7 +418,7 @@ struct WorkplaceDetailView: View {
                     tint: .accentColor
                 ) {
                     Button("编辑") {
-                        onEdit()
+                        actions.onEdit()
                     }
                     .ccspacePrimaryActionButton()
                 }
@@ -447,30 +439,30 @@ struct WorkplaceDetailView: View {
                             retryRepository: repository,
                             pullRepository: repository,
                             allowsDeleteRepository: workplace.selectedRepositoryIDs.count > 1,
-                            onRetry: onRetry,
+                            onRetry: actions.onRetry,
                             onRefreshStatus: {
                                 requestStatusRefresh(repositoryName: repositoryName)
                             },
-                            onPull: onPull,
+                            onPull: actions.onPull,
                             onPush: {
-                                onPushRepository(state, repositoryName)
+                                actions.onPushRepository(state, repositoryName)
                             },
                             onSwitchBranch: { branch in
-                                onSwitchBranch(state, repositoryName, branch)
+                                actions.onSwitchBranch(state, repositoryName, branch)
                             },
                             onSwitchToDefaultBranch: {
-                                onSwitchRepositoryToDefaultBranch(state, repositoryName)
+                                actions.onSwitchRepositoryToDefaultBranch(state, repositoryName)
                             },
                             onSwitchToWorkBranch: {
                                 guard let workBranch, workBranch.isEmpty == false else { return }
-                                onSwitchRepositoryToWorkBranch(state, repositoryName)
+                                actions.onSwitchRepositoryToWorkBranch(state, repositoryName)
                             },
                             showsWorkBranchAction: workBranch?.isEmpty == false,
                             onMergeDefaultBranchIntoCurrent: {
-                                onMergeRepositoryDefaultBranchIntoCurrent(state, repositoryName)
+                                actions.onMergeRepositoryDefaultBranchIntoCurrent(state, repositoryName)
                             },
                             onCreateMergeRequest: { repository, targetBranch in
-                                onCreateMergeRequest(state, repository, targetBranch)
+                                actions.onCreateMergeRequest(state, repository, targetBranch)
                             },
                             actionsDisabled: presentationState.isActionLocked,
                             openActions: openActions,
@@ -478,7 +470,7 @@ struct WorkplaceDetailView: View {
                             onOpenAction: handleOpenAction,
                             gitService: gitService,
                             onDelete: {
-                                onDeleteRepository(state, repositoryName)
+                                actions.onDeleteRepository(state, repositoryName)
                             }
                         )
                         .transition(.opacity.combined(with: .scale(scale: 0.95)))
@@ -512,5 +504,6 @@ struct WorkplaceDetailView: View {
             )
         }
         manualRefreshSeed += 1
+        lastInteractionTime = .now
     }
 }

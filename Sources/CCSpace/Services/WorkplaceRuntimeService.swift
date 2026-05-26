@@ -85,21 +85,18 @@ struct WorkplaceRuntimeService {
             }
         }
 
-        try? workplaceStore.updateSyncStates(results.map { $0.updatedState })
-
-        let successCount = results.filter { $0.isPushed }.count
-        let failedCount = results.filter { $0.isFailed }.count
-        let skippedCount = results.filter { $0.isSkipped }.count
-        let failedNames = results.compactMap { result -> String? in
-            guard result.isFailed else { return nil }
-            return URL(fileURLWithPath: result.updatedState.localPath).lastPathComponent
+        do {
+            try workplaceStore.updateSyncStates(results.map { $0.updatedState })
+        } catch {
+            workplaceRuntimeLog.error("批量操作后持久化同步状态失败: \(error.localizedDescription)")
         }
 
+        let summary = results.summarize()
         return RepositoryPushResult(
-            successCount: successCount,
-            failedCount: failedCount,
-            skippedCount: skippedCount,
-            failedNames: failedNames
+            successCount: summary.successCount,
+            failedCount: summary.failedCount,
+            skippedCount: summary.skippedCount,
+            failedNames: summary.failedNames
         )
     }
 
@@ -274,21 +271,18 @@ struct WorkplaceRuntimeService {
             }
         }
 
-        try? workplaceStore.updateSyncStates(results.map { $0.updatedState })
-
-        let successCount = results.filter { $0.isMerged }.count
-        let failedCount = results.filter { $0.isFailed }.count
-        let skippedCount = results.filter { $0.isSkipped }.count
-        let failedNames = results.compactMap { result -> String? in
-            guard result.isFailed else { return nil }
-            return URL(fileURLWithPath: result.updatedState.localPath).lastPathComponent
+        do {
+            try workplaceStore.updateSyncStates(results.map { $0.updatedState })
+        } catch {
+            workplaceRuntimeLog.error("批量操作后持久化同步状态失败: \(error.localizedDescription)")
         }
 
+        let summary = results.summarize()
         return WorkplaceBulkBranchSwitchResult(
-            successCount: successCount,
-            failedCount: failedCount,
-            skippedCount: skippedCount,
-            failedNames: failedNames
+            successCount: summary.successCount,
+            failedCount: summary.failedCount,
+            skippedCount: summary.skippedCount,
+            failedNames: summary.failedNames
         )
     }
 
@@ -478,21 +472,18 @@ struct WorkplaceRuntimeService {
             }
         }
 
-        try? workplaceStore.updateSyncStates(results.map { $0.updatedState })
-
-        let successCount = results.filter { $0.isSuccess }.count
-        let failedCount = results.filter { $0.isFailed }.count
-        let skippedCount = results.filter { $0.isSkipped }.count
-        let failedNames = results.compactMap { result -> String? in
-            guard result.isFailed else { return nil }
-            return URL(fileURLWithPath: result.updatedState.localPath).lastPathComponent
+        do {
+            try workplaceStore.updateSyncStates(results.map { $0.updatedState })
+        } catch {
+            workplaceRuntimeLog.error("批量操作后持久化同步状态失败: \(error.localizedDescription)")
         }
 
+        let summary = results.summarize()
         return WorkplaceBulkBranchSwitchResult(
-            successCount: successCount,
-            failedCount: failedCount,
-            skippedCount: skippedCount,
-            failedNames: failedNames
+            successCount: summary.successCount,
+            failedCount: summary.failedCount,
+            skippedCount: summary.skippedCount,
+            failedNames: summary.failedNames
         )
     }
 
@@ -500,34 +491,11 @@ struct WorkplaceRuntimeService {
         _ states: [RepositorySyncState],
         operation: @escaping @Sendable (RepositorySyncState) async -> Result
     ) async -> [Result] {
-        guard states.isEmpty == false else { return [] }
-
-        return await withTaskGroup(of: (Int, Result).self, returning: [Result].self) { group in
-            let initialTaskCount = min(Self.maxConcurrentBatchTasks, states.count)
-            var nextStateIndex = 0
-            var results = Array<Result?>(repeating: nil, count: states.count)
-
-            func addTask(for index: Int) {
-                let state = states[index]
-                group.addTask {
-                    (index, await operation(state))
-                }
-            }
-
-            for _ in 0..<initialTaskCount {
-                addTask(for: nextStateIndex)
-                nextStateIndex += 1
-            }
-
-            while let (index, result) = await group.next() {
-                results[index] = result
-                guard nextStateIndex < states.count else { continue }
-                addTask(for: nextStateIndex)
-                nextStateIndex += 1
-            }
-
-            return results.compactMap { $0 }
-        }
+        await ConcurrencyUtilities.runLimitedTasks(
+            states,
+            maxConcurrentTasks: Self.maxConcurrentBatchTasks,
+            operation: operation
+        )
     }
 
     nonisolated private static func succeededState(

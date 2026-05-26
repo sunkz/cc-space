@@ -10,7 +10,8 @@ final class WorkplaceRepositoryRowPresentationStateTests: XCTestCase {
             status: .failed,
             localPath: localPath,
             lastError: "clone failed",
-            lastSyncedAt: nil
+            lastSyncedAt: nil,
+            hasLocalDirectory: true
         )
 
         let presentationState = WorkplaceRepositoryRowPresentationState(
@@ -40,7 +41,8 @@ final class WorkplaceRepositoryRowPresentationStateTests: XCTestCase {
             status: .success,
             localPath: localPath,
             lastError: nil,
-            lastSyncedAt: nil
+            lastSyncedAt: nil,
+            hasLocalDirectory: true
         )
 
         let presentationState = WorkplaceRepositoryRowPresentationState(
@@ -70,7 +72,8 @@ final class WorkplaceRepositoryRowPresentationStateTests: XCTestCase {
             status: .failed,
             localPath: localPath,
             lastError: "clone failed",
-            lastSyncedAt: nil
+            lastSyncedAt: nil,
+            hasLocalDirectory: true
         )
 
         let presentationState = WorkplaceRepositoryRowPresentationState(
@@ -127,7 +130,8 @@ final class WorkplaceRepositoryRowPresentationStateTests: XCTestCase {
             status: .success,
             localPath: localPath,
             lastError: "git 执行失败",
-            lastSyncedAt: nil
+            lastSyncedAt: nil,
+            hasLocalDirectory: true
         )
 
         let presentationState = WorkplaceRepositoryRowPresentationState(
@@ -151,7 +155,8 @@ final class WorkplaceRepositoryRowPresentationStateTests: XCTestCase {
             status: .success,
             localPath: localPath,
             lastError: nil,
-            lastSyncedAt: nil
+            lastSyncedAt: nil,
+            hasLocalDirectory: true
         )
 
         let presentationState = WorkplaceRepositoryRowPresentationState(

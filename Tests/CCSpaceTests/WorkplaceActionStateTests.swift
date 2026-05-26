@@ -42,7 +42,8 @@ final class WorkplaceActionStateTests: XCTestCase {
                 status: .failed,
                 localPath: failedLocalPath,
                 lastError: "clone failed",
-                lastSyncedAt: nil
+                lastSyncedAt: nil,
+                hasLocalDirectory: true
             ),
             RepositorySyncState(
                 workplaceID: targetWorkplaceID,
@@ -50,7 +51,8 @@ final class WorkplaceActionStateTests: XCTestCase {
                 status: .success,
                 localPath: successLocalPath,
                 lastError: nil,
-                lastSyncedAt: nil
+                lastSyncedAt: nil,
+                hasLocalDirectory: true
             ),
             RepositorySyncState(
                 workplaceID: UUID(),
@@ -97,7 +99,8 @@ final class WorkplaceActionStateTests: XCTestCase {
                     status: .success,
                     localPath: localPath,
                     lastError: nil,
-                    lastSyncedAt: nil
+                    lastSyncedAt: nil,
+                    hasLocalDirectory: true
                 )
             ]
         )
@@ -126,7 +129,8 @@ final class WorkplaceActionStateTests: XCTestCase {
                     status: .failed,
                     localPath: localPath,
                     lastError: "old pull error",
-                    lastSyncedAt: nil
+                    lastSyncedAt: nil,
+                    hasLocalDirectory: true
                 )
             ]
         )

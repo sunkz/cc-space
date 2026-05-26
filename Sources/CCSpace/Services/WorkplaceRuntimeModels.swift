@@ -1,5 +1,46 @@
 import Foundation
 
+protocol BatchOperationResult: Sendable {
+    var updatedState: RepositorySyncState { get }
+    var isSucceeded: Bool { get }
+    var isSkipped: Bool { get }
+    var isFailed: Bool { get }
+}
+
+struct BatchResultSummary: Equatable {
+    let successCount: Int
+    let failedCount: Int
+    let skippedCount: Int
+    let failedNames: [String]
+}
+
+extension Array where Element: BatchOperationResult {
+    func summarize() -> BatchResultSummary {
+        var successCount = 0
+        var failedCount = 0
+        var skippedCount = 0
+        var failedNames: [String] = []
+        for result in self {
+            if result.isSucceeded {
+                successCount += 1
+            } else if result.isFailed {
+                failedCount += 1
+                failedNames.append(
+                    URL(fileURLWithPath: result.updatedState.localPath).lastPathComponent
+                )
+            } else if result.isSkipped {
+                skippedCount += 1
+            }
+        }
+        return BatchResultSummary(
+            successCount: successCount,
+            failedCount: failedCount,
+            skippedCount: skippedCount,
+            failedNames: failedNames
+        )
+    }
+}
+
 enum WorkplaceRuntimeServiceError: LocalizedError {
     case missingLocalRepository
     case emptyBranch
@@ -147,7 +188,7 @@ enum BatchMergeOperationResult: Sendable {
     case failed(RepositorySyncState)
 }
 
-extension BatchPushOperationResult {
+extension BatchPushOperationResult: BatchOperationResult {
     var updatedState: RepositorySyncState {
         switch self {
         case .pushed(let state), .skipped(let state), .failed(let state):
@@ -155,10 +196,12 @@ extension BatchPushOperationResult {
         }
     }
 
-    var isPushed: Bool {
+    var isSucceeded: Bool {
         if case .pushed = self { return true }
         return false
     }
+
+    var isPushed: Bool { isSucceeded }
 
     var isSkipped: Bool {
         if case .skipped = self { return true }
@@ -171,7 +214,7 @@ extension BatchPushOperationResult {
     }
 }
 
-extension BatchBranchSwitchOperationResult {
+extension BatchBranchSwitchOperationResult: BatchOperationResult {
     var updatedState: RepositorySyncState {
         switch self {
         case .success(let state), .skipped(let state), .failed(let state):
@@ -179,10 +222,12 @@ extension BatchBranchSwitchOperationResult {
         }
     }
 
-    var isSuccess: Bool {
+    var isSucceeded: Bool {
         if case .success = self { return true }
         return false
     }
+
+    var isSuccess: Bool { isSucceeded }
 
     var isSkipped: Bool {
         if case .skipped = self { return true }
@@ -195,7 +240,7 @@ extension BatchBranchSwitchOperationResult {
     }
 }
 
-extension BatchMergeOperationResult {
+extension BatchMergeOperationResult: BatchOperationResult {
     var updatedState: RepositorySyncState {
         switch self {
         case .merged(let state), .skipped(let state), .failed(let state):
@@ -203,10 +248,12 @@ extension BatchMergeOperationResult {
         }
     }
 
-    var isMerged: Bool {
+    var isSucceeded: Bool {
         if case .merged = self { return true }
         return false
     }
+
+    var isMerged: Bool { isSucceeded }
 
     var isSkipped: Bool {
         if case .skipped = self { return true }

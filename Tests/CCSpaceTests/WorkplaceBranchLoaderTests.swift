@@ -101,7 +101,8 @@ final class WorkplaceBranchLoaderTests: XCTestCase {
                 status: .success,
                 localPath: directory.path,
                 lastError: nil,
-                lastSyncedAt: nil
+                lastSyncedAt: nil,
+                hasLocalDirectory: true
             )
         }
 
@@ -145,7 +146,8 @@ final class WorkplaceBranchLoaderTests: XCTestCase {
             status: .success,
             localPath: existingDirectory.path,
             lastError: nil,
-            lastSyncedAt: nil
+            lastSyncedAt: nil,
+            hasLocalDirectory: true
         )
         let missingState = RepositorySyncState(
             workplaceID: existingState.workplaceID,

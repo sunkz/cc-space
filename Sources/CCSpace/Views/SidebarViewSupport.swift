@@ -57,16 +57,12 @@ struct SidebarWorkplaceRowPresentationState {
     let accessorySpacing: CGFloat
     let statusIndicatorColor: Color?
 
-    init(workplace: Workplace, syncStates: [RepositorySyncState]) {
+    init(workplace: Workplace, hasFailed: Bool) {
         showsPinnedIndicator = workplace.isPinned && !workplace.isArchived
         repositoryCountText = "\(workplace.selectedRepositoryIDs.count)"
         pinIndicatorColumnWidth = Self.pinIndicatorColumnWidth
         repositoryCountColumnWidth = Self.repositoryCountColumnWidth
         accessorySpacing = Self.accessorySpacing
-
-        let hasFailed = syncStates.contains {
-            $0.workplaceID == workplace.id && $0.status == .failed
-        }
         statusIndicatorColor = hasFailed ? .red : nil
     }
 }

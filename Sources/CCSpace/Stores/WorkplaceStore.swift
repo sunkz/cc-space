@@ -48,9 +48,12 @@ final class WorkplaceStore: ObservableObject {
     @Published private(set) var workplaces: [Workplace]
     @Published private(set) var syncStates: [RepositorySyncState]
     private let fileStore: JSONFileStore
+    private var debouncedSyncStatesWriteTask: Task<Void, Never>?
+    private let syncStatesDebounceInterval: Duration
 
-    init(fileStore: JSONFileStore) {
+    init(fileStore: JSONFileStore, syncStatesDebounceInterval: Duration = .milliseconds(500)) {
         self.fileStore = fileStore
+        self.syncStatesDebounceInterval = syncStatesDebounceInterval
         do {
             self.workplaces = try fileStore.loadIfPresent([Workplace].self, from: "workplaces.json", default: [])
         } catch {
@@ -111,14 +114,42 @@ final class WorkplaceStore: ObservableObject {
     }
 
     private func persistSyncStates(_ newSyncStates: [RepositorySyncState]) throws {
+        syncStates = newSyncStates
+        scheduleDebouncedSyncStatesPersist()
+    }
+
+    private func persistSyncStatesImmediately(_ newSyncStates: [RepositorySyncState]) throws {
         try fileStore.save(newSyncStates, as: "sync-states.json")
         syncStates = newSyncStates
+        debouncedSyncStatesWriteTask?.cancel()
+        debouncedSyncStatesWriteTask = nil
+    }
+
+    private func scheduleDebouncedSyncStatesPersist() {
+        debouncedSyncStatesWriteTask?.cancel()
+        debouncedSyncStatesWriteTask = Task { [weak self] in
+            try? await Task.sleep(for: self?.syncStatesDebounceInterval ?? .milliseconds(500))
+            guard !Task.isCancelled else { return }
+            self?.flushSyncStates()
+        }
+    }
+
+    func flushSyncStates() {
+        debouncedSyncStatesWriteTask?.cancel()
+        debouncedSyncStatesWriteTask = nil
+        do {
+            try fileStore.save(syncStates, as: "sync-states.json")
+        } catch {
+            workplaceStoreLog.error("event=flush_sync_states_failed reason=\(error.localizedDescription)")
+        }
     }
 
     private func persist(
         workplaces newWorkplaces: [Workplace],
         syncStates newSyncStates: [RepositorySyncState]
     ) throws {
+        debouncedSyncStatesWriteTask?.cancel()
+        debouncedSyncStatesWriteTask = nil
         let documents = try [
             fileStore.document(for: newWorkplaces, as: "workplaces.json"),
             fileStore.document(for: newSyncStates, as: "sync-states.json"),
@@ -324,8 +355,7 @@ final class WorkplaceStore: ObservableObject {
         try persistWorkplaces(updatedWorkplaces)
     }
 
-    @discardableResult
-    func removeRepositoryAssociations(repositoryID: UUID) -> Bool {
+    func removeRepositoryAssociations(repositoryID: UUID) throws {
         var changed = false
         var updatedWorkplaces = workplaces
         var updatedSyncStates = syncStates
@@ -349,17 +379,11 @@ final class WorkplaceStore: ObservableObject {
             updatedSyncStates.removeAll { emptyWorkplaceIDs.contains($0.workplaceID) }
             changed = true
         }
-        guard changed else { return true }
-        do {
-            try persist(
-                workplaces: updatedWorkplaces,
-                syncStates: updatedSyncStates
-            )
-            return true
-        } catch {
-            workplaceStoreLog.error("event=remove_repository_associations_save_failed repository_id=\(repositoryID) reason=\(error.localizedDescription)")
-            return false
-        }
+        guard changed else { return }
+        try persist(
+            workplaces: updatedWorkplaces,
+            syncStates: updatedSyncStates
+        )
     }
 
     func deleteWorkplace(_ workplaceID: UUID) throws {
@@ -563,6 +587,7 @@ final class WorkplaceStore: ObservableObject {
         var updatedState = state
         updatedState.status = .failed
         updatedState.lastSyncedAt = nil
+        updatedState.hasLocalDirectory = false
 
         let trimmedError = updatedState.lastError?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if trimmedError.isEmpty {

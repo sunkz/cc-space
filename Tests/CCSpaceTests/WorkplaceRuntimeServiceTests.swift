@@ -317,6 +317,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         var apiState = try XCTUnwrap(syncState(for: apiRepository.id, workplaceID: workplace.id, in: workplaceStore))
         apiState.status = .success
+        apiState.hasLocalDirectory = true
         apiState.lastError = nil
         apiState.lastSyncedAt = Date(timeIntervalSince1970: 100)
         try workplaceStore.updateSyncState(apiState)
@@ -378,6 +379,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         var state = try XCTUnwrap(syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore))
         state.status = .failed
+        state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = "checkout failed"
         try workplaceStore.updateSyncState(state)
@@ -428,11 +430,13 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         let baselineDate = Date(timeIntervalSince1970: 123)
         var apiState = try XCTUnwrap(syncState(for: apiRepository.id, workplaceID: workplace.id, in: workplaceStore))
         apiState.status = .success
+        apiState.hasLocalDirectory = true
         apiState.lastSyncedAt = baselineDate
         try workplaceStore.updateSyncState(apiState)
 
         var webState = try XCTUnwrap(syncState(for: webRepository.id, workplaceID: workplace.id, in: workplaceStore))
         webState.status = .success
+        webState.hasLocalDirectory = true
         webState.lastSyncedAt = nil
         try workplaceStore.updateSyncState(webState)
 
@@ -495,12 +499,14 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         let baselineDate = Date(timeIntervalSince1970: 123)
         var apiState = try XCTUnwrap(syncState(for: apiRepository.id, workplaceID: workplace.id, in: workplaceStore))
         apiState.status = .success
+        apiState.hasLocalDirectory = true
         apiState.localPath = apiPath
         apiState.lastSyncedAt = baselineDate
         try workplaceStore.updateSyncState(apiState)
 
         var webState = try XCTUnwrap(syncState(for: webRepository.id, workplaceID: workplace.id, in: workplaceStore))
         webState.status = .failed
+        webState.hasLocalDirectory = true
         webState.localPath = webPath
         webState.lastError = "stale push error"
         webState.lastSyncedAt = baselineDate
@@ -560,6 +566,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         var state = try XCTUnwrap(syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore))
         state.status = .success
+        state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = nil
         try workplaceStore.updateSyncState(state)
@@ -608,6 +615,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         var state = try XCTUnwrap(syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore))
         state.status = .success
+        state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = "old error"
         try workplaceStore.updateSyncState(state)
@@ -663,6 +671,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
                 syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore)
             )
             state.status = .failed
+            state.hasLocalDirectory = true
             state.localPath = localPath
             state.lastError = "stale error"
             try workplaceStore.updateSyncState(state)
@@ -716,6 +725,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         var state = try XCTUnwrap(syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore))
         state.status = .failed
+        state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = "push failed"
         state.lastSyncedAt = Date(timeIntervalSince1970: 123)
@@ -766,6 +776,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         var state = try XCTUnwrap(syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore))
         state.status = .failed
+        state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = "old error"
         try workplaceStore.updateSyncState(state)
@@ -974,6 +985,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         var state = try XCTUnwrap(syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore))
         state.status = .failed
+        state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = "old error"
         try workplaceStore.updateSyncState(state)
@@ -1022,6 +1034,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         var state = try XCTUnwrap(syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore))
         state.status = .success
+        state.hasLocalDirectory = true
         state.localPath = localPath
         try workplaceStore.updateSyncState(state)
 
@@ -1067,6 +1080,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         var state = try XCTUnwrap(syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore))
         state.status = .success
+        state.hasLocalDirectory = true
         state.localPath = localPath
         try workplaceStore.updateSyncState(state)
 
@@ -1125,6 +1139,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         var state = try XCTUnwrap(syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore))
         state.status = .success
+        state.hasLocalDirectory = true
         state.localPath = localPath
         try workplaceStore.updateSyncState(state)
 
@@ -1179,6 +1194,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         var state = try XCTUnwrap(syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore))
         state.status = .failed
+        state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = "old error"
         try workplaceStore.updateSyncState(state)
@@ -1240,6 +1256,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
                 syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore)
             )
             state.status = .failed
+            state.hasLocalDirectory = true
             state.localPath = URL(fileURLWithPath: workplace.path).appendingPathComponent(repository.repoName).path
             state.lastError = "old error"
             try workplaceStore.updateSyncState(state)
@@ -1300,6 +1317,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
                 syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore)
             )
             state.status = .success
+            state.hasLocalDirectory = true
             state.localPath = localPaths[index]
             try workplaceStore.updateSyncState(state)
         }
@@ -1364,6 +1382,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         var state = try XCTUnwrap(syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore))
         state.status = .success
+        state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = "old error"
         try workplaceStore.updateSyncState(state)
@@ -1415,6 +1434,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         var state = try XCTUnwrap(syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore))
         state.status = .success
+        state.hasLocalDirectory = true
         state.localPath = localPath
         try workplaceStore.updateSyncState(state)
 
@@ -1458,6 +1478,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         var state = try XCTUnwrap(syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore))
         state.status = .success
+        state.hasLocalDirectory = true
         state.localPath = localPath
         try workplaceStore.updateSyncState(state)
 
@@ -1499,6 +1520,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         var state = try XCTUnwrap(syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore))
         state.status = .success
+        state.hasLocalDirectory = true
         state.localPath = localPath
         try workplaceStore.updateSyncState(state)
 
@@ -1552,6 +1574,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
                 syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore)
             )
             state.status = .failed
+            state.hasLocalDirectory = true
             state.localPath = localPaths[index]
             state.lastError = "old error"
             try workplaceStore.updateSyncState(state)
@@ -1607,6 +1630,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         var state = try XCTUnwrap(syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore))
         state.status = .failed
+        state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = "old error"
         try workplaceStore.updateSyncState(state)
@@ -1655,6 +1679,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         var state = try XCTUnwrap(syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore))
         state.status = .success
+        state.hasLocalDirectory = true
         state.localPath = localPath
         try workplaceStore.updateSyncState(state)
 
@@ -1713,6 +1738,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         var state = try XCTUnwrap(syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore))
         state.status = .success
+        state.hasLocalDirectory = true
         state.localPath = localPath
         try workplaceStore.updateSyncState(state)
 
@@ -1770,6 +1796,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
                 syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore)
             )
             state.status = .success
+            state.hasLocalDirectory = true
             state.localPath = localPaths[index]
             try workplaceStore.updateSyncState(state)
         }
@@ -1850,6 +1877,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         var state = try XCTUnwrap(syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore))
         state.status = .failed
+        state.hasLocalDirectory = true
         state.localPath = corruptedPath
         try workplaceStore.updateSyncState(state)
 

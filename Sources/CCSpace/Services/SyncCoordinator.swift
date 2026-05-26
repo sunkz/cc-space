@@ -105,7 +105,8 @@ struct SyncCoordinator: Sendable {
                             status: .failed,
                             localPath: localPath,
                             lastError: error.localizedDescription,
-                            lastSyncedAt: nil
+                            lastSyncedAt: nil,
+                            hasLocalDirectory: false
                         )
                         await progressTracker.didFinish(repositoryName: repositoryName)
                         return state
@@ -126,7 +127,8 @@ struct SyncCoordinator: Sendable {
                         status: checkoutError != nil ? .failed : .success,
                         localPath: localPath,
                         lastError: checkoutError,
-                        lastSyncedAt: .now
+                        lastSyncedAt: .now,
+                        hasLocalDirectory: true
                     )
                     await progressTracker.didFinish(repositoryName: repositoryName)
                     return state
@@ -233,7 +235,7 @@ struct SyncCoordinator: Sendable {
     ) async -> PullPreparationResult {
         let candidates = syncStates.filter { state in
             state.localPath.isEmpty == false &&
-            FileManager.default.fileExists(atPath: state.localPath) &&
+            state.hasLocalDirectory &&
             state.status != .cloning &&
             state.status != .pulling &&
             state.status != .removing
@@ -297,34 +299,11 @@ struct SyncCoordinator: Sendable {
         maxConcurrentTasks: Int,
         operation: @escaping @Sendable (Input) async -> Output
     ) async -> [Output] {
-        guard inputs.isEmpty == false else { return [] }
-
-        return await withTaskGroup(of: (Int, Output).self, returning: [Output].self) { group in
-            let initialTaskCount = min(maxConcurrentTasks, inputs.count)
-            var nextInputIndex = 0
-            var results = Array<Output?>(repeating: nil, count: inputs.count)
-
-            func addTask(for index: Int) {
-                let input = inputs[index]
-                group.addTask {
-                    (index, await operation(input))
-                }
-            }
-
-            for _ in 0..<initialTaskCount {
-                addTask(for: nextInputIndex)
-                nextInputIndex += 1
-            }
-
-            while let (index, result) = await group.next() {
-                results[index] = result
-                guard nextInputIndex < inputs.count else { continue }
-                addTask(for: nextInputIndex)
-                nextInputIndex += 1
-            }
-
-            return results.compactMap { $0 }
-        }
+        await ConcurrencyUtilities.runLimitedTasks(
+            inputs,
+            maxConcurrentTasks: maxConcurrentTasks,
+            operation: operation
+        )
     }
 }
 

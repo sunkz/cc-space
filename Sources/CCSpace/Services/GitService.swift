@@ -1,5 +1,26 @@
 import Foundation
 
+enum GitServiceError: LocalizedError, Sendable {
+    case commandFailed(exitCode: Int32, stderr: String)
+    case operationFailed(message: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .commandFailed(_, let stderr):
+            return stderr.isEmpty ? "git 执行失败" : stderr
+        case .operationFailed(let message):
+            return message
+        }
+    }
+
+    var stderr: String {
+        switch self {
+        case .commandFailed(_, let stderr): return stderr
+        case .operationFailed(let message): return message
+        }
+    }
+}
+
 protocol GitServicing: Sendable {
     func clone(repositoryURL: String, into directory: String) async throws
     func pull(in directory: String) async throws
@@ -12,6 +33,7 @@ protocol GitServicing: Sendable {
     func currentBranch(in directory: String) async -> String?
     func branchStatus(in directory: String) async -> GitBranchStatusSnapshot?
     func branches(in directory: String) async -> [String]
+    func branchSnapshotInfo(in directory: String) async -> BranchSnapshotInfo?
     func remoteURL(in directory: String) async -> String?
     func checkoutBranch(_ branch: String, in directory: String) async throws
     func createLocalBranch(_ branch: String, in directory: String) async throws
@@ -19,6 +41,31 @@ protocol GitServicing: Sendable {
     func checkRemoteBranches(branch: String, repositories: [RepositoryConfig]) async -> [RepositoryConfig]
     func mergeDefaultBranchIntoCurrent(in directory: String) async throws -> GitMergeDefaultBranchOutcome
     func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry]
+}
+
+extension GitServicing {
+    func branchSnapshotInfo(in directory: String) async -> BranchSnapshotInfo? {
+        let status = await branchStatus(in: directory)
+        let currentBranch: String?
+        if let statusBranch = status?.currentBranch {
+            currentBranch = statusBranch
+        } else {
+            currentBranch = await self.currentBranch(in: directory)
+        }
+        guard currentBranch != nil || status != nil else { return nil }
+        let branchList = await branches(in: directory)
+        return BranchSnapshotInfo(
+            currentBranch: currentBranch,
+            branches: branchList,
+            status: status ?? GitBranchStatusSnapshot(
+                currentBranch: currentBranch,
+                hasRemoteTrackingBranch: false,
+                hasUncommittedChanges: false,
+                hasUnpushedCommits: false,
+                isBehindRemote: false
+            )
+        )
+    }
 }
 
 struct GitCommitEntry: Identifiable, Equatable {
@@ -37,6 +84,12 @@ struct GitCommitEntry: Identifiable, Equatable {
 enum GitMergeDefaultBranchOutcome: Equatable {
     case merged
     case skipped
+}
+
+struct BranchSnapshotInfo: Equatable, Sendable {
+    let currentBranch: String?
+    let branches: [String]
+    let status: GitBranchStatusSnapshot
 }
 
 struct GitBranchStatusSnapshot: Equatable {
@@ -198,6 +251,11 @@ enum GitWorktreeSafety {
 
 struct GitService: GitServicing {
     private static let maxConcurrentRemoteBranchChecks = 4
+    private static nonisolated(unsafe) let iso8601Formatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
 
     func clone(repositoryURL: String, into directory: String) async throws {
         try await runGit(arguments: ["clone", repositoryURL, directory], timeout: 300)
@@ -309,6 +367,44 @@ struct GitService: GitServicing {
         }
     }
 
+    func branchSnapshotInfo(in directory: String) async -> BranchSnapshotInfo? {
+        async let statusTask = runGitOutput(arguments: [
+            "-C", directory,
+            "status",
+            "--porcelain=2",
+            "--branch",
+        ])
+        async let branchesTask = runGitOutput(arguments: [
+            "-C", directory,
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/heads",
+        ])
+
+        guard let statusOutput = try? await statusTask else { return nil }
+        let status = GitBranchStatusSnapshot.parsePorcelainV2(statusOutput)
+
+        let branchList: [String]
+        if let branchesOutput = try? await branchesTask {
+            branchList = branchesOutput
+                .components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { $0.isEmpty == false && $0 != "HEAD" }
+        } else {
+            branchList = []
+        }
+
+        let sortedBranches = Array(Set(branchList)).sorted {
+            $0.localizedStandardCompare($1) == .orderedAscending
+        }
+
+        return BranchSnapshotInfo(
+            currentBranch: status.currentBranch,
+            branches: sortedBranches,
+            status: status
+        )
+    }
+
     func remoteURL(in directory: String) async -> String? {
         guard let output = try? await runGitOutput(arguments: ["-C", directory, "remote", "get-url", "origin"]) else {
             return nil
@@ -348,39 +444,15 @@ struct GitService: GitServicing {
     }
 
     func checkRemoteBranches(branch: String, repositories: [RepositoryConfig]) async -> [RepositoryConfig] {
-        await withTaskGroup(of: RepositoryConfig?.self) { group in
-            let initialTaskCount = min(Self.maxConcurrentRemoteBranchChecks, repositories.count)
-            var nextRepositoryIndex = 0
-
-            func addTask(for repository: RepositoryConfig) {
-                group.addTask {
-                    let exists = await remoteBranchExists(
-                        branch: branch,
-                        remoteURL: repository.gitURL
-                    )
-                    return exists ? repository : nil
-                }
-            }
-
-            for _ in 0..<initialTaskCount {
-                let repository = repositories[nextRepositoryIndex]
-                nextRepositoryIndex += 1
-                addTask(for: repository)
-            }
-
-            var result: [RepositoryConfig] = []
-            while let repo = await group.next() {
-                if let repo { result.append(repo) }
-                guard Task.isCancelled == false else {
-                    group.cancelAll()
-                    continue
-                }
-                guard nextRepositoryIndex < repositories.count else { continue }
-                let repository = repositories[nextRepositoryIndex]
-                nextRepositoryIndex += 1
-                addTask(for: repository)
-            }
-            return result
+        await ConcurrencyUtilities.runLimitedTasksWithCancellation(
+            repositories,
+            maxConcurrentTasks: Self.maxConcurrentRemoteBranchChecks
+        ) { repository in
+            let exists = await remoteBranchExists(
+                branch: branch,
+                remoteURL: repository.gitURL
+            )
+            return exists ? repository : nil
         }
     }
 
@@ -412,8 +484,7 @@ struct GitService: GitServicing {
             return []
         }
 
-        let dateFormatter = ISO8601DateFormatter()
-        dateFormatter.formatOptions = [.withInternetDateTime]
+        let dateFormatter = Self.iso8601Formatter
 
         return output
             .components(separatedBy: .newlines)
@@ -499,7 +570,8 @@ struct GitService: GitServicing {
     }
 
     private func isMissingRemoteBranchError(_ error: Error) -> Bool {
-        let message = error.localizedDescription.lowercased()
+        guard let gitError = error as? GitServiceError else { return false }
+        let message = gitError.stderr.lowercased()
         return message.contains("couldn't find remote ref") ||
             message.contains("could not find remote ref") ||
             message.contains("remote ref does not exist") ||
@@ -508,7 +580,8 @@ struct GitService: GitServicing {
     }
 
     private func isBranchNotFoundError(_ error: Error) -> Bool {
-        let message = error.localizedDescription.lowercased()
+        guard let gitError = error as? GitServiceError else { return false }
+        let message = gitError.stderr.lowercased()
         return message.contains("did not match any") ||
             message.contains("pathspec") ||
             message.contains("not a valid branch name") ||
@@ -521,11 +594,9 @@ struct GitService: GitServicing {
         guard result.terminationStatus == 0 else {
             let stderrMessage = String(data: result.stderrData, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let message = stderrMessage.isEmpty ? "git 执行失败" : stderrMessage
-            throw NSError(
-                domain: "GitService",
-                code: Int(result.terminationStatus),
-                userInfo: [NSLocalizedDescriptionKey: message]
+            throw GitServiceError.commandFailed(
+                exitCode: result.terminationStatus,
+                stderr: stderrMessage
             )
         }
         return String(data: result.stdoutData, encoding: .utf8) ?? ""
@@ -536,11 +607,9 @@ struct GitService: GitServicing {
         guard result.terminationStatus == 0 else {
             let stderrMessage = String(data: result.stderrData, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let message = stderrMessage.isEmpty ? "git 执行失败" : stderrMessage
-            throw NSError(
-                domain: "GitService",
-                code: Int(result.terminationStatus),
-                userInfo: [NSLocalizedDescriptionKey: message]
+            throw GitServiceError.commandFailed(
+                exitCode: result.terminationStatus,
+                stderr: stderrMessage
             )
         }
     }
@@ -571,11 +640,7 @@ struct GitService: GitServicing {
         return nil
     }
 
-    private func gitOperationError(_ message: String) -> NSError {
-        NSError(
-            domain: "GitService",
-            code: -1,
-            userInfo: [NSLocalizedDescriptionKey: message]
-        )
+    private func gitOperationError(_ message: String) -> GitServiceError {
+        .operationFailed(message: message)
     }
 }

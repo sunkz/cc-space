@@ -18,6 +18,10 @@ struct SidebarView: View {
         )
     }
 
+    private var failedWorkplaceIDs: Set<UUID> {
+        Set(syncStates.filter { $0.status == .failed }.map(\.workplaceID))
+    }
+
     var body: some View {
         List(selection: $appViewModel.sidebarSelection) {
             Section {
@@ -83,7 +87,7 @@ struct SidebarView: View {
     private func workplaceRow(_ workplace: Workplace) -> some View {
         let rowPresentationState = SidebarWorkplaceRowPresentationState(
             workplace: workplace,
-            syncStates: syncStates
+            hasFailed: failedWorkplaceIDs.contains(workplace.id)
         )
 
         HStack(spacing: 8) {

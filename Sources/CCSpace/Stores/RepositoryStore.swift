@@ -195,7 +195,11 @@ final class RepositoryStore: ObservableObject {
         try persistRepositories(updatedRepositories)
 
         if let workplaceStore {
-            workplaceStore.removeRepositoryAssociations(repositoryID: id)
+            do {
+                try workplaceStore.removeRepositoryAssociations(repositoryID: id)
+            } catch {
+                repositoryStoreLog.warning("仓库关联清理持久化失败: \(error.localizedDescription)")
+            }
         }
     }
 

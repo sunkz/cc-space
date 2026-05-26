@@ -13,7 +13,7 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
 
         let childLabels = Set(Mirror(reflecting: view).children.compactMap(\.label))
 
-        XCTAssertTrue(childLabels.contains("onPullAll"))
+        XCTAssertTrue(childLabels.contains("actions"))
     }
 
     @MainActor
@@ -50,7 +50,8 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
                     status: .success,
                     localPath: localPath,
                     lastError: nil,
-                    lastSyncedAt: nil
+                    lastSyncedAt: nil,
+                    hasLocalDirectory: true
                 )
             ]
         )
@@ -230,7 +231,8 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
                     status: .failed,
                     localPath: localPath,
                     lastError: "old error",
-                    lastSyncedAt: nil
+                    lastSyncedAt: nil,
+                    hasLocalDirectory: true
                 )
             ]
         )

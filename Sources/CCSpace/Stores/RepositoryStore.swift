@@ -217,16 +217,17 @@ final class RepositoryStore: ObservableObject {
     }
 
     nonisolated static func deduplicationResult(for repositories: [RepositoryConfig]) -> RepositoryDeduplicationResult {
-        var existingURLs = Set<String>()
+        var existingNormalizedURLs = Set<String>()
         var existingNames = Set<String>()
         var changed = false
 
         let deduplicatedRepositories = repositories.filter { repository in
-            if existingURLs.contains(repository.gitURL) || existingNames.contains(repository.repoName) {
+            let normalizedURL = normalizedGitURLForComparison(repository.gitURL)
+            if existingNormalizedURLs.contains(normalizedURL) || existingNames.contains(repository.repoName) {
                 changed = true
                 return false
             }
-            existingURLs.insert(repository.gitURL)
+            existingNormalizedURLs.insert(normalizedURL)
             existingNames.insert(repository.repoName)
             return true
         }
@@ -254,7 +255,7 @@ final class RepositoryStore: ObservableObject {
             throw RepositoryStoreError.notFound
         }
 
-        guard !repositories.contains(where: { $0.id != id && $0.gitURL == normalizedGitURL }) else {
+        guard !repositories.contains(where: { $0.id != id && Self.gitURLsMatch($0.gitURL, normalizedGitURL) }) else {
             throw RepositoryStoreError.duplicateURL
         }
 
@@ -339,7 +340,7 @@ final class RepositoryStore: ObservableObject {
             let gitURL = entry.gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
             let repoName = try validatedRepositoryName(from: gitURL)
 
-            if let existingIndex = updatedRepositories.firstIndex(where: { $0.gitURL == gitURL }) {
+            if let existingIndex = updatedRepositories.firstIndex(where: { Self.gitURLsMatch($0.gitURL, gitURL) }) {
                 var changed = false
                 if updatedRepositories[existingIndex].defaultBranch == nil, let entryDefault = entry.defaultBranch {
                     updatedRepositories[existingIndex].defaultBranch = entryDefault

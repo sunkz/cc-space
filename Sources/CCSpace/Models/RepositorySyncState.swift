@@ -49,6 +49,6 @@ struct RepositorySyncState: Codable, Equatable, Identifiable, Sendable {
         localPath = try container.decode(String.self, forKey: .localPath)
         lastError = try container.decodeIfPresent(String.self, forKey: .lastError)
         lastSyncedAt = try container.decodeIfPresent(Date.self, forKey: .lastSyncedAt)
-        hasLocalDirectory = FileManager.default.fileExists(atPath: localPath)
+        hasLocalDirectory = false
     }
 }

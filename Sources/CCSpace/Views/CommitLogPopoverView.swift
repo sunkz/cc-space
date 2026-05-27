@@ -102,6 +102,7 @@ struct CommitLogPopoverView: View {
 private struct CommitRowView: View {
     let commit: GitCommitEntry
     @State private var copied = false
+    @State private var resetTask: Task<Void, Never>?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -118,7 +119,10 @@ private struct CommitRowView: View {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(commit.hash, forType: .string)
                         copied = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        resetTask?.cancel()
+                        resetTask = Task {
+                            try? await Task.sleep(for: .seconds(1.5))
+                            guard !Task.isCancelled else { return }
                             copied = false
                         }
                     } label: {
@@ -151,6 +155,9 @@ private struct CommitRowView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .contentShape(Rectangle())
+        .onDisappear {
+            resetTask?.cancel()
+        }
     }
 }
 

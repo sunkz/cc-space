@@ -73,3 +73,35 @@ enum ConcurrencyUtilities {
         }
     }
 }
+
+actor RepositoryOperationLock {
+    static let shared = RepositoryOperationLock()
+
+    private var activePaths = Set<String>()
+    private var waiters: [(path: String, continuation: CheckedContinuation<Void, Never>)] = []
+
+    func acquire(path: String) async {
+        if activePaths.contains(path) {
+            await withCheckedContinuation { continuation in
+                waiters.append((path: path, continuation: continuation))
+            }
+        }
+        activePaths.insert(path)
+    }
+
+    func release(path: String) {
+        activePaths.remove(path)
+        if let index = waiters.firstIndex(where: { $0.path == path }) {
+            let waiter = waiters.remove(at: index)
+            activePaths.insert(path)
+            waiter.continuation.resume()
+        }
+    }
+
+    func withLock<T: Sendable>(path: String, operation: @Sendable () async throws -> T) async rethrows -> T {
+        await acquire(path: path)
+        let result = try await operation()
+        release(path: path)
+        return result
+    }
+}

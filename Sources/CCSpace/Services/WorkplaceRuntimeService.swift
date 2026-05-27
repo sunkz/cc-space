@@ -491,11 +491,16 @@ struct WorkplaceRuntimeService {
         _ states: [RepositorySyncState],
         operation: @escaping @Sendable (RepositorySyncState) async -> Result
     ) async -> [Result] {
-        await ConcurrencyUtilities.runLimitedTasks(
+        let repoLock = RepositoryOperationLock.shared
+        return await ConcurrencyUtilities.runLimitedTasks(
             states,
-            maxConcurrentTasks: Self.maxConcurrentBatchTasks,
-            operation: operation
-        )
+            maxConcurrentTasks: Self.maxConcurrentBatchTasks
+        ) { state in
+            await repoLock.acquire(path: state.localPath)
+            let result = await operation(state)
+            await repoLock.release(path: state.localPath)
+            return result
+        }
     }
 
     nonisolated private static func succeededState(

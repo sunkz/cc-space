@@ -113,7 +113,7 @@ final class WorkplaceStore: ObservableObject {
         workplaces = newWorkplaces
     }
 
-    private func persistSyncStates(_ newSyncStates: [RepositorySyncState]) throws {
+    private func persistSyncStates(_ newSyncStates: [RepositorySyncState]) {
         syncStates = newSyncStates
         scheduleDebouncedSyncStatesPersist()
     }
@@ -291,7 +291,7 @@ final class WorkplaceStore: ObservableObject {
     func replaceSyncStates(_ newStates: [RepositorySyncState], for workplaceID: UUID) throws {
         var updatedSyncStates = syncStates.filter { $0.workplaceID != workplaceID }
         updatedSyncStates.append(contentsOf: newStates)
-        try persistSyncStates(updatedSyncStates)
+        persistSyncStates(updatedSyncStates)
     }
 
     func applyWorkplaceEdit(_ workplace: Workplace, syncStates newStates: [RepositorySyncState]) throws {
@@ -312,7 +312,7 @@ final class WorkplaceStore: ObservableObject {
 
         var updatedSyncStates = syncStates
         updatedSyncStates[index] = state
-        try persistSyncStates(updatedSyncStates)
+        persistSyncStates(updatedSyncStates)
     }
 
     func updateSyncStates(_ states: [RepositorySyncState]) throws {
@@ -327,7 +327,7 @@ final class WorkplaceStore: ObservableObject {
             guard let index = indexLookup[key] else { continue }
             updatedSyncStates[index] = state
         }
-        try persistSyncStates(updatedSyncStates)
+        persistSyncStates(updatedSyncStates)
     }
 
     func setSyncStatus(_ status: SyncStatus, for workplaceID: UUID, repositoryIDs: Set<UUID>) throws {
@@ -343,7 +343,7 @@ final class WorkplaceStore: ObservableObject {
             }
         }
         guard changed else { return }
-        try persistSyncStates(updatedSyncStates)
+        persistSyncStates(updatedSyncStates)
     }
 
     func updateBranch(for workplaceID: UUID, branch: String?) throws {
@@ -494,12 +494,17 @@ final class WorkplaceStore: ObservableObject {
 
             // Keep missing repositories in the workplace so the UI can still surface retry actions.
             for stateIndex in refreshedSyncStates.indices where
-                refreshedSyncStates[stateIndex].workplaceID == workplace.id &&
-                !fm.fileExists(atPath: refreshedSyncStates[stateIndex].localPath)
+                refreshedSyncStates[stateIndex].workplaceID == workplace.id
             {
-                let normalizedState = normalizedMissingRepositoryState(refreshedSyncStates[stateIndex])
-                if normalizedState != refreshedSyncStates[stateIndex] {
-                    refreshedSyncStates[stateIndex] = normalizedState
+                let exists = fm.fileExists(atPath: refreshedSyncStates[stateIndex].localPath)
+                if !exists {
+                    let normalizedState = normalizedMissingRepositoryState(refreshedSyncStates[stateIndex])
+                    if normalizedState != refreshedSyncStates[stateIndex] {
+                        refreshedSyncStates[stateIndex] = normalizedState
+                        changed = true
+                    }
+                } else if !refreshedSyncStates[stateIndex].hasLocalDirectory {
+                    refreshedSyncStates[stateIndex].hasLocalDirectory = true
                     changed = true
                 }
             }
@@ -565,7 +570,7 @@ final class WorkplaceStore: ObservableObject {
                 workplaceStoreLog.fault("event=rename_rollback_failed from=\(newPath) to=\(oldPath) reason=\(rollbackError.localizedDescription)")
                 // Filesystem has new name but persist failed — best-effort persist to avoid data loss
                 try? persistWorkplaces(updatedWorkplaces)
-                try? persistSyncStates(updatedSyncStates)
+                persistSyncStates(updatedSyncStates)
             }
             throw error
         }

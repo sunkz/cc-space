@@ -251,11 +251,6 @@ enum GitWorktreeSafety {
 
 struct GitService: GitServicing {
     private static let maxConcurrentRemoteBranchChecks = 4
-    private static nonisolated(unsafe) let iso8601Formatter: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter
-    }()
 
     func clone(repositoryURL: String, into directory: String) async throws {
         try await runGit(arguments: ["clone", repositoryURL, directory], timeout: 300)
@@ -484,7 +479,8 @@ struct GitService: GitServicing {
             return []
         }
 
-        let dateFormatter = Self.iso8601Formatter
+        let dateFormatter = ISO8601DateFormatter()
+        dateFormatter.formatOptions = [.withInternetDateTime]
 
         return output
             .components(separatedBy: .newlines)

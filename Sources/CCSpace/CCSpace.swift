@@ -5,7 +5,7 @@ struct CCSpace: App {
     private let launchConfiguration = CCSpaceLaunchConfiguration()
 
     var body: some Scene {
-        WindowGroup {
+        Window("CCSpace", id: "main") {
             RootSplitView(launchConfiguration: launchConfiguration)
         }
         .defaultSize(

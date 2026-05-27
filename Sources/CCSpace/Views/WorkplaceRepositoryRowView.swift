@@ -419,7 +419,8 @@ struct WorkplaceRepositoryRowView: View {
             }
             Divider()
             Button {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                Task {
+                    try? await Task.sleep(for: .milliseconds(150))
                     loadCommitLog()
                     showingCommitLog = true
                 }
@@ -457,10 +458,10 @@ struct RepositoryBranchPill: View {
         HStack(spacing: 3) {
             Image(systemName: icon)
                 .font(.system(size: 7))
-                .foregroundColor(tint)
+                .foregroundStyle(tint)
             Text(title)
                 .font(.caption2)
-                .foregroundColor(tint)
+                .foregroundStyle(tint)
                 .lineLimit(1)
                 .truncationMode(.tail)
         }

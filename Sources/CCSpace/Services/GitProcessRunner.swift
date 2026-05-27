@@ -63,8 +63,12 @@ struct GitProcessRunner {
         let continuationClaim = ContinuationClaimBox()
         let commandDescription = Self.safeCommandDescription(arguments: arguments)
 
+        let continuationBox = SendableContinuationBox<GitProcessResult>()
+
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
+                continuationBox.store(continuation)
+
                 let stdoutBox = SendableDataBox()
                 let stderrBox = SendableDataBox()
                 let readGroup = DispatchGroup()
@@ -90,7 +94,7 @@ struct GitProcessRunner {
                     guard continuationClaim.claim() else { return }
                     processBox.process.terminate()
                     readGroup.notify(queue: .global()) {
-                        continuation.resume(
+                        continuationBox.resume(
                             throwing: GitProcessExecutionError.timedOut(
                                 command: commandDescription,
                                 timeout: timeout
@@ -103,7 +107,7 @@ struct GitProcessRunner {
                     timeoutWork.cancel()
                     guard continuationClaim.claim() else { return }
                     readGroup.notify(queue: .global()) {
-                        continuation.resume(
+                        continuationBox.resume(
                             returning: GitProcessResult(
                                 terminationStatus: completedProcess.terminationStatus,
                                 stdoutData: stdoutBox.data,
@@ -115,9 +119,17 @@ struct GitProcessRunner {
 
                 do {
                     var launchException: NSException?
+                    var swiftError: (any Error)?
                     let launched = ObjCExceptionCatchTryRun({
-                        try? process.run()
+                        do {
+                            try process.run()
+                        } catch {
+                            swiftError = error
+                        }
                     }, &launchException)
+                    if let swiftError {
+                        throw swiftError
+                    }
                     if !launched || !process.isRunning {
                         let message = launchException?.reason ?? "进程启动失败"
                         throw NSError(
@@ -132,7 +144,7 @@ struct GitProcessRunner {
                     guard continuationClaim.claim() else { return }
                     stdoutPipe?.fileHandleForReading.closeFile()
                     stderrPipe?.fileHandleForReading.closeFile()
-                    continuation.resume(throwing: error)
+                    continuationBox.resume(throwing: error)
                     return
                 }
 
@@ -144,6 +156,9 @@ struct GitProcessRunner {
             }
             stdoutPipe?.fileHandleForReading.closeFile()
             stderrPipe?.fileHandleForReading.closeFile()
+            if continuationClaim.claim() {
+                continuationBox.resume(throwing: CancellationError())
+            }
         }
     }
 
@@ -193,5 +208,32 @@ private final class ContinuationClaimBox: @unchecked Sendable {
         guard !claimed else { return false }
         claimed = true
         return true
+    }
+}
+
+private final class SendableContinuationBox<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<T, any Error>?
+
+    func store(_ continuation: CheckedContinuation<T, any Error>) {
+        lock.lock()
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    func resume(returning value: T) {
+        lock.lock()
+        let cont = continuation
+        continuation = nil
+        lock.unlock()
+        cont?.resume(returning: value)
+    }
+
+    func resume(throwing error: any Error) {
+        lock.lock()
+        let cont = continuation
+        continuation = nil
+        lock.unlock()
+        cont?.resume(throwing: error)
     }
 }

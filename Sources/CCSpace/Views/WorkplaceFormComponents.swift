@@ -62,11 +62,10 @@ struct WorkplaceFormFieldsSection: View {
             }
         }
         .ccspacePanel(background: .clear, cornerRadius: 12, padding: 12, borderOpacity: 0.03)
-        .onAppear {
+        .task {
             if autoFocusName {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    isNameFocused = true
-                }
+                try? await Task.sleep(for: .milliseconds(100))
+                isNameFocused = true
             }
         }
     }

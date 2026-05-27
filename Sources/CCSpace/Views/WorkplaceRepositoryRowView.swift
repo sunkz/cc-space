@@ -123,6 +123,39 @@ struct WorkplaceRepositoryRowView: View {
                         }
 
                         if presentationState.canOpenLocalActions {
+                            Button {
+                                onRefreshStatus()
+                            } label: {
+                                Image(systemName: "arrow.clockwise")
+                            }
+                            .ccspaceIconActionButton()
+                            .disabled(!presentationState.canRefreshStatus)
+                            .ccspaceQuickHelp("刷新仓库状态")
+                        }
+
+                        if let pullRepository, state.status == .success, state.hasLocalDirectory {
+                            Button {
+                                onPull(pullRepository)
+                            } label: {
+                                Image(systemName: "square.and.arrow.down")
+                            }
+                            .ccspaceIconActionButton()
+                            .disabled(!presentationState.canPullLatest)
+                            .ccspaceQuickHelp("Pull 最新代码")
+                        }
+
+                        if presentationState.canOpenLocalActions {
+                            Button {
+                                onPush()
+                            } label: {
+                                Image(systemName: "square.and.arrow.up")
+                            }
+                            .ccspaceIconActionButton()
+                            .disabled(!presentationState.canPushToRemote)
+                            .ccspaceQuickHelp("Push 到远端")
+                        }
+
+                        if presentationState.canOpenLocalActions {
                             if let repository {
                                 if repository.mrTargetBranches.count > 1 {
                                     Menu {

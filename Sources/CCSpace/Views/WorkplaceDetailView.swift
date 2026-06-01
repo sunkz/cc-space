@@ -164,12 +164,16 @@ struct WorkplaceDetailView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                feedbackBanner
-                    .animation(.snappy(duration: 0.25), value: feedback)
                 repositorySection
             }
             .frame(maxWidth: 980, alignment: .topLeading)
             .padding(12)
+        }
+        .overlay(alignment: .top) {
+            feedbackBanner
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.top, 6)
+                .animation(.snappy(duration: 0.25), value: feedback)
         }
         .ccspaceScreenBackground()
         .navigationTitle(workplace.name)

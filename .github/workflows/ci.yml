@@ -1,0 +1,36 @@
+name: CI
+
+# 日常提交与 PR 的质量门禁。
+# release.yml 只在打 tag 后触发——若只依赖它，650 个用例与 warnings-as-errors
+# 门禁要等 tag 已推到远端、Release 流程已启动之后才执行，发现问题为时已晚。
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select latest stable Xcode
+        # 排除 Xcode-beta.app:不排除的话 runner 镜像附带 beta 时 sort -V
+        # 会静默选中 beta 工具链,测试结果随镜像漂移。
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | grep -iv beta | sort -V | tail -1)/Contents/Developer"
+
+      - name: Validate scripts and lint
+        run: ./run.sh lint
+
+      - name: Run tests
+        # 与 release.yml 一致,统一走 run.sh:逻辑(build-tests + 动态找 xctest bundle +
+        # xcrun xctest)单一事实来源,此前三处复制已出现措辞漂移。
+        run: ./run.sh test

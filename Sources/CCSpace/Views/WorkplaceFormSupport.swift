@@ -1,0 +1,379 @@
+import Foundation
+
+enum BranchNameValidation {
+    static func validate(_ branch: String) -> String? {
+        let trimmed = branch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        if trimmed.contains(" ") {
+            return "分支名不能包含空格"
+        }
+        if trimmed.contains("~") {
+            return "分支名不能包含 ~"
+        }
+        if trimmed.contains("^") {
+            return "分支名不能包含 ^"
+        }
+        if trimmed.contains(":") {
+            return "分支名不能包含 :"
+        }
+        if trimmed.contains("?") {
+            return "分支名不能包含 ?"
+        }
+        if trimmed.contains("*") {
+            return "分支名不能包含 *"
+        }
+        if trimmed.contains("[") {
+            return "分支名不能包含 ["
+        }
+        if trimmed.contains("\\") {
+            return "分支名不能包含 \\"
+        }
+        if trimmed.contains("..") {
+            return "分支名不能包含连续的 .."
+        }
+        // git check-ref-format:不允许连续两个斜杠(空的分段)。
+        if trimmed.contains("//") {
+            return "分支名不能包含连续的 //"
+        }
+        // git check-ref-format:每个斜杠分段不能以 . 开头(如 `feature/.hidden`)。
+        if trimmed.split(separator: "/", omittingEmptySubsequences: false).contains(where: { $0.hasPrefix(".") }) {
+            return "分支名路径分段不能以 . 开头"
+        }
+        // git check-ref-format:不能含控制字符(空格已由上条检查覆盖,\t 等归入此类)。
+        if trimmed.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }) {
+            return "分支名不能包含空格或控制字符"
+        }
+        if trimmed.hasSuffix(".") {
+            return "分支名不能以 . 结尾"
+        }
+        if trimmed.hasSuffix("/") {
+            return "分支名不能以 / 结尾"
+        }
+        if trimmed.hasPrefix("/") {
+            return "分支名不能以 / 开头"
+        }
+        if trimmed.contains("@{") {
+            return "分支名不能包含 @{"
+        }
+        if trimmed.hasSuffix(".lock") {
+            return "分支名不能以 .lock 结尾"
+        }
+        return nil
+    }
+}
+
+enum WorkplaceFormTextNormalization {
+    static func normalizedText(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func normalizedOptionalText(_ text: String?) -> String? {
+        guard let text else { return nil }
+        let trimmedText = normalizedText(text)
+        return trimmedText.isEmpty ? nil : trimmedText
+    }
+}
+
+struct WorkplaceSelectableRepository: Identifiable, Equatable {
+    let id: UUID
+    let name: String
+    let url: String
+}
+
+enum WorkplaceSelectableRepositoryOrdering {
+    static func prioritizeSelected(
+        repositories: [WorkplaceSelectableRepository],
+        selectedIDs: Set<UUID>
+    ) -> [WorkplaceSelectableRepository] {
+        repositories.sorted { lhs, rhs in
+            let lhsSelected = selectedIDs.contains(lhs.id)
+            let rhsSelected = selectedIDs.contains(rhs.id)
+
+            if lhsSelected != rhsSelected {
+                return lhsSelected
+            }
+
+            let nameOrder = lhs.name.localizedStandardCompare(rhs.name)
+            if nameOrder != .orderedSame {
+                return nameOrder == .orderedAscending
+            }
+
+            let urlOrder = lhs.url.localizedStandardCompare(rhs.url)
+            if urlOrder != .orderedSame {
+                return urlOrder == .orderedAscending
+            }
+
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+    }
+}
+
+struct WorkplaceRepositorySelectionPresentationState {
+    let filteredRepositories: [WorkplaceSelectableRepository]
+    let emptyTitle: String
+    let emptySubtitle: String
+
+    init(
+        repositories: [WorkplaceSelectableRepository],
+        searchText: String,
+        emptySubtitle fallbackEmptySubtitle: String
+    ) {
+        let trimmedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if trimmedSearchText.isEmpty {
+            filteredRepositories = repositories
+            emptyTitle = "暂无可选仓库"
+            emptySubtitle = fallbackEmptySubtitle
+            return
+        }
+
+        filteredRepositories = repositories.filter { repository in
+            repository.name.localizedCaseInsensitiveContains(trimmedSearchText)
+                || repository.url.localizedCaseInsensitiveContains(trimmedSearchText)
+        }
+        emptyTitle = "未找到匹配仓库"
+        emptySubtitle = "试试仓库名称或地址中的关键词。"
+    }
+}
+
+struct WorkplaceFormProgressPresentationState: Equatable {
+    let title: String
+    let detail: String
+    let completedCount: Int
+    let totalCount: Int
+    let countLabel: String
+
+    var fractionCompleted: Double {
+        guard totalCount > 0 else { return 0 }
+        return Double(completedCount) / Double(totalCount)
+    }
+
+    init(progress: WorkplaceOperationProgress) {
+        completedCount = progress.completedCount
+        totalCount = progress.totalCount
+        countLabel = "\(progress.completedCount)/\(progress.totalCount)"
+
+        let repositorySummary = Self.repositorySummary(
+            from: progress.activeRepositoryNames
+        )
+
+        switch progress.step {
+        case .cloningRepositories:
+            title = "正在克隆仓库"
+            detail =
+                if let repositorySummary {
+                    "当前：\(repositorySummary)"
+                } else {
+                    "正在整理克隆结果"
+                }
+        case .removingRepositories:
+            title = "正在移除本地仓库"
+            detail =
+                if let repositorySummary {
+                    "当前：\(repositorySummary)"
+                } else {
+                    "正在整理移除结果"
+                }
+        case .switchingBranches(let branch):
+            title = "正在切换工作分支"
+            detail =
+                if let repositorySummary {
+                    "当前：\(repositorySummary) -> \(branch)"
+                } else {
+                    "目标分支：\(branch)"
+                }
+        }
+    }
+
+    private static func repositorySummary(from repositoryNames: [String]) -> String? {
+        guard repositoryNames.isEmpty == false else { return nil }
+        let visibleNames = repositoryNames.prefix(3)
+        let visibleSummary = visibleNames.joined(separator: "、")
+        guard repositoryNames.count > visibleNames.count else { return visibleSummary }
+        return "\(visibleSummary) 等 \(repositoryNames.count) 个仓库"
+    }
+}
+
+enum WorkplaceSelectableRepositoryFactory {
+    static func createOptions(
+        repositories: [RepositoryConfig]
+    ) -> [WorkplaceSelectableRepository] {
+        repositories
+            .map { repository in
+                WorkplaceSelectableRepository(
+                    id: repository.id,
+                    name: repository.repoName,
+                    url: repository.gitURL
+                )
+            }
+            .sorted { lhs, rhs in
+                lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            }
+    }
+
+    static func editOptions(
+        workplace: Workplace,
+        repositories: [RepositoryConfig],
+        syncStates: [RepositorySyncState]
+    ) -> [WorkplaceSelectableRepository] {
+        var options = createOptions(repositories: repositories)
+        var existingNames = Set(options.map(\.name))
+        let configIDs = Set(repositories.map(\.id))
+        let workplaceStates = syncStates.filter { $0.workplaceID == workplace.id }
+
+        for state in workplaceStates where !configIDs.contains(state.repositoryID) {
+            let folderName = URL(fileURLWithPath: state.localPath).lastPathComponent
+            guard !existingNames.contains(folderName) else { continue }
+            options.append(
+                WorkplaceSelectableRepository(
+                    id: state.repositoryID,
+                    name: folderName,
+                    url: state.localPath
+                )
+            )
+            existingNames.insert(folderName)
+        }
+
+        return options.sorted { lhs, rhs in
+            lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+        }
+    }
+}
+
+struct WorkplaceCreatePresentationState {
+    let canSubmit: Bool
+    let selectedRepositorySubtitle: String
+    let branchStrategyFeedback: CCSpaceFeedback?
+    let missingRootPathFeedback: CCSpaceFeedback?
+    let branchValidationError: String?
+
+    init(
+        name: String,
+        branch: String,
+        selectedRepositoryCount: Int,
+        rootPath: String,
+        isSubmitting: Bool
+    ) {
+        let trimmedName = WorkplaceFormTextNormalization.normalizedText(name)
+        let trimmedBranch = WorkplaceFormTextNormalization.normalizedText(branch)
+        let trimmedRootPath = WorkplaceFormTextNormalization.normalizedText(rootPath)
+        branchValidationError = BranchNameValidation.validate(branch)
+        canSubmit =
+            !isSubmitting &&
+            !trimmedName.isEmpty &&
+            selectedRepositoryCount > 0 &&
+            !trimmedRootPath.isEmpty &&
+            branchValidationError == nil
+        selectedRepositorySubtitle = selectedRepositoryCount == 0 ? "" : "\(selectedRepositoryCount) 个已选"
+        branchStrategyFeedback =
+            trimmedBranch.isEmpty
+            ? nil
+            : CCSpaceFeedback(
+                style: .info,
+                message: "将优先使用远端同名分支；若远端不存在，则基于默认分支创建本地分支。"
+            )
+        missingRootPathFeedback =
+            trimmedRootPath.isEmpty
+            ? CCSpaceFeedback(style: .warning, message: "请先设置工作区根目录。")
+            : nil
+    }
+}
+
+struct WorkplaceCreateSeedApplicationState: Equatable {
+    let name: String
+    let branch: String
+    let selectedRepositoryIDs: Set<UUID>
+    let repositorySearchText: String
+    let feedback: CCSpaceFeedback?
+
+    init(seed: WorkplaceCreateSeed) {
+        name = seed.name
+        branch = seed.branch
+        selectedRepositoryIDs = seed.selectedRepositoryIDs
+        repositorySearchText = ""
+        feedback = nil
+    }
+}
+
+struct WorkplaceEditPresentationState {
+    let canSubmit: Bool
+    let selectedRepositorySubtitle: String
+    let removalWarningFeedback: CCSpaceFeedback?
+    let changeSummaryFeedback: CCSpaceFeedback?
+    let branchChangeFeedback: CCSpaceFeedback?
+    let branchValidationError: String?
+
+    init(
+        originalName: String,
+        name: String,
+        originalBranch: String?,
+        branch: String,
+        originalSelectedRepositoryIDs: [UUID],
+        selectedRepositoryIDs: Set<UUID>,
+        isSaving: Bool
+    ) {
+        let trimmedName = WorkplaceFormTextNormalization.normalizedText(name)
+        let trimmedOriginalName = WorkplaceFormTextNormalization.normalizedText(originalName)
+        let normalizedBranch = WorkplaceFormTextNormalization.normalizedOptionalText(branch)
+        let normalizedOriginalBranch = WorkplaceFormTextNormalization.normalizedOptionalText(originalBranch)
+        let originalSelectedSet = Set(originalSelectedRepositoryIDs)
+        let addedCount = selectedRepositoryIDs.subtracting(originalSelectedSet).count
+        let removedCount = originalSelectedSet.subtracting(selectedRepositoryIDs).count
+        let nameChanged = trimmedName != trimmedOriginalName
+        let branchChanged = normalizedBranch != normalizedOriginalBranch
+        let hasChanges = nameChanged || addedCount > 0 || removedCount > 0 || branchChanged
+        branchValidationError = BranchNameValidation.validate(branch)
+
+        canSubmit =
+            !isSaving &&
+            !trimmedName.isEmpty &&
+            selectedRepositoryIDs.isEmpty == false &&
+            hasChanges &&
+            branchValidationError == nil
+        selectedRepositorySubtitle = selectedRepositoryIDs.isEmpty ? "" : "\(selectedRepositoryIDs.count) 个已选"
+        removalWarningFeedback =
+            removedCount > 0
+            ? CCSpaceFeedback(style: .warning, message: "取消勾选后，如本地目录已存在，将一并删除对应本地文件。")
+            : nil
+
+        var changeSegments: [String] = []
+        if nameChanged, trimmedName.isEmpty == false {
+            changeSegments.append("重命名为 \(trimmedName)")
+        }
+        if addedCount > 0 {
+            changeSegments.append("新增 \(addedCount) 个仓库")
+        }
+        if removedCount > 0 {
+            changeSegments.append("移除 \(removedCount) 个仓库")
+        }
+        if branchChanged {
+            if let normalizedBranch {
+                changeSegments.append("工作分支改为 \(normalizedBranch)")
+            } else {
+                changeSegments.append("清空工作分支")
+            }
+        }
+        changeSummaryFeedback =
+            changeSegments.isEmpty
+            ? nil
+            : CCSpaceFeedback(
+                style: .info,
+                message: "将" + changeSegments.joined(separator: "，")
+            )
+
+        if branchChanged, let normalizedBranch {
+            branchChangeFeedback = CCSpaceFeedback(
+                style: .info,
+                message: "保存后会切换已保留的本地仓库到 \(normalizedBranch)，已在目标分支上的仓库会自动跳过。"
+            )
+        } else if branchChanged, normalizedOriginalBranch != nil {
+            branchChangeFeedback = CCSpaceFeedback(
+                style: .warning,
+                message: "清空后将移除工作分支配置，不会自动切换现有仓库。"
+            )
+        } else {
+            branchChangeFeedback = nil
+        }
+    }
+}

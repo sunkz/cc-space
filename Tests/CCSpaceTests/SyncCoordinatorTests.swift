@@ -1,0 +1,923 @@
+import XCTest
+@testable import CCSpace
+
+private struct StubError: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+}
+
+enum GitStubBehavior {
+    case success
+    case fail
+    case suspend
+}
+
+private final class FileSystemServiceSpy: FileSystemServicing, @unchecked Sendable {
+    private(set) var createdPaths: [String] = []
+
+    func createDirectory(at path: String) throws {
+        createdPaths.append(path)
+    }
+
+    func removeItem(at path: String) throws {}
+}
+
+actor GitServiceRecorder {
+    private(set) var pulledDirectories: [String] = []
+
+    func recordPull(directory: String) {
+        pulledDirectories.append(directory)
+    }
+}
+
+actor CloneConcurrencyRecorder {
+    private(set) var activeCount = 0
+    private(set) var maxActiveCount = 0
+
+    func begin() {
+        activeCount += 1
+        maxActiveCount = max(maxActiveCount, activeCount)
+    }
+
+    func end() {
+        activeCount -= 1
+    }
+}
+
+actor PullConcurrencyRecorder {
+    private(set) var activeCount = 0
+    private(set) var maxActiveCount = 0
+
+    func begin() {
+        activeCount += 1
+        maxActiveCount = max(maxActiveCount, activeCount)
+    }
+
+    func end() {
+        activeCount -= 1
+    }
+}
+
+struct CloneConcurrencyGitServiceSpy: GitServicing {
+    let recorder = CloneConcurrencyRecorder()
+
+    func clone(repositoryURL: String, into directory: String) async throws {
+        await recorder.begin()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        await recorder.end()
+    }
+
+    func pull(in directory: String) async throws {}
+    func push(in directory: String) async throws {}
+    func stash(in directory: String) async throws {}
+    func stashPop(in directory: String) async throws {}
+    func isGitAvailable() async -> Bool { true }
+    func defaultBranch(for remoteURL: String) async -> String? { "main" }
+    func defaultBranch(in directory: String) async -> String? { "main" }
+    func currentBranch(in directory: String) async -> String? { "main" }
+    func branchStatus(in directory: String) async -> GitBranchStatusSnapshot? { nil }
+    func branches(in directory: String) async -> [String] { [] }
+    func remoteURL(in directory: String) async -> String? { nil }
+    func checkoutBranch(_ branch: String, in directory: String) async throws {}
+    func createLocalBranch(_ branch: String, in directory: String) async throws {}
+    func remoteBranchExists(branch: String, remoteURL: String) async -> Bool { false }
+    func mergeDefaultBranchIntoCurrent(in directory: String) async throws -> GitMergeDefaultBranchOutcome { .merged }
+    func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] { [] }
+    func remoteBranches(for remoteURL: String) async -> [String] { [] }
+}
+
+struct PullConcurrencyGitServiceSpy: GitServicing {
+    let recorder = PullConcurrencyRecorder()
+
+    private func simulateGitWork() async {
+        await recorder.begin()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        await recorder.end()
+    }
+
+    func clone(repositoryURL: String, into directory: String) async throws {}
+
+    func pull(in directory: String) async throws {
+        await simulateGitWork()
+    }
+
+    func push(in directory: String) async throws {}
+    func stash(in directory: String) async throws {}
+    func stashPop(in directory: String) async throws {}
+    func isGitAvailable() async -> Bool { true }
+    func defaultBranch(for remoteURL: String) async -> String? { "main" }
+    func defaultBranch(in directory: String) async -> String? {
+        await simulateGitWork()
+        return "main"
+    }
+    func currentBranch(in directory: String) async -> String? {
+        await simulateGitWork()
+        return "main"
+    }
+    func branchStatus(in directory: String) async -> GitBranchStatusSnapshot? {
+        GitBranchStatusSnapshot(
+            currentBranch: "main",
+            hasRemoteTrackingBranch: true,
+            hasUncommittedChanges: false
+        )
+    }
+    func branches(in directory: String) async -> [String] { [] }
+    func remoteURL(in directory: String) async -> String? { nil }
+    func checkoutBranch(_ branch: String, in directory: String) async throws {}
+    func createLocalBranch(_ branch: String, in directory: String) async throws {}
+    func remoteBranchExists(branch: String, remoteURL: String) async -> Bool { false }
+    func mergeDefaultBranchIntoCurrent(in directory: String) async throws -> GitMergeDefaultBranchOutcome { .merged }
+    func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] { [] }
+    func remoteBranches(for remoteURL: String) async -> [String] { [] }
+}
+
+struct GitServiceStub: GitServicing {
+    var behavior: GitStubBehavior = .success
+    var defaultBranchResult: String? = "main"
+    var currentBranchResult: String? = "main"
+    var remoteURLResult: String? = "git@github.com:test/repo.git"
+    var branchStatusResult: GitBranchStatusSnapshot? = GitBranchStatusSnapshot(
+        currentBranch: "main",
+        hasRemoteTrackingBranch: true,
+        hasUncommittedChanges: false
+    )
+    let recorder = GitServiceRecorder()
+
+    func clone(repositoryURL: String, into directory: String) async throws {
+        switch behavior {
+        case .success:
+            return
+        case .fail:
+            throw StubError(message: "clone failed for test")
+        case .suspend:
+            try await Task.sleep(nanoseconds: 5_000_000_000)
+        }
+    }
+
+
+    func pull(in directory: String) async throws {
+        await recorder.recordPull(directory: directory)
+        switch behavior {
+        case .success:
+            return
+        case .fail:
+            throw StubError(message: "pull failed for test")
+        case .suspend:
+            try await Task.sleep(nanoseconds: 5_000_000_000)
+        }
+    }
+
+    func push(in directory: String) async throws {
+        switch behavior {
+        case .success:
+            return
+        case .fail:
+            throw StubError(message: "push failed for test")
+        case .suspend:
+            try await Task.sleep(nanoseconds: 5_000_000_000)
+        }
+    }
+
+    func stash(in directory: String) async throws {}
+    func stashPop(in directory: String) async throws {}
+
+    func isGitAvailable() async -> Bool { true }
+    func defaultBranch(for remoteURL: String) async -> String? { defaultBranchResult }
+    func defaultBranch(in directory: String) async -> String? { defaultBranchResult }
+    func currentBranch(in directory: String) async -> String? { currentBranchResult }
+    func branchStatus(in directory: String) async -> GitBranchStatusSnapshot? {
+        branchStatusResult
+    }
+    func branches(in directory: String) async -> [String] { ["main"] }
+    func remoteURL(in directory: String) async -> String? { remoteURLResult }
+    func checkoutBranch(_ branch: String, in directory: String) async throws {
+        switch behavior {
+        case .success:
+            return
+        case .fail:
+            throw StubError(message: "checkout failed for test")
+        case .suspend:
+            try await Task.sleep(nanoseconds: 5_000_000_000)
+        }
+    }
+
+    func createLocalBranch(_ branch: String, in directory: String) async throws {
+        switch behavior {
+        case .success:
+            return
+        case .fail:
+            throw StubError(message: "create branch failed for test")
+        case .suspend:
+            try await Task.sleep(nanoseconds: 5_000_000_000)
+        }
+    }
+
+    func remoteBranchExists(branch: String, remoteURL: String) async -> Bool { false }
+
+
+    func mergeDefaultBranchIntoCurrent(in directory: String) async throws -> GitMergeDefaultBranchOutcome {
+        switch behavior {
+        case .success:
+            return .merged
+        case .fail:
+            throw StubError(message: "merge failed for test")
+        case .suspend:
+            try await Task.sleep(nanoseconds: 5_000_000_000)
+            return .merged
+        }
+    }
+
+    func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] { [] }
+    func remoteBranches(for remoteURL: String) async -> [String] { [] }
+}
+
+@MainActor
+final class SyncCoordinatorTests: XCTestCase {
+    func test_marksRepositorySuccessAfterClone() async throws {
+        let fileSystemSpy = FileSystemServiceSpy()
+        let coordinator = SyncCoordinator(gitService: GitServiceStub(), fileSystemService: fileSystemSpy)
+        let repository = RepositoryConfig(
+            id: UUID(),
+            gitURL: "git@github.com:org/api.git",
+            repoName: "api",
+            createdAt: .now,
+            updatedAt: .now
+        )
+        let workplace = Workplace(
+            id: UUID(),
+            name: "ios-dev",
+            path: "/tmp/ios-dev",
+            selectedRepositoryIDs: [repository.id],
+            createdAt: .now,
+            updatedAt: .now
+        )
+
+        let states = try await coordinator.cloneRepositories(
+            repositories: [repository],
+            workplace: workplace
+        )
+
+        XCTAssertEqual(fileSystemSpy.createdPaths, [workplace.path])
+        XCTAssertEqual(states.first?.status, .success)
+    }
+
+    func test_marksRepositoryFailedAndKeepsErrorMessageWhenCloneFails() async throws {
+        let coordinator = SyncCoordinator(
+            gitService: GitServiceStub(behavior: .fail),
+            fileSystemService: FileSystemServiceSpy()
+        )
+        let repository = RepositoryConfig(
+            id: UUID(),
+            gitURL: "git@github.com:org/api.git",
+            repoName: "api",
+            createdAt: .now,
+            updatedAt: .now
+        )
+        let workplace = Workplace(
+            id: UUID(),
+            name: "ios-dev",
+            path: "/tmp/ios-dev",
+            selectedRepositoryIDs: [repository.id],
+            createdAt: .now,
+            updatedAt: .now
+        )
+
+        let states = try await coordinator.cloneRepositories(
+            repositories: [repository],
+            workplace: workplace
+        )
+
+        XCTAssertEqual(states.first?.status, .failed)
+        XCTAssertNotNil(states.first?.lastError)
+        XCTAssertTrue(states.first?.lastError?.contains("clone failed for test") == true)
+    }
+
+    func test_cloneRepositoriesPropagatesCancellation() async {
+        let coordinator = SyncCoordinator(
+            gitService: GitServiceStub(behavior: .suspend),
+            fileSystemService: FileSystemServiceSpy()
+        )
+        let repository = RepositoryConfig(
+            id: UUID(),
+            gitURL: "git@github.com:org/api.git",
+            repoName: "api",
+            createdAt: .now,
+            updatedAt: .now
+        )
+        let workplace = Workplace(
+            id: UUID(),
+            name: "ios-dev",
+            path: "/tmp/ios-dev",
+            selectedRepositoryIDs: [repository.id],
+            createdAt: .now,
+            updatedAt: .now
+        )
+
+        let task = Task {
+            try await coordinator.cloneRepositories(
+                repositories: [repository],
+                workplace: workplace
+            )
+        }
+
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            XCTFail("Expected CancellationError")
+        } catch is CancellationError {
+            // 取消本身即为预期结果,无需占位断言。
+        } catch {
+            XCTFail("Expected CancellationError, got \(error)")
+        }
+    }
+
+    func test_cloneRepositoriesLimitsConcurrentCloneTasks() async throws {
+        let gitService = CloneConcurrencyGitServiceSpy()
+        let coordinator = SyncCoordinator(
+            gitService: gitService,
+            fileSystemService: FileSystemServiceSpy()
+        )
+        let repositories = (0..<(SyncCoordinator.maxConcurrentCloneTasks + 3)).map { index in
+            RepositoryConfig(
+                id: UUID(),
+                gitURL: "git@github.com:org/repo-\(index).git",
+                repoName: "repo-\(index)",
+                createdAt: .now,
+                updatedAt: .now
+            )
+        }
+        let workplace = Workplace(
+            id: UUID(),
+            name: "ios-dev",
+            path: tempWorkplaceRoot().appendingPathComponent("ios-dev").path,
+            selectedRepositoryIDs: repositories.map(\.id),
+            createdAt: .now,
+            updatedAt: .now
+        )
+
+        _ = try await coordinator.cloneRepositories(
+            repositories: repositories,
+            workplace: workplace
+        )
+
+        let maxActiveCount = await gitService.recorder.maxActiveCount
+        XCTAssertLessThanOrEqual(maxActiveCount, SyncCoordinator.maxConcurrentCloneTasks)
+    }
+
+    func test_pullRepositoriesLimitsConcurrentGitOperations() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fileStore = JSONFileStore(rootDirectory: root)
+        let store = WorkplaceStore(fileStore: fileStore)
+
+        let repositories = (0..<(SyncCoordinator.maxConcurrentPullTasks + 3)).map { index in
+            RepositoryConfig(
+                id: UUID(),
+                gitURL: "git@github.com:org/repo-\(index).git",
+                repoName: "repo-\(index)",
+                createdAt: .now,
+                updatedAt: .now
+            )
+        }
+        let workplace = try store.createWorkplace(
+            name: "pull-concurrency",
+            rootPath: workspaceRoot.path,
+            selectedRepositories: repositories
+        )
+
+        for repository in repositories {
+            let localPath = URL(fileURLWithPath: workplace.path).appendingPathComponent(repository.repoName).path
+            try FileManager.default.createDirectory(
+                atPath: localPath,
+                withIntermediateDirectories: true,
+                attributes: nil
+            )
+
+            var state = try XCTUnwrap(
+                store.syncStates.first {
+                    $0.workplaceID == workplace.id && $0.repositoryID == repository.id
+                }
+            )
+            state.status = .success
+            state.hasLocalDirectory = true
+            state.localPath = localPath
+            try store.updateSyncState(state)
+        }
+
+        let gitService = PullConcurrencyGitServiceSpy()
+        let coordinator = SyncCoordinator(
+            gitService: gitService,
+            fileSystemService: FileSystemServiceSpy()
+        )
+
+        let result = await coordinator.pullRepositories(
+            syncStates: store.syncStates.filter { $0.workplaceID == workplace.id },
+            workplaceStore: store
+        )
+
+        XCTAssertEqual(result.successCount, repositories.count)
+        XCTAssertEqual(result.failedCount, 0)
+        XCTAssertEqual(result.skippedCount, 0)
+        let maxActiveCount = await gitService.recorder.maxActiveCount
+        XCTAssertLessThanOrEqual(maxActiveCount, SyncCoordinator.maxConcurrentPullTasks)
+    }
+
+    func test_pullUpdatesStatusToSuccessAndSetsLastSyncedAt() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fileStore = JSONFileStore(rootDirectory: root)
+        let store = WorkplaceStore(fileStore: fileStore)
+        let repository = RepositoryConfig(
+            id: UUID(), gitURL: "git@github.com:org/api.git",
+            repoName: "api", createdAt: .now, updatedAt: .now
+        )
+        let workplace = try store.createWorkplace(
+            name: "pull-test",
+            rootPath: workspaceRoot.path,
+            selectedRepositories: [repository]
+        )
+
+        var clonedState = store.syncStates.first { $0.workplaceID == workplace.id }!
+        clonedState.status = .success
+        clonedState.hasLocalDirectory = true
+        clonedState.localPath = URL(fileURLWithPath: workplace.path).appendingPathComponent("api").path
+        try FileManager.default.createDirectory(
+            atPath: clonedState.localPath,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        try store.updateSyncState(clonedState)
+
+        let coordinator = SyncCoordinator(
+            gitService: GitServiceStub(behavior: .success),
+            fileSystemService: FileSystemServiceSpy()
+        )
+
+        let pullResult = await coordinator.pullRepositories(
+            syncStates: store.syncStates.filter { $0.workplaceID == workplace.id },
+            workplaceStore: store
+        )
+
+        let syncResult = store.syncStates.first { $0.workplaceID == workplace.id && $0.repositoryID == repository.id }
+        XCTAssertEqual(syncResult?.status, .success)
+        XCTAssertNotNil(syncResult?.lastSyncedAt)
+        XCTAssertEqual(pullResult.successCount, 1)
+        XCTAssertEqual(pullResult.failedCount, 0)
+        XCTAssertEqual(pullResult.skippedCount, 0)
+    }
+
+    func test_pullSetsFailedStatusWithErrorOnFailure() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fileStore = JSONFileStore(rootDirectory: root)
+        let store = WorkplaceStore(fileStore: fileStore)
+        let repository = RepositoryConfig(
+            id: UUID(), gitURL: "git@github.com:org/api.git",
+            repoName: "api", createdAt: .now, updatedAt: .now
+        )
+        let workplace = try store.createWorkplace(
+            name: "pull-fail",
+            rootPath: workspaceRoot.path,
+            selectedRepositories: [repository]
+        )
+
+        var clonedState = store.syncStates.first { $0.workplaceID == workplace.id }!
+        clonedState.status = .success
+        clonedState.hasLocalDirectory = true
+        clonedState.localPath = URL(fileURLWithPath: workplace.path).appendingPathComponent("api").path
+        try FileManager.default.createDirectory(
+            atPath: clonedState.localPath,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        try store.updateSyncState(clonedState)
+
+        let coordinator = SyncCoordinator(
+            gitService: GitServiceStub(behavior: .fail),
+            fileSystemService: FileSystemServiceSpy()
+        )
+
+        let pullResult = await coordinator.pullRepositories(
+            syncStates: store.syncStates.filter { $0.workplaceID == workplace.id },
+            workplaceStore: store
+        )
+
+        let syncResult = store.syncStates.first { $0.workplaceID == workplace.id && $0.repositoryID == repository.id }
+        XCTAssertEqual(syncResult?.status, .failed)
+        XCTAssertNotNil(syncResult?.lastError)
+        XCTAssertEqual(pullResult.successCount, 0)
+        XCTAssertEqual(pullResult.failedCount, 1)
+        XCTAssertEqual(pullResult.skippedCount, 0)
+        XCTAssertEqual(pullResult.failedNames, ["api"])
+    }
+
+    func test_pullMarksRepositoryFailedWhenBranchStatusCannotBeResolved() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fileStore = JSONFileStore(rootDirectory: root)
+        let store = WorkplaceStore(fileStore: fileStore)
+        let repository = RepositoryConfig(
+            id: UUID(), gitURL: "git@github.com:org/api.git",
+            repoName: "api", createdAt: .now, updatedAt: .now
+        )
+        let workplace = try store.createWorkplace(
+            name: "pull-branch-missing",
+            rootPath: workspaceRoot.path,
+            selectedRepositories: [repository]
+        )
+
+        var clonedState = store.syncStates.first { $0.workplaceID == workplace.id }!
+        clonedState.status = .success
+        clonedState.hasLocalDirectory = true
+        clonedState.localPath = URL(fileURLWithPath: workplace.path).appendingPathComponent("api").path
+        try FileManager.default.createDirectory(
+            atPath: clonedState.localPath,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        try store.updateSyncState(clonedState)
+
+        let gitService = GitServiceStub(
+            behavior: .success,
+            branchStatusResult: nil
+        )
+        let coordinator = SyncCoordinator(
+            gitService: gitService,
+            fileSystemService: FileSystemServiceSpy()
+        )
+
+        let pullResult = await coordinator.pullRepositories(
+            syncStates: store.syncStates.filter { $0.workplaceID == workplace.id },
+            workplaceStore: store
+        )
+
+        let syncResult = store.syncStates.first { $0.workplaceID == workplace.id && $0.repositoryID == repository.id }
+        let pulledDirectories = await gitService.recorder.pulledDirectories
+
+        XCTAssertEqual(syncResult?.status, .failed)
+        XCTAssertEqual(syncResult?.lastError, "无法读取仓库 Git 状态")
+        XCTAssertTrue(pulledDirectories.isEmpty)
+        XCTAssertEqual(pullResult.successCount, 0)
+        XCTAssertEqual(pullResult.failedCount, 1)
+        XCTAssertEqual(pullResult.skippedCount, 0)
+        XCTAssertEqual(pullResult.failedNames, ["api"])
+    }
+
+    func test_pullSkipsRepositoryWhenNoRemoteTrackingBranch() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fileStore = JSONFileStore(rootDirectory: root)
+        let store = WorkplaceStore(fileStore: fileStore)
+        let repository = RepositoryConfig(
+            id: UUID(), gitURL: "git@github.com:org/api.git",
+            repoName: "api", createdAt: .now, updatedAt: .now
+        )
+        let workplace = try store.createWorkplace(
+            name: "pull-no-tracking",
+            rootPath: workspaceRoot.path,
+            selectedRepositories: [repository]
+        )
+
+        var clonedState = store.syncStates.first { $0.workplaceID == workplace.id }!
+        clonedState.status = .success
+        clonedState.hasLocalDirectory = true
+        clonedState.localPath = URL(fileURLWithPath: workplace.path).appendingPathComponent("api").path
+        try FileManager.default.createDirectory(
+            atPath: clonedState.localPath,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        try store.updateSyncState(clonedState)
+
+        let gitService = GitServiceStub(
+            behavior: .success,
+            branchStatusResult: GitBranchStatusSnapshot(
+                currentBranch: "feature",
+                hasRemoteTrackingBranch: false,
+                hasUncommittedChanges: false
+            )
+        )
+        let coordinator = SyncCoordinator(
+            gitService: gitService,
+            fileSystemService: FileSystemServiceSpy()
+        )
+
+        let pullResult = await coordinator.pullRepositories(
+            syncStates: store.syncStates.filter { $0.workplaceID == workplace.id },
+            workplaceStore: store
+        )
+
+        let pulledDirectories = await gitService.recorder.pulledDirectories
+
+        XCTAssertTrue(pulledDirectories.isEmpty, "无远端追踪分支不应执行 git pull")
+        XCTAssertEqual(pullResult.successCount, 0)
+        XCTAssertEqual(pullResult.failedCount, 0)
+        XCTAssertEqual(pullResult.skippedCount, 1)
+    }
+
+    func test_pullSkipsNonSuccessRepositories() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fileStore = JSONFileStore(rootDirectory: root)
+        let store = WorkplaceStore(fileStore: fileStore)
+        let repo1 = RepositoryConfig(
+            id: UUID(), gitURL: "git@github.com:org/api.git",
+            repoName: "api", createdAt: .now, updatedAt: .now
+        )
+        let repo2 = RepositoryConfig(
+            id: UUID(), gitURL: "git@github.com:org/web.git",
+            repoName: "web", createdAt: .now, updatedAt: .now
+        )
+        let workplace = try store.createWorkplace(
+            name: "skip-test",
+            rootPath: workspaceRoot.path,
+            selectedRepositories: [repo1, repo2]
+        )
+
+        // repo1 stays .idle (should be skipped), repo2 is .success (should be pulled)
+        var state2 = store.syncStates.first { $0.repositoryID == repo2.id }!
+        state2.status = .success
+        state2.hasLocalDirectory = true
+        state2.localPath = URL(fileURLWithPath: workplace.path).appendingPathComponent("web").path
+        try FileManager.default.createDirectory(
+            atPath: state2.localPath,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        try store.updateSyncState(state2)
+
+        let coordinator = SyncCoordinator(
+            gitService: GitServiceStub(behavior: .success),
+            fileSystemService: FileSystemServiceSpy()
+        )
+
+        let pullResult = await coordinator.pullRepositories(
+            syncStates: store.syncStates.filter { $0.workplaceID == workplace.id },
+            workplaceStore: store
+        )
+
+        let result1 = store.syncStates.first { $0.repositoryID == repo1.id }
+        let result2 = store.syncStates.first { $0.repositoryID == repo2.id }
+        XCTAssertEqual(result1?.status, .idle, "idle repo should not be touched")
+        XCTAssertEqual(result2?.status, .success, "success repo should be pulled")
+        XCTAssertNotNil(result2?.lastSyncedAt)
+        XCTAssertEqual(pullResult.successCount, 1)
+        XCTAssertEqual(pullResult.failedCount, 0)
+        XCTAssertEqual(pullResult.skippedCount, 0)
+    }
+
+    func test_pullSkipsRepositoryWithoutTrackingBranchAndPreservesStatus() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fileStore = JSONFileStore(rootDirectory: root)
+        let store = WorkplaceStore(fileStore: fileStore)
+        let repository = RepositoryConfig(
+            id: UUID(),
+            gitURL: "git@github.com:org/api.git",
+            repoName: "api",
+            createdAt: .now,
+            updatedAt: .now
+        )
+        let workplace = try store.createWorkplace(
+            name: "branch-filter",
+            rootPath: workspaceRoot.path,
+            selectedRepositories: [repository]
+        )
+
+        var state = store.syncStates.first { $0.workplaceID == workplace.id }!
+        state.status = .success
+        state.hasLocalDirectory = true
+        state.localPath = URL(fileURLWithPath: workplace.path).appendingPathComponent("api").path
+        state.lastSyncedAt = nil
+        try FileManager.default.createDirectory(
+            atPath: state.localPath,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        try store.updateSyncState(state)
+
+        let gitService = GitServiceStub(
+            behavior: .success,
+            branchStatusResult: GitBranchStatusSnapshot(
+                currentBranch: "feature/test",
+                hasRemoteTrackingBranch: false,
+                hasUncommittedChanges: false
+            )
+        )
+        let coordinator = SyncCoordinator(
+            gitService: gitService,
+            fileSystemService: FileSystemServiceSpy()
+        )
+
+        let pullResult = await coordinator.pullRepositories(
+            syncStates: store.syncStates.filter { $0.workplaceID == workplace.id },
+            workplaceStore: store
+        )
+
+        let syncResult = store.syncStates.first { $0.workplaceID == workplace.id && $0.repositoryID == repository.id }
+        let pulledDirectories = await gitService.recorder.pulledDirectories
+
+        XCTAssertEqual(syncResult?.status, .success)
+        XCTAssertNil(syncResult?.lastSyncedAt, "无远端追踪分支不应触发刷新")
+        XCTAssertTrue(pulledDirectories.isEmpty, "无远端追踪分支仓库不应执行 git pull")
+        XCTAssertEqual(pullResult.successCount, 0)
+        XCTAssertEqual(pullResult.failedCount, 0)
+        XCTAssertEqual(pullResult.skippedCount, 1)
+    }
+
+    func test_pullSkipsFailedRepositoryWithoutTrackingBranch() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fileStore = JSONFileStore(rootDirectory: root)
+        let store = WorkplaceStore(fileStore: fileStore)
+        let repository = RepositoryConfig(
+            id: UUID(),
+            gitURL: "git@github.com:org/api.git",
+            repoName: "api",
+            createdAt: .now,
+            updatedAt: .now
+        )
+        let workplace = try store.createWorkplace(
+            name: "stale-failure",
+            rootPath: root.path,
+            selectedRepositories: [repository]
+        )
+
+        let localPath = URL(fileURLWithPath: root.path)
+            .appendingPathComponent("stale-failure")
+            .appendingPathComponent("api")
+            .path
+        try FileManager.default.createDirectory(
+            atPath: localPath,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+
+        var state = store.syncStates.first { $0.workplaceID == workplace.id }!
+        state.status = .failed
+        state.hasLocalDirectory = true
+        state.localPath = localPath
+        state.lastError = "There is no tracking information for the current branch."
+        try store.updateSyncState(state)
+
+        let gitService = GitServiceStub(
+            behavior: .success,
+            branchStatusResult: GitBranchStatusSnapshot(
+                currentBranch: "feature/test",
+                hasRemoteTrackingBranch: false,
+                hasUncommittedChanges: false
+            )
+        )
+        let coordinator = SyncCoordinator(
+            gitService: gitService,
+            fileSystemService: FileSystemServiceSpy()
+        )
+
+        let pullResult = await coordinator.pullRepositories(
+            syncStates: store.syncStates.filter { $0.workplaceID == workplace.id },
+            workplaceStore: store
+        )
+
+        let syncResult = store.syncStates.first { $0.workplaceID == workplace.id && $0.repositoryID == repository.id }
+        let pulledDirectories = await gitService.recorder.pulledDirectories
+
+        XCTAssertEqual(syncResult?.status, .failed)
+        XCTAssertEqual(syncResult?.lastError, "There is no tracking information for the current branch.")
+        XCTAssertTrue(pulledDirectories.isEmpty)
+        XCTAssertEqual(pullResult.successCount, 0)
+        XCTAssertEqual(pullResult.failedCount, 0)
+        XCTAssertEqual(pullResult.skippedCount, 1)
+    }
+
+    func test_replaceSyncStatesReplacesTargetWorkplaceOnly() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fileStore = JSONFileStore(rootDirectory: root)
+        let store = WorkplaceStore(fileStore: fileStore)
+
+        let targetRepo = RepositoryConfig(
+            id: UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!,
+            gitURL: "git@github.com:org/target.git",
+            repoName: "target",
+            createdAt: .now,
+            updatedAt: .now
+        )
+        let otherRepo = RepositoryConfig(
+            id: UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!,
+            gitURL: "git@github.com:org/other.git",
+            repoName: "other",
+            createdAt: .now,
+            updatedAt: .now
+        )
+        let targetWorkplace = try store.createWorkplace(
+            name: "target-wp",
+            rootPath: workspaceRoot.path,
+            selectedRepositories: [targetRepo]
+        )
+        let otherWorkplace = try store.createWorkplace(
+            name: "other-wp",
+            rootPath: workspaceRoot.path,
+            selectedRepositories: [otherRepo]
+        )
+
+        let replacement = RepositorySyncState(
+            workplaceID: targetWorkplace.id,
+            repositoryID: targetRepo.id,
+            status: .success,
+            localPath: URL(fileURLWithPath: targetWorkplace.path).appendingPathComponent("target").path,
+            lastError: nil,
+            lastSyncedAt: .now
+        )
+        try store.replaceSyncStates([replacement], for: targetWorkplace.id)
+
+        let targetState = store.syncStates.first {
+            $0.workplaceID == targetWorkplace.id && $0.repositoryID == targetRepo.id
+        }
+        let otherState = store.syncStates.first {
+            $0.workplaceID == otherWorkplace.id && $0.repositoryID == otherRepo.id
+        }
+
+        XCTAssertEqual(targetState?.status, .success)
+        XCTAssertEqual(otherState?.status, .idle)
+        XCTAssertEqual(store.syncStates.count, 2)
+    }
+
+    func test_pullRepositories_collectsBranchSummariesPerRepository() async throws {
+        let outcomeForRepoA = GitPullAllBranchesOutcome(
+            currentBranch: "main",
+            currentBranchOutcome: GitBranchPullOutcome(branch: "main", status: .pulled, errorMessage: nil),
+            otherBranchOutcomes: [
+                GitBranchPullOutcome(branch: "feature", status: .skippedDiverged, errorMessage: nil)
+            ],
+            primaryError: nil
+        )
+        let stub = PullAllBranchesGitServiceStub(outcomeMap: ["/tmp/repo-a": outcomeForRepoA])
+        let coordinator = SyncCoordinator(gitService: stub, fileSystemService: FileSystemService())
+        let storeRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = WorkplaceStore(fileStore: JSONFileStore(rootDirectory: storeRoot))
+        let workplaceID = UUID()
+        let repositoryID = UUID()
+        let state = RepositorySyncState(
+            workplaceID: workplaceID,
+            repositoryID: repositoryID,
+            status: .success,
+            localPath: "/tmp/repo-a",
+            lastError: nil,
+            lastSyncedAt: nil,
+            hasLocalDirectory: true
+        )
+
+        let result = await coordinator.pullRepositories(syncStates: [state], workplaceStore: store)
+
+        XCTAssertEqual(result.successCount, 1)
+        XCTAssertEqual(result.branchSummaries.count, 1)
+        let summary = try XCTUnwrap(result.branchSummaries.first)
+        XCTAssertEqual(summary.repositoryName, "repo-a")
+        XCTAssertEqual(summary.outcome.otherBranchOutcomes.first?.status, .skippedDiverged)
+    }
+}
+
+struct PullAllBranchesGitServiceStub: GitServicing {
+    let outcomeMap: [String: GitPullAllBranchesOutcome]
+
+    func clone(repositoryURL: String, into directory: String) async throws {}
+    func pull(in directory: String) async throws {}
+    func push(in directory: String) async throws {}
+    func stash(in directory: String) async throws {}
+    func stashPop(in directory: String) async throws {}
+    func isGitAvailable() async -> Bool { true }
+    func defaultBranch(for remoteURL: String) async -> String? { "main" }
+    func defaultBranch(in directory: String) async -> String? { "main" }
+    func currentBranch(in directory: String) async -> String? { "main" }
+    func branchStatus(in directory: String) async -> GitBranchStatusSnapshot? {
+        GitBranchStatusSnapshot(
+            currentBranch: "main",
+            hasRemoteTrackingBranch: true,
+            hasUncommittedChanges: false
+        )
+    }
+    func branches(in directory: String) async -> [String] { [] }
+    func remoteURL(in directory: String) async -> String? { nil }
+    func checkoutBranch(_ branch: String, in directory: String) async throws {}
+    func createLocalBranch(_ branch: String, in directory: String) async throws {}
+    func remoteBranchExists(branch: String, remoteURL: String) async -> Bool { false }
+    func mergeDefaultBranchIntoCurrent(in directory: String) async throws -> GitMergeDefaultBranchOutcome { .merged }
+    func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] { [] }
+    func remoteBranches(for remoteURL: String) async -> [String] { [] }
+
+    func pullAllBranches(in directory: String) async throws -> GitPullAllBranchesOutcome {
+        if let outcome = outcomeMap[directory] {
+            return outcome
+        }
+        return GitPullAllBranchesOutcome(
+            currentBranch: "main",
+            currentBranchOutcome: GitBranchPullOutcome(branch: "main", status: .pulled, errorMessage: nil),
+            otherBranchOutcomes: [],
+            primaryError: nil
+        )
+    }
+}
+
+private func tempWorkplaceRoot() -> URL {
+    FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+}

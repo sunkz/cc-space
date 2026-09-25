@@ -1,0 +1,47 @@
+.superpowers/
+.worktrees/
+.workbuddy/
+dist/
+.cache/
+
+# Xcode
+*.xcuserstate
+xcuserdata/
+*.xccheckout
+*.moved-aside
+DerivedData/
+.deriveddata/
+*.hmap
+*.ipa
+*.xcarchive
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# Claude Code
+.claude/
+
+# Codex
+.codex/
+
+# ZCode
+.zcode/
+
+# Docs
+docs/superpowers/
+
+# Logs & temp
+*.log
+*.profraw

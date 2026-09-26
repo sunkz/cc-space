@@ -136,12 +136,12 @@ enum WorkplaceRelativeTimeFormatter {
 }
 
 struct SidebarWorkplaceRowPresentationState {
+    /// 置顶图标列宽与 accessory 组内间距是纯布局常量,直接以静态常量暴露,
+    /// 不再复制到实例字段(此前实例值恒等于同名静态量,纯冗余)。
     static let pinIndicatorColumnWidth: CGFloat = 12
     static let accessorySpacing: CGFloat = 4
 
     let showsPinnedIndicator: Bool
-    let pinIndicatorColumnWidth: CGFloat
-    let accessorySpacing: CGFloat
     let statusIndicatorColor: Color?
     let creationTimeText: String
 
@@ -152,8 +152,6 @@ struct SidebarWorkplaceRowPresentationState {
         calendar: Calendar = .current
     ) {
         showsPinnedIndicator = workplace.isPinned && !workplace.isArchived
-        pinIndicatorColumnWidth = Self.pinIndicatorColumnWidth
-        accessorySpacing = Self.accessorySpacing
         statusIndicatorColor = hasFailed ? .red : nil
         creationTimeText = WorkplaceRelativeTimeFormatter.creationText(
             createdAt: workplace.createdAt,
@@ -171,6 +169,8 @@ struct MarqueeTextPresentationState: Equatable {
     static let tailPadding: CGFloat = 8
     /// 滚动速度(点/秒)。
     static let speed: Double = 30
+    /// 重启滚动循环的距离变化阈值:测量宽度亚点级抖动不值得打断滚动。
+    static let distanceRestartThreshold: CGFloat = 1
 
     let shouldScroll: Bool
     let distance: CGFloat
@@ -199,6 +199,8 @@ struct CCSpaceMarqueeText: View {
     @State private var containerWidth: CGFloat?
     @State private var offset: CGFloat = 0
     @State private var scrollTask: Task<Void, Never>?
+    /// 当前滚动循环所依据的计划;nil 表示未在滚动。onDisappear 随任务一并清理。
+    @State private var activeScrollPlan: MarqueeTextPresentationState?
 
     private var presentationState: MarqueeTextPresentationState {
         MarqueeTextPresentationState(
@@ -228,14 +230,11 @@ struct CCSpaceMarqueeText: View {
             .background(measureContainer.allowsHitTesting(false))
             .background(measureText.allowsHitTesting(false))
             .onChange(of: presentationState) { _, newState in
-                if newState.shouldScroll {
-                    startScrolling(plan: newState)
-                } else {
-                    stopScrolling()
-                }
+                handleScrollPlanChange(newState)
             }
             .onDisappear {
                 scrollTask?.cancel()
+                activeScrollPlan = nil
             }
     }
 
@@ -262,6 +261,34 @@ struct CCSpaceMarqueeText: View {
                 .onChange(of: geo.size.width) { _, newWidth in
                     containerWidth = newWidth
                 }
+        }
+    }
+
+    /// 仅在滚动需求实质变化时重启循环:shouldScroll 翻转,或滚动距离变化
+    /// 超过 distanceRestartThreshold(如侧栏宽度调整)。测量宽度的亚点级抖动
+    /// 同样会触发 onChange,若每次都 cancel + 复位 offset,滚动会被不断打断。
+    private func handleScrollPlanChange(_ newState: MarqueeTextPresentationState) {
+        guard let current = activeScrollPlan else {
+            // 未在滚动:需要滚动才启动。
+            guard newState.shouldScroll else { return }
+            activeScrollPlan = newState
+            startScrolling(plan: newState)
+            return
+        }
+        if newState.shouldScroll != current.shouldScroll {
+            // 开关翻转:启动或停止(停止时复位 offset)。
+            activeScrollPlan = newState.shouldScroll ? newState : nil
+            if newState.shouldScroll {
+                startScrolling(plan: newState)
+            } else {
+                stopScrolling()
+            }
+        } else if newState.shouldScroll,
+                  abs(newState.distance - current.distance)
+                  > MarqueeTextPresentationState.distanceRestartThreshold {
+            // 仍在滚动但距离实质变化:按新计划重启。
+            activeScrollPlan = newState
+            startScrolling(plan: newState)
         }
     }
 
@@ -335,7 +362,7 @@ struct SidebarWorkplaceRowView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            HStack(spacing: rowPresentationState.accessorySpacing) {
+            HStack(spacing: SidebarWorkplaceRowPresentationState.accessorySpacing) {
                 if !workplace.isArchived {
                     Button {
                         onTogglePinned(workplace)
@@ -349,7 +376,7 @@ struct SidebarWorkplaceRowView: View {
                         }
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                        .frame(width: rowPresentationState.pinIndicatorColumnWidth)
+                        .frame(width: SidebarWorkplaceRowPresentationState.pinIndicatorColumnWidth)
                     }
                     .buttonStyle(.plain)
                     .opacity(workplace.isPinned || isHovered ? 1 : 0)

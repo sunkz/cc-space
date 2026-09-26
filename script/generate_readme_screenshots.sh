@@ -8,8 +8,10 @@ SCREENSHOT_SKILL_DIR="${HOME}/.codex/skills/screenshot"
 
 APP_NAME="CCSpace"
 APP_BUNDLE="${ROOT_DIR}/dist/${APP_NAME}.app"
-APP_SUPPORT_DIR="/tmp/CCSpaceDemo/app-support"
-DEMO_ROOT="/tmp/CCSpaceDemo"
+# 演示数据放在每次运行独立的临时目录:固定路径 + 反复 rm -rf 既留垃圾,
+# 又会和并发/上一次未退出的运行互相踩。退出时由 cleanup trap 删除。
+DEMO_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/CCSpaceDemo.XXXXXX")"
+APP_SUPPORT_DIR="${DEMO_ROOT}/app-support"
 DEFAULT_WINDOW_SIZE="960x640"
 # 设置页区块较多(含 AI 服务),加高窗口避免底部区块被底边截断。
 SETTINGS_WINDOW_SIZE="960x800"
@@ -23,9 +25,9 @@ usage() {
     cat <<'EOF'
 Usage: ./script/generate_readme_screenshots.sh [--output-root PATH]
 
-Build the app, recreate the README demo data under /tmp/CCSpaceDemo, then
-capture only the screenshots that README.md actually references under
-docs/screenshots/real/.
+Build the app, recreate the README demo data under a fresh temporary demo
+root, then capture only the screenshots that README.md actually references
+under docs/screenshots/real/. The demo root is removed on exit.
 
 Options:
   --output-root PATH  Write captured files under PATH/<relative README path>.
@@ -78,6 +80,10 @@ require_commands() {
 
 cleanup() {
     pkill -x "${APP_NAME}" >/dev/null 2>&1 || true
+    # 演示数据目录随脚本退出一并回收(mktemp 目录不会自己消失)。
+    if [[ -n "${DEMO_ROOT:-}" && -d "${DEMO_ROOT}" ]]; then
+        rm -rf "${DEMO_ROOT}"
+    fi
 }
 
 trap cleanup EXIT
@@ -103,7 +109,6 @@ prepare_demo_data() {
     local workplace_name
 
     echo "=> Preparing demo data under ${DEMO_ROOT}..."
-    rm -rf "${DEMO_ROOT}"
     mkdir -p "${APP_SUPPORT_DIR}" \
         "${DEMO_ROOT}/remotes" \
         "${DEMO_ROOT}/seeds" \
@@ -114,6 +119,26 @@ prepare_demo_data() {
     cp "${FIXTURE_DIR}/repositories.json" "${APP_SUPPORT_DIR}/repositories.json"
     cp "${FIXTURE_DIR}/workplaces.json" "${APP_SUPPORT_DIR}/workplaces.json"
     cp "${FIXTURE_DIR}/sync-states.json" "${APP_SUPPORT_DIR}/sync-states.json"
+
+    # fixture 里的路径统一以 /tmp/CCSpaceDemo 为占位前缀;DEMO_ROOT 每次运行
+    # 都是随机临时目录,复制后把占位前缀改写为本次的真实路径,否则 app 读到
+    # 的 workplaceRootPath/各 localPath 会指向不存在的目录。
+    python3 - "${DEMO_ROOT}" "${APP_SUPPORT_DIR}" <<'PY'
+import json
+import pathlib
+import sys
+
+demo_root = sys.argv[1]
+support_dir = pathlib.Path(sys.argv[2])
+placeholder = "/tmp/CCSpaceDemo"
+
+for name in ("settings.json", "workplaces.json", "sync-states.json"):
+    path = support_dir / name
+    data = json.loads(path.read_text(encoding="utf-8"))
+    text = json.dumps(data, ensure_ascii=False, indent=2)
+    text = text.replace(placeholder, demo_root)
+    path.write_text(text + "\n", encoding="utf-8")
+PY
 
     for workplace_name in \
         analytics-sprint \

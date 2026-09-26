@@ -291,6 +291,11 @@ private struct DiffFileCard: View {
     /// 取不到全文(删除的文件、二进制等)时与 patch 行一致,不会重复再取。
     @State private var expandedLines: [DiffPatchLine]?
     @State private var expandedSplitRows: [DiffSplitRow]?
+    /// 全文展开请求的代际号:.task(id:) 与 onChange 里的裸 Task 可并发取全文,
+    /// 旧 diff 的结果若晚到会以"过期内容"覆盖新结果——与丢弃按钮同屏的陈旧展示
+    /// 正是本文件注释里定性过的真实丢失风险,必须按代际落笔。
+    @State private var expandGeneration = 0
+    @State private var expandTask: Task<Void, Never>?
     @State private var isDiscardHovered = false
 
     var body: some View {
@@ -304,6 +309,11 @@ private struct DiffFileCard: View {
         .task(id: showAllLines) {
             await expandFullFileIfNeeded()
         }
+        .onDisappear {
+            expandTask?.cancel()
+            expandTask = nil
+            expandGeneration += 1
+        }
         .onChange(of: diff) { oldDiff, newDiff in
             // 聚焦刷新后同一路径带回新 patch:「展示所有行」的全文展开结果必须作废,
             // 否则开关打开时仍展示旧磁盘内容(解析行缓存由 patchHash 校验兜底)。
@@ -312,7 +322,9 @@ private struct DiffFileCard: View {
             expandedSplitRows = nil
             if showAllLines {
                 // .task(id: showAllLines) 不会因 diff 变化重跑,这里主动重新取全文。
-                Task { await expandFullFileIfNeeded() }
+                // 旧请求不取消也会因代际+1 被丢弃落笔,取消只是省一次网络/磁盘取数。
+                expandTask?.cancel()
+                expandTask = Task { await expandFullFileIfNeeded() }
             }
         }
         .background(
@@ -410,7 +422,7 @@ private struct DiffFileCard: View {
     @ViewBuilder
     private var patchContent: some View {
         if diff.isBinary {
-            Text("二进制文件,无法显示 diff")
+            Text("二进制文件，无法显示 diff")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -434,14 +446,19 @@ private struct DiffFileCard: View {
     }
 
     private var parsedPatch: (lines: [DiffPatchLine], splitRows: [DiffSplitRow]) {
-        let patchHash = diff.patch.hashValue
-        if parseMemo.cachedID == diff.id, parseMemo.cachedPatchHash == patchHash {
-            return (parseMemo.lines, parseMemo.splitRows)
+        if parseMemo.cachedID == diff.id {
+            // 同一路径聚焦刷新可能带回新 patch:与缓存持有的 patch 做全等比较判定命中。
+            // 相等比较是 memcmp 级开销(首个差异字节即短路),且字符串赋值走写时复制、
+            // 不产生真实拷贝——取代此前每次 body 求值都对全量 patch 计算 hashValue
+            // 的 O(N) 哈希。不相等时重解析并更新缓存。
+            if parseMemo.cachedPatch == diff.patch {
+                return (parseMemo.lines, parseMemo.splitRows)
+            }
         }
         let lines = DiffPatchLineParser.parse(diff.patch)
         let splitRows = DiffSplitRowBuilder.rows(from: lines)
         parseMemo.cachedID = diff.id
-        parseMemo.cachedPatchHash = patchHash
+        parseMemo.cachedPatch = diff.patch
         parseMemo.lines = lines
         parseMemo.splitRows = splitRows
         return (lines, splitRows)
@@ -451,7 +468,11 @@ private struct DiffFileCard: View {
     /// 取不到全文时展开原样返回 patch 行,同样只取一次,不会反复发起。
     private func expandFullFileIfNeeded() async {
         guard showAllLines, expandedLines == nil, let fullFileContent else { return }
+        expandGeneration += 1
+        let generation = expandGeneration
         let content = await fullFileContent(diff)
+        // 取全文期间若有更新的请求(diff 刷新/开关重开)发起,本次结果已过时,禁止落笔。
+        guard generation == expandGeneration else { return }
         let lines = DiffFullFileExpander.expand(patchLines: parsedPatch.lines, fileContent: content)
         expandedLines = lines
         expandedSplitRows = DiffSplitRowBuilder.rows(from: lines)
@@ -506,10 +527,10 @@ private struct DiffFileCard: View {
 /// patch 解析结果的进程内 memo;由 DiffFileCard 以 @State 持有,实例在视图重渲染间保持稳定。
 private final class PatchParseMemo {
     var cachedID: String?
-    /// 缓存对应的 patch 内容哈希。diff.id 只是文件路径:聚焦刷新后同一路径
+    /// 缓存对应的 patch 内容。diff.id 只是文件路径:聚焦刷新后同一路径
     /// 可能带回新 patch,只比对 id 会让正文停留在旧内容(header 却是新的),
-    /// 用户可能基于陈旧 diff 执行「丢弃改动」造成真实丢失。
-    var cachedPatchHash: Int?
+    /// 用户可能基于陈旧 diff 执行「丢弃改动」造成真实丢失,须按内容判定命中。
+    var cachedPatch: String?
     var lines: [DiffPatchLine] = []
     var splitRows: [DiffSplitRow] = []
 }

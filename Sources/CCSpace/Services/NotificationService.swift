@@ -42,8 +42,8 @@ final class NotificationService {
     }
 
     /// 请求通知授权(.alert / .sound / .badge)。幂等:进程内只请求一次,失败静默忽略。
-    /// - Parameter completion: 授权结果回调(系统后台线程)。首次调用时系统授权框可能还
-    ///   挂着,调用方若要在授权后立即发通知,必须等这个回调,否则读到的状态是
+    /// - Parameter completion: 授权结果回调,保证在主线程回调。首次调用时系统授权框
+    ///   可能还挂着,调用方若要在授权后立即发通知,必须等这个回调,否则读到的状态是
     ///   `.notDetermined`,触发授权的那条通知会被丢弃。
     func requestAuthorizationIfNeeded(
         completion: (@Sendable (Bool, Error?) -> Void)? = nil
@@ -61,6 +61,10 @@ final class NotificationService {
         }
         didRequestAuthorization = true
         guard let center = notificationCenter else {
+            // 无 bundle 环境(测试进程/命令行)也要缓存终态:不写的话,
+            // 后续每次 send 的 completion 都堆进 pendingAuthorizationCompletions
+            // 且永远等不到系统回调,构成缓慢泄漏。
+            lastAuthorizationResult = (false, nil)
             completion?(false, nil)
             return
         }
@@ -69,7 +73,8 @@ final class NotificationService {
             if let error {
                 notificationLog.error("event=notification_authorization_failed reason=\(error.localizedDescription)")
             }
-            // 回调在系统线程:缓存真实结果、回放排队中的调用方回调都收拢到主线程。
+            // 回调保证在主线程:系统线程上收到的结果统一收拢进 MainActor 任务,
+            // 与排队回放的调用方回调共用同一线程契约。
             Task { @MainActor in
                 self?.lastAuthorizationResult = (granted, error)
                 let pending = self?.pendingAuthorizationCompletions ?? []
@@ -77,8 +82,8 @@ final class NotificationService {
                 for pendingCompletion in pending {
                     pendingCompletion(granted, error)
                 }
+                completion?(granted, error)
             }
-            completion?(granted, error)
         }
     }
 

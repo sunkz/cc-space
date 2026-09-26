@@ -20,11 +20,11 @@ final class AppearanceSupportTests: XCTestCase {
 
         XCTAssertEqual(
             AppSettings.AppearanceMode.dark.toolbarButtonTitle,
-            "外观:深色,点击切换到跟随系统"
+            "外观：深色，点击切换到跟随系统"
         )
         XCTAssertEqual(
             AppSettings.AppearanceMode.system.toolbarButtonTitle,
-            "外观:跟随系统,点击切换到浅色"
+            "外观：跟随系统，点击切换到浅色"
         )
     }
 

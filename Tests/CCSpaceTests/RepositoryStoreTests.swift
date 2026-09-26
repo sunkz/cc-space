@@ -184,7 +184,9 @@ final class RepositoryStoreTests: XCTestCase {
         try FileManager.default.createDirectory(at: repoB.appendingPathComponent(".git"), withIntermediateDirectories: true)
 
         _ = rootDirectory
-        store.deduplicatePersistedRepositories()
+        store.applyDeduplicationResult(
+            RepositoryStore.deduplicationResult(for: store.repositories)
+        )
 
         XCTAssertTrue(store.repositories.isEmpty)
     }
@@ -390,4 +392,52 @@ final class RepositoryStoreTests: XCTestCase {
         let apiRepo = store.repositories.first { $0.repoName == "api" }
         XCTAssertEqual(apiRepo?.mrTargetBranches, ["develop", "staging"])
     }
+
+    // MARK: - 去重保留优先级 / 导入容错(回归锁)
+
+    func test_deduplicationKeepsProtectedAndOlderBeforeUnprotectedNewer() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        // olderUnprotected:更早但未被引用;referenced:更晚但被工作区引用。
+        let olderUnprotected = RepositoryConfig(
+            id: UUID(), gitURL: "git@github.com:org/blog.git", repoName: "blog",
+            createdAt: now, updatedAt: now
+        )
+        let referenced = RepositoryConfig(
+            id: UUID(), gitURL: "https://github.com/org/blog", repoName: "blog",
+            createdAt: now.addingTimeInterval(100), updatedAt: now.addingTimeInterval(100)
+        )
+        let result = RepositoryStore.deduplicationResult(
+            for: [olderUnprotected, referenced],
+            protectedRepositoryIDs: [referenced.id]
+        )
+        XCTAssertTrue(result.changed)
+        XCTAssertEqual(result.repositories.map(\.id), [referenced.id], "被引用的重复项必须优先保留,即使它更晚")
+        // 无保护信息时回退"更早者优先",而非数组顺序。
+        let plain = RepositoryStore.deduplicationResult(for: [referenced, olderUnprotected])
+        XCTAssertEqual(plain.repositories.map(\.id), [olderUnprotected.id])
+        // 输出顺序跟随输入数组,不改变展示序。
+        let reordered = RepositoryStore.deduplicationResult(
+            for: [referenced, olderUnprotected],
+            protectedRepositoryIDs: [referenced.id]
+        )
+        XCTAssertEqual(reordered.repositories.map(\.id), [referenced.id])
+    }
+
+    func test_importBackupSkipsInvalidEntryAndKeepsRest() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
+        let backupURL = root.appendingPathComponent("backup.json")
+        let json = """
+        {"version":2,"exportedAt":"2026-01-01T00:00:00Z","repositories":[{"gitURL":"git@github.com:org/good-one.git"},{"gitURL":"https://github.com/org/.."},{"gitURL":"git@github.com:org/good-two.git"}]}
+        """
+        try json.write(to: backupURL, atomically: true, encoding: .utf8)
+
+        let result = try store.importBackup(from: backupURL)
+
+        XCTAssertEqual(result.importedCount, 2, "一条坏数据不得毁掉整个导入")
+        XCTAssertEqual(result.skippedCount, 1)
+        XCTAssertEqual(Set(store.repositories.map(\.repoName)), ["good-one", "good-two"])
+    }
+
 }

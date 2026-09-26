@@ -394,14 +394,25 @@ final class GitServicePullAllBranchesTests: XCTestCase {
 
     func shell(_ arguments: [String]) throws -> String {
         let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        task.arguments = arguments
+        // 固定 /usr/bin/git 并关掉全局配置(gpgsign/hooks)对测试的干扰,
+        // 与 GitProcessRunner 的生产探测路径保持一致。
+        let gitArguments: [String]
+        if arguments.first == "git" {
+            gitArguments = ["/usr/bin/git", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"]
+                + Array(arguments.dropFirst())
+        } else {
+            gitArguments = arguments
+        }
+        task.executableURL = URL(fileURLWithPath: gitArguments[0])
+        task.arguments = Array(gitArguments.dropFirst())
         let pipe = Pipe()
         task.standardOutput = pipe
         task.standardError = pipe
         try task.run()
-        task.waitUntilExit()
+        // 先排空管道再等退出:输出超 64KB 时子进程会因管道写满而阻塞,
+        // 先 waitUntilExit 会互相等待造成死锁。
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
         let output = String(data: data, encoding: .utf8) ?? ""
         guard task.terminationStatus == 0 else {
             throw NSError(domain: "shell", code: Int(task.terminationStatus), userInfo: [

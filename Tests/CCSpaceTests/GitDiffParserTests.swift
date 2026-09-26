@@ -278,13 +278,36 @@ final class GitDiffParserTests: XCTestCase {
     }
 
     /// 文件名本身含 " => " 的普通修改行:git numstat 会输出带引号路径,
-    /// 不能再按 rename 压缩形式切割,否则路径被腰斩。
+    /// 不能按 rename 压缩形式切割,否则路径被腰斩;P2-25 起引号路径会被
+    /// C 转义解码(剥离引号),但仍保留完整的 " => " 文件名。
     func test_quotedPathContainingArrowIsNotSplitAsRename() {
         let entries = GitDiffParser.parse(output: "1\t1\t\"weird => name.txt\"\n")
 
         XCTAssertEqual(entries.count, 1)
-        XCTAssertEqual(entries[0].filePath, "\"weird => name.txt\"")
+        XCTAssertEqual(entries[0].filePath, "weird => name.txt")
         XCTAssertEqual(entries[0].insertions, 1)
+    }
+
+    /// 含转义序列的引号路径:numstat 与 diff header 均为 C 引用形式,
+    /// 必须解码后才能按路径匹配 patch,UI 也不能显示原始转义序列。
+    func test_quotedPathWithEscapeIsDecodedAndMatchesPatch() {
+        let output = """
+        1\t1\t"wei\\trd.txt"
+
+        diff --git "a/wei\\trd.txt" "b/wei\\trd.txt"
+        index 1111111..2222222 100644
+        --- "a/wei\\trd.txt"
+        +++ "b/wei\\trd.txt"
+        @@ -1 +1 @@
+        -old
+        +new
+        """
+        let entries = GitDiffParser.parse(output: output)
+
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertEqual(entries[0].filePath, "wei\trd.txt")
+        XCTAssertFalse(entries[0].patch.isEmpty)
+        XCTAssertTrue(entries[0].patch.contains("+new"))
     }
 
     /// 非 ASCII 数字(Unicode isNumber 为真)不是合法计数列:

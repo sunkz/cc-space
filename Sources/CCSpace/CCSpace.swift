@@ -1,12 +1,25 @@
 import SwiftUI
+import os
+
+/// 文件级 logger:App 类型隐式 @MainActor,成员静态属性会被连带隔离,
+/// 而 settingsReader 是非隔离 Sendable 闭包,只能引用 nonisolated 的日志器。
+private let appStartupLog = Logger(
+    subsystem: "com.ccspace.app",
+    category: "App"
+)
 
 @main
 struct CCSpace: App {
+
     private let launchConfiguration = CCSpaceLaunchConfiguration()
     private let gitService = GitService()
+    /// 独立窗口(Diff/提交记录)的破坏性写操作统一走协调器:
+    /// 与主窗口后台 pull/push/切分支共用 per-path 锁,避免对同一工作树交错写。
+    private let syncCoordinator: SyncCoordinator
     private let aiCommitService: AICommitMessageService
 
     @MainActor init() {
+        self.syncCoordinator = SyncCoordinator(gitService: gitService)
         let appSupportDirectory = launchConfiguration.resolvedAppSupportDirectory()
         // 清理上次崩溃/强退遗留的 JSON 写入暂存目录。**只在启动调用一次**:
         // JSONFileStore 在运行期会被反复构造,清理逻辑不能放在它的 init 里,
@@ -15,16 +28,30 @@ struct CCSpace: App {
 
         // AI 服务(提交信息生成/测试连接/模型列表):Diff 独立窗口与主窗口的
         // SettingsStore 不共享状态,服务在每次请求时直接读盘取最新配置,变更即时生效。
+        // API Key 已迁钥匙串(见 SecurityAPIKeyStore):读盘结果里的 apiKey 恒为空,
+        // 这里按托管态补读钥匙串,再交给服务消费。
         let settingsFileStore = JSONFileStore(
             rootDirectory: appSupportDirectory
         )
+        let keychain = SecurityAPIKeyStore.shared
         aiCommitService = AICommitMessageService(
             settingsReader: {
-                try? settingsFileStore.loadIfPresent(
-                    AppSettings.self,
-                    from: "settings.json",
-                    default: AppSettings(workplaceRootPath: "")
-                )
+                do {
+                    var settings = try settingsFileStore.loadIfPresent(
+                        AppSettings.self,
+                        from: "settings.json",
+                        default: AppSettings(workplaceRootPath: "")
+                    )
+                    // API Key 已迁钥匙串:读盘结果里的 apiKey 恒为空,
+                    // 这里按托管态补读钥匙串,再交给服务消费(规则见 AppSettings 扩展)。
+                    settings.backfillAPIKeyFromKeychainIfManaged(using: keychain)
+                    return settings
+                } catch {
+                    // 此前 `try?` 吞掉全部读盘/解码错误:settings.json 临时不可读时
+                    // AI 功能静默降级为"未配置",现场无任何日志可查。
+                    appStartupLog.error("event=settings_reader_failed reason=\(error.localizedDescription)")
+                    return nil
+                }
             }
         )
     }
@@ -48,6 +75,7 @@ struct CCSpace: App {
                 DiffWindowView(
                     payload: payload,
                     gitService: gitService,
+                    syncCoordinator: syncCoordinator,
                     aiCommitService: aiCommitService
                 )
             } else {
@@ -63,7 +91,8 @@ struct CCSpace: App {
             if let payload {
                 CommitLogWindowView(
                     payload: payload,
-                    gitService: gitService
+                    gitService: gitService,
+                    syncCoordinator: syncCoordinator
                 )
             } else {
                 Color(nsColor: .windowBackgroundColor)

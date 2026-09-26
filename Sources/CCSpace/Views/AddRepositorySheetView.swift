@@ -31,8 +31,8 @@ struct AddRepositorySheetView: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    if let feedback {
-                        CCSpaceFeedbackBanner(feedback: feedback)
+                    if let shownFeedback = feedback {
+                        CCSpaceFeedbackBanner(feedback: shownFeedback, onClose: { self.feedback = nil })
                     }
 
                     VStack(alignment: .leading, spacing: 8) {
@@ -48,6 +48,14 @@ struct AddRepositorySheetView: View {
                             .onSubmit {
                                 Task { await add() }
                             }
+                        // 非空但格式非法时先行内提示(与提交时 store 抛错同一口径),
+                        // 不等点了"添加"才看到红色错误条。
+                        if gitURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+                           RepositoryAddPresentationState(gitURL: gitURL).isURLFormatValid == false {
+                            Text("地址格式不正确：需为 https/http/ssh/git 协议或 user@host:path 形式")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
                     }
                     .ccspacePanel(background: .clear, cornerRadius: 12, padding: 12, borderOpacity: 0.03)
 
@@ -114,6 +122,8 @@ struct AddRepositorySheetView: View {
             .padding(.vertical, 10)
         }
         .frame(width: 500, height: 450)
+        // 与主窗口一致:成功/信息类提示自动消失,错误类保留且可手动关闭。
+        .ccspaceAutoDismissFeedback($feedback)
         .onChange(of: gitURL) { _, newValue in
             feedback = nil
             autoFetchTask?.cancel()
@@ -160,12 +170,14 @@ struct AddRepositorySheetView: View {
               gitURL.trimmingCharacters(in: .whitespacesAndNewlines) == url else { return }
 
         remoteBranchSuggestions = ordered
-        if let preselected = ordered.first {
-            editingMRBranches = [preselected]
-        }
-
         showBranchSuggestions = true
-        isMRBranchInputFocused = true
+        // 探测(800ms 防抖 + 网络往返)期间用户可能已输入目标分支:
+        // 仅在输入为空时预填默认分支并抢焦点,不覆盖用户已敲的内容
+        // (与 EditRepositorySheetView.fetchDefaultBranch 的守卫同一口径)。
+        if editingMRBranches.isEmpty, let preselected = ordered.first {
+            editingMRBranches = [preselected]
+            isMRBranchInputFocused = true
+        }
     }
 
     @MainActor
@@ -173,22 +185,21 @@ struct AddRepositorySheetView: View {
         let trimmed = gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         isAdding = true
+        defer { isAdding = false }
         do {
-            try repositoryStore.addRepository(gitURL: trimmed)
-            if let newRepo = repositoryStore.repositories.first(where: { $0.gitURL == trimmed }) {
-                if !editingMRBranches.isEmpty {
-                    try repositoryStore.updateRepository(
-                        id: newRepo.id,
-                        gitURL: trimmed,
-                        mrTargetBranches: editingMRBranches
-                    )
-                }
-                onAdded(newRepo)
+            // 建档 → 回填 MR 目标分支 → 取实时记录的多步编排在 Orchestrator:
+            // 返回的是 update 之后的实时快照,"新增后直接编辑"弹窗的基线才不失真。
+            let freshRepository = try RepositoryAddOrchestrator.addRepository(
+                gitURL: trimmed,
+                mrTargetBranches: editingMRBranches,
+                store: repositoryStore
+            )
+            if let freshRepository {
+                onAdded(freshRepository)
             }
             dismiss()
         } catch {
             feedback = CCSpaceFeedbackFactory.actionError(action: "新增仓库", error: error)
         }
-        isAdding = false
     }
 }

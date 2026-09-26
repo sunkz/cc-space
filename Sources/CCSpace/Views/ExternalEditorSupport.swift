@@ -75,14 +75,16 @@ struct ExternalEditorCandidate: Equatable {
     let appBundleNames: [String]
 }
 
-struct ExternalEditorDetector {
-    let resolveApplicationURL: (String) -> URL?
+/// @unchecked Sendable:fileManager 与 searchRoots/candidates 初始化后不变,
+/// FileManager.default 官方文档明确可多线程调用;resolveApplicationURL 标注 @Sendable。
+struct ExternalEditorDetector: @unchecked Sendable {
+    let resolveApplicationURL: @Sendable (String) -> URL?
     let fileManager: FileManager
     let searchRoots: [URL]
     let candidates: [ExternalEditorCandidate]
 
     init(
-        resolveApplicationURL: @escaping (String) -> URL? = {
+        resolveApplicationURL: @escaping @Sendable (String) -> URL? = {
             NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0)
         },
         fileManager: FileManager = .default,
@@ -331,10 +333,28 @@ final class OpenActionsModel: ObservableObject {
         refresh()
     }
 
+    /// 代际号:定时刷新(120s 一次)下先后两次 refresh 的后台检测可能乱序完成,
+    /// 旧结果晚到会覆盖新结果,回主线程落笔前比对代际,只认最新一次。
+    private var refreshGeneration = 0
+
+    /// 检测移到后台线程:扫描 /Applications 与读取 Bundle Info.plist 都是磁盘 IO,
+    /// 在 MainActor 上周期执行会造成周期性卡顿。扫描结果回主线程发布;
+    /// 两次 detectAll 仍按 editors → terminals 顺序成对提交,发布语义与同步版一致。
     func refresh() {
-        installedEditors = editorDetector.detectAll()
-        installedTerminals = ExternalEditorDetector.withTerminalFallback(
-            terminalDetector.detectAll()
-        )
+        refreshGeneration += 1
+        let generation = refreshGeneration
+        let editorDetector = editorDetector
+        let terminalDetector = terminalDetector
+        Task.detached(priority: .utility) {
+            let editors = editorDetector.detectAll()
+            let terminals = ExternalEditorDetector.withTerminalFallback(
+                terminalDetector.detectAll()
+            )
+            await MainActor.run {
+                guard generation == self.refreshGeneration else { return }
+                self.installedEditors = editors
+                self.installedTerminals = terminals
+            }
+        }
     }
 }

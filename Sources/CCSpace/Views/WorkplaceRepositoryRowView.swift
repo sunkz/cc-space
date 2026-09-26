@@ -25,6 +25,8 @@ struct WorkplaceRepositoryRowView: View {
     let showsWorkBranchAction: Bool
     let onMergeDefaultBranchIntoCurrent: () -> Void
     let onCreateMergeRequest: (RepositoryConfig, String?) -> Void
+    /// 在浏览器打开仓库主页(右键/⋯ 菜单),URL 解析与失败反馈由宿主协调器承担。
+    let onOpenRepositoryWeb: (RepositoryConfig) -> Void
     let actionsDisabled: Bool
     let openActions: [OpenActionItem]
     let preferredOpenAction: OpenActionItem
@@ -38,6 +40,9 @@ struct WorkplaceRepositoryRowView: View {
     let onAbortInterruptedOperation: () -> Void
     @Environment(\.openWindow) private var openWindow
     @State private var showingDeleteConfirmation = false
+    /// 删除确认弹窗内容:在删除入口触发时刻做一次目录探测后写入。
+    /// 不能按 body 求值现算——此前 .alert 参数直接读计算属性,每帧一次主线程 stat。
+    @State private var deleteConfirmation: WorkplaceRepositoryDeleteConfirmationState?
     @State private var isHovered = false
     @State private var showingBranchMenu = false
     /// "菜单收起后弹 popover"的延迟任务句柄,视图消失时取消。
@@ -50,8 +55,12 @@ struct WorkplaceRepositoryRowView: View {
     /// 分支面板行内角标数据(最后提交时间 / 领先落后),弹窗打开时加载。
     @State private var branchMetadata: [String: GitBranchMetadata] = [:]
     @State private var branchMetadataTask: Task<Void, Never>?
+    /// 与 remoteBranchesGeneration 同款代际号:`Task.isCancelled` 通过后、落笔前,
+    /// 新任务可能已启动并写了更新的值——只有代际相等才允许覆盖。
+    @State private var branchMetadataGeneration = 0
     @State private var showingStashList = false
     @State private var stashEntries: [GitStashEntry] = []
+    @State private var stashGeneration = 0
     @State private var isLoadingStash = false
     @State private var stashTask: Task<Void, Never>?
     @State private var stashError: String?
@@ -153,15 +162,11 @@ struct WorkplaceRepositoryRowView: View {
         presentationState.canOpenLocalActions
     }
 
-    private var deleteConfirmationState: WorkplaceRepositoryDeleteConfirmationState {
-        WorkplaceRepositoryDeleteConfirmationState(
-            repositoryName: displayName,
-            localPath: state.localPath
-        )
-    }
-
     var body: some View {
-        CCSpaceInteractiveCard(selected: false) {
+        // 行内展示状态在 body 顶部求值一次,沿渲染路径复用(与详情页同款模式)。
+        // 命名 rowState:存储属性 state 已被 RepositorySyncState 占用,不能遮蔽。
+        let rowState = presentationState
+        return CCSpaceInteractiveCard(selected: false) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .center, spacing: 8) {
                     Image(systemName: "shippingbox.fill")
@@ -220,14 +225,17 @@ struct WorkplaceRepositoryRowView: View {
                                     localBranches: availableBranches,
                                     remoteBranchNames: remoteBranches,
                                     isLoadingRemoteBranches: isLoadingRemoteBranches,
-                                    canSwitchBranch: presentationState.canSwitchBranch,
+                                    canSwitchBranch: rowState.canSwitchBranch,
                                     onSwitchBranch: { branch in
-                                        onSwitchBranch(branch)
+                                        // 面板已由弹窗内容经环境入口同步直关(见 CCSpacePopover),
+                                        // 此处写 binding 仅作兑底同步;仍保持先关后派发的顺序。
                                         showingBranchMenu = false
+                                        onSwitchBranch(branch)
                                     },
                                     onCreateBranch: { branch, base in
-                                        onCreateBranch(branch, base)
+                                        // 同 onSwitchBranch:直关已发生,兑底同步后派发。
                                         showingBranchMenu = false
+                                        onCreateBranch(branch, base)
                                     },
                                     // 删除分支保持弹窗打开:操作完成后列表随分支快照刷新,
                                     // 被删分支从列表消失(与 Stash 列表行为一致)。
@@ -285,7 +293,7 @@ struct WorkplaceRepositoryRowView: View {
                                 Image(systemName: "arrow.clockwise")
                             }
                             .ccspaceIconActionButton()
-                            .disabled(!presentationState.canRetryClone)
+                            .disabled(!rowState.canRetryClone)
                             .ccspaceQuickHelp("重新克隆", providesLabel: true)
                         }
 
@@ -296,11 +304,11 @@ struct WorkplaceRepositoryRowView: View {
                                 Image(systemName: "square.and.arrow.down")
                             }
                             .ccspaceIconActionButton()
-                            .disabled(!presentationState.canPullLatest)
+                            .disabled(!rowState.canPullLatest)
                             .ccspaceQuickHelp("Pull 最新代码", providesLabel: true)
                         }
 
-                        if presentationState.canOpenLocalActions {
+                        if rowState.canOpenLocalActions {
                             if let repository {
                                 if repository.mrTargetBranches.count > 1 {
                                     Menu {
@@ -319,7 +327,7 @@ struct WorkplaceRepositoryRowView: View {
                                     .foregroundStyle(.secondary)
                                     .frame(width: 24, height: 24)
                                     .contentShape(Rectangle())
-                                    .disabled(!presentationState.canCreateMergeRequest)
+                                    .disabled(!rowState.canCreateMergeRequest)
                                     .ccspaceQuickHelp("选择 MR 目标分支，可在设置中配置")
                                 } else {
                                     Button {
@@ -329,7 +337,7 @@ struct WorkplaceRepositoryRowView: View {
                                         Image(systemName: "arrow.up.right.square")
                                     }
                                     .ccspaceIconActionButton()
-                                    .disabled(!presentationState.canCreateMergeRequest)
+                                    .disabled(!rowState.canCreateMergeRequest)
                                     .ccspaceQuickHelp(repository.mrTargetBranches.first.map { "向 \($0) 创建 MR，可在设置中配置目标分支" } ?? "向默认分支创建 MR，可在设置中配置目标分支")
                                 }
                             }
@@ -378,7 +386,7 @@ struct WorkplaceRepositoryRowView: View {
 
                         Menu {
                             // 与右键菜单同理:macOS 26 默认不渲染 SF Symbol 图标。
-                            actionMenuContent
+                            actionMenuContent(rowState: rowState)
                                 .labelStyle(.titleAndIcon)
                         } label: {
                             RepositoryOverflowMenuLabel()
@@ -390,7 +398,7 @@ struct WorkplaceRepositoryRowView: View {
                     }
                 }
 
-                if let lastError = presentationState.visibleErrorMessage {
+                if let lastError = rowState.visibleErrorMessage {
                     Text(lastError)
                         .font(.footnote)
                         .foregroundStyle(.red)
@@ -409,19 +417,19 @@ struct WorkplaceRepositoryRowView: View {
         .onHover { isHovered = $0 }
         .contextMenu {
             // macOS 26 右键菜单默认不渲染 Label 的 SF Symbol 图标,显式要求标题+图标。
-            actionMenuContent
+            actionMenuContent(rowState: rowState)
                 .labelStyle(.titleAndIcon)
         }
         .alert(
-            deleteConfirmationState.title,
+            deleteConfirmation?.title ?? "",
             isPresented: $showingDeleteConfirmation
         ) {
-            Button(deleteConfirmationState.confirmLabel, role: .destructive) {
+            Button(deleteConfirmation?.confirmLabel ?? "确认删除", role: .destructive) {
                 onDelete()
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text(deleteConfirmationState.message)
+            Text(deleteConfirmation?.message ?? "")
         }
         .alert(
             abortConfirmationState.title,
@@ -601,12 +609,15 @@ struct WorkplaceRepositoryRowView: View {
     /// popover 打开时按需加载分支元数据(时间/领先落后角标);失败静默,行内不展示角标即可。
     private func loadBranchMetadata() {
         branchMetadataTask?.cancel()
+        branchMetadataGeneration += 1
+        let generation = branchMetadataGeneration
         let localPath = state.localPath
         let infoService = infoService
         branchMetadataTask = Task {
             guard let metadata = await infoService.branchMetadata(localPath: localPath) else { return }
             guard !Task.isCancelled else { return }
             await MainActor.run {
+                guard generation == branchMetadataGeneration else { return }
                 branchMetadata = metadata
             }
         }
@@ -614,6 +625,8 @@ struct WorkplaceRepositoryRowView: View {
 
     private func loadStashList() {
         stashTask?.cancel()
+        stashGeneration += 1
+        let generation = stashGeneration
         isLoadingStash = true
         stashError = nil
         let localPath = state.localPath
@@ -622,6 +635,7 @@ struct WorkplaceRepositoryRowView: View {
             guard let entries = await infoService.stashList(localPath: localPath) else {
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
+                    guard generation == stashGeneration else { return }
                     stashError = "本地目录不存在：\(localPath)"
                     isLoadingStash = false
                 }
@@ -629,6 +643,7 @@ struct WorkplaceRepositoryRowView: View {
             }
             guard !Task.isCancelled else { return }
             await MainActor.run {
+                guard generation == stashGeneration else { return }
                 stashEntries = entries
                 isLoadingStash = false
             }
@@ -671,8 +686,13 @@ struct WorkplaceRepositoryRowView: View {
         .labelStyle(.titleAndIcon)
     }
 
+    /// 菜单内容(溢出菜单与右键菜单共用)是展示状态的最重消费者,
+    /// 由调用方(body)求值一次后传入,不在内部逐项重建 presentationState。
+    /// 参数命名 rowState:函数内仍需访问存储属性 state(RepositorySyncState),不能遮蔽。
     @ViewBuilder
-    private var actionMenuContent: some View {
+    private func actionMenuContent(
+        rowState: WorkplaceRepositoryRowPresentationState
+    ) -> some View {
         Button {
             onTogglePinned()
         } label: {
@@ -688,15 +708,15 @@ struct WorkplaceRepositoryRowView: View {
             } label: {
                 Label("重新克隆", systemImage: "arrow.clockwise")
             }
-            .disabled(!presentationState.canRetryClone)
+            .disabled(!rowState.canRetryClone)
         }
-        if presentationState.canOpenLocalActions {
+        if rowState.canOpenLocalActions {
             Button {
                 onRefreshStatus()
             } label: {
                 Label("刷新仓库状态", systemImage: "arrow.clockwise")
             }
-            .disabled(!presentationState.canRefreshStatus)
+            .disabled(!rowState.canRefreshStatus)
         }
         if let pullRepository, state.status == .success, state.hasLocalDirectory {
             Button {
@@ -704,15 +724,15 @@ struct WorkplaceRepositoryRowView: View {
             } label: {
                 Label("Pull 最新代码", systemImage: "square.and.arrow.down")
             }
-            .disabled(!presentationState.canPullLatest)
+            .disabled(!rowState.canPullLatest)
         }
-        if presentationState.canOpenLocalActions {
+        if rowState.canOpenLocalActions {
             Button {
                 onPush()
             } label: {
                 Label("Push 到远端", systemImage: "square.and.arrow.up")
             }
-            .disabled(!presentationState.canPushToRemote)
+            .disabled(!rowState.canPushToRemote)
             Divider()
             Button {
                 presentPopoverAfterMenuDismissal { showingBranchMenu = true }
@@ -726,21 +746,21 @@ struct WorkplaceRepositoryRowView: View {
             } label: {
                 Label("切到默认分支", systemImage: "arrow.uturn.backward.circle")
             }
-            .disabled(!presentationState.canSwitchBranch)
+            .disabled(!rowState.canSwitchBranch)
             if showsWorkBranchAction {
                 Button {
                     onSwitchToWorkBranch()
                 } label: {
                     Label("切到工作分支", systemImage: "hammer.circle")
                 }
-                .disabled(!presentationState.canSwitchBranch)
+                .disabled(!rowState.canSwitchBranch)
             }
             Button {
                 onMergeDefaultBranchIntoCurrent()
             } label: {
                 Label("合并默认分支到当前分支", systemImage: "arrow.triangle.merge")
             }
-            .disabled(!presentationState.canSwitchBranch)
+            .disabled(!rowState.canSwitchBranch)
             if let repository {
                 if repository.mrTargetBranches.count > 1 {
                     Menu {
@@ -748,7 +768,7 @@ struct WorkplaceRepositoryRowView: View {
                     } label: {
                         Label("创建 MR", systemImage: "arrow.up.right.square")
                     }
-                    .disabled(!presentationState.canCreateMergeRequest)
+                    .disabled(!rowState.canCreateMergeRequest)
                 } else {
                     Button {
                         let targetBranch = repository.mrTargetBranches.first
@@ -759,8 +779,18 @@ struct WorkplaceRepositoryRowView: View {
                             systemImage: "arrow.up.right.square"
                         )
                     }
-                    .disabled(!presentationState.canCreateMergeRequest)
+                    .disabled(!rowState.canCreateMergeRequest)
                 }
+            }
+            // 打开仓库主页只依赖配置的远端地址,不要求本地目录存在,
+            // 故放在 canOpenLocalActions 块之外,与 MR 同属"网页"动作组。
+            if let repository {
+                Button {
+                    onOpenRepositoryWeb(repository)
+                } label: {
+                    Label("在浏览器打开仓库", systemImage: "globe")
+                }
+                .ccspaceQuickHelp("打开该仓库的网页主页")
             }
             Divider()
             ForEach(openActions) { action in
@@ -785,15 +815,15 @@ struct WorkplaceRepositoryRowView: View {
             } label: {
                 Label("分支比较", systemImage: "arrow.left.arrow.right")
             }
-            .disabled(!presentationState.canOpenLocalActions)
+            .disabled(!rowState.canOpenLocalActions)
             .ccspaceQuickHelp("打开分支比较窗口：默认分支与当前分支的差异")
-            if presentationState.canOpenLocalActions {
+            if rowState.canOpenLocalActions {
                 Button {
                     presentWorkingDirectoryDiff()
                 } label: {
                     Label("查看改动", systemImage: "doc.text.magnifyingglass")
                 }
-                .disabled(!presentationState.canViewChanges)
+                .disabled(!rowState.canViewChanges)
                 .ccspaceQuickHelp(viewChangesMenuHelp)
                 Divider()
                 Button {
@@ -801,7 +831,7 @@ struct WorkplaceRepositoryRowView: View {
                 } label: {
                     Label("Stash 改动", systemImage: "archivebox")
                 }
-                .disabled(!presentationState.canStashChanges)
+                .disabled(!rowState.canStashChanges)
                 .ccspaceQuickHelp(stashMenuHelp)
                 Button {
                     presentPopoverAfterMenuDismissal {
@@ -819,7 +849,7 @@ struct WorkplaceRepositoryRowView: View {
                 } label: {
                     Label(abortConfirmationState.title, systemImage: "arrow.uturn.backward.circle.slash")
                 }
-                .disabled(!presentationState.canAbortInterruptedOperation)
+                .disabled(!rowState.canAbortInterruptedOperation)
                 .ccspaceQuickHelp("丢弃进行中的操作与冲突解决，回到操作前的状态")
                 Button {
                     showingConflictList = true
@@ -833,11 +863,17 @@ struct WorkplaceRepositoryRowView: View {
             Divider()
         }
         Button(role: .destructive) {
+            // 目录探测收敛到触发时刻,每次点击只 stat 一次,body 路径零 IO。
+            deleteConfirmation = WorkplaceRepositoryDeleteConfirmationState(
+                repositoryName: displayName,
+                localPath: state.localPath,
+                directoryPath: existingDirectoryPath(state.localPath)
+            )
             showingDeleteConfirmation = true
         } label: {
             Label("删除仓库", systemImage: "trash")
         }
-        .disabled(!presentationState.canDeleteRepository)
+        .disabled(!rowState.canDeleteRepository)
     }
 }
 
@@ -1185,7 +1221,9 @@ private extension SyncStatus {
 /// popover 是 transient behavior,alert 弹出时的焦点切换会把 popover 连带关闭,
 /// alert 随之消失,甚至出现"点了取消但删除仍被执行"的窗口期。删除分支不可恢复,
 /// 确认必须挂在稳定的宿主视图上(与 Stash 删除确认、中断操作确认一致)。
-private struct BranchDeleteConfirmationModifier: ViewModifier {
+/// internal 并供 BranchSwitchPopoverView 的无宿主回退路径复用:
+/// 此前 popover 内部维护着逐行复制的同款 alert,两处行为被迫人工同步。
+struct BranchDeleteConfirmationModifier: ViewModifier {
     @Binding var candidate: BranchDeleteCandidate?
     let onDeleteBranch: (String, String?) -> Void
     let onDeleteRemoteBranch: (String) -> Void

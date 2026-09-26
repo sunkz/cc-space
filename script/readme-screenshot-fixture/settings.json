@@ -2,7 +2,6 @@
   "workplaceRootPath": "/tmp/CCSpaceDemo/workspaces",
   "aiSettings": {
     "baseURL": "https://open.bigmodel.cn/api/paas/v4",
-    "modelName": "glm-5.3",
-    "apiKey": "sk-demo.ccspace.readme"
+    "modelName": "glm-5.3"
   }
 }

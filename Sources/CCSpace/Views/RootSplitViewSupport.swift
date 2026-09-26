@@ -91,13 +91,17 @@ final class WorkplaceDetailActionCoordinator: ObservableObject {
             defer {
                 self?.isRunningAction = false
                 self?.runningTask = nil
+                // refreshBranches 必须放在 isRunningAction 复位**之后**:
+                // 快照重载的守卫是 isActionLocked,若先 invalidate 再解锁,
+                // token 变化触发的 loadBranches 会被守卫跳过且没有第二次触发
+                // (token 不含锁位),分支面板的对号会停在旧值直到 30s 轮询。
+                if refreshBranches {
+                    self?.invalidateBranches()
+                }
             }
 
             do {
                 let result = try await operation()
-                if refreshBranches {
-                    self?.invalidateBranches()
-                }
                 // 用户已取消(如批量 pull 完成了部分仓库后取消):
                 // 不弹成功反馈、不发"已完成"通知,避免误导。
                 guard Task.isCancelled == false else { return }
@@ -135,6 +139,22 @@ enum RootSplitWorkplaceActions {
             },
             successFeedback: { result in
                 WorkplaceDetailFeedbackFactory.syncAll(result: result)
+            }
+        )
+    }
+
+    @MainActor
+    static func runOpenRepositoryWeb(
+        coordinator: WorkplaceDetailActionCoordinator,
+        resolveRepositoryURL: @escaping @MainActor () throws -> URL,
+        openInBrowser: @escaping @MainActor (URL) throws -> Void
+    ) {
+        coordinator.run(
+            actionName: "打开仓库主页",
+            // 浏览器打开即成功反馈,无需 toast;失败由协调器弹错误反馈。
+            successFeedback: { nil },
+            operation: {
+                try openInBrowser(resolveRepositoryURL())
             }
         )
     }

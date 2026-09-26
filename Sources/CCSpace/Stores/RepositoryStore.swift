@@ -73,6 +73,7 @@ enum RepositoryStoreError: LocalizedError, Equatable {
     case invalidBackupFormat
     case unsupportedBackupVersion(Int)
     case emptyBackup
+    case crossStoreRootMismatch
 
     var errorDescription: String? {
         switch self {
@@ -92,6 +93,8 @@ enum RepositoryStoreError: LocalizedError, Equatable {
             return "暂不支持该备份文件版本：\(version)"
         case .emptyBackup:
             return "备份文件中没有仓库"
+        case .crossStoreRootMismatch:
+            return "内部状态异常：仓库与工作区的数据目录不一致，已取消本次操作"
         }
     }
 }
@@ -215,6 +218,18 @@ final class RepositoryStore: ObservableObject {
     /// "仓库已删、关联清理失败只记 warning"的中间态。
     /// 注意:要求两个 Store 共用同一数据目录(生产环境由 RootSplitView 注入同一 fileStore)。
     func removeRepository(id: UUID, workplaceStore: WorkplaceStore) throws {
+        // 跨 Store 原子提交的前提是共用同一数据目录(注释级约定 → 运行时校验):
+        // 注入分叉时 applyPersistedState 会把内存更新到新状态、对方目录文件还是旧的,
+        // 内存与盘静默背离。宁可在提交前拦截。
+        guard fileStore.rootDirectory.standardizedFileURL
+            == workplaceStore.rootDirectoryForCrossStoreCheck.standardizedFileURL else {
+            throw RepositoryStoreError.crossStoreRootMismatch
+        }
+        // 与 updateRepository 一致校验 id 存在:不存在的 id 此前会照常触发
+        // 全量落盘(内容不变但 mtime/写放大照付),并把"删除成功"的假象传给调用方。
+        guard repositories.contains(where: { $0.id == id }) else {
+            throw RepositoryStoreError.notFound
+        }
         let updatedRepositories = repositories.filter { $0.id != id }
         let associationState = workplaceStore.stateAfterRemovingRepositoryAssociations(repositoryID: id)
 
@@ -234,10 +249,6 @@ final class RepositoryStore: ObservableObject {
                 syncStates: associationState.syncStates
             )
         }
-    }
-
-    func deduplicatePersistedRepositories() {
-        applyDeduplicationResult(Self.deduplicationResult(for: repositories))
     }
 
     func applyDeduplicationResult(_ result: RepositoryDeduplicationResult) {
@@ -263,25 +274,39 @@ final class RepositoryStore: ObservableObject {
         return current.filter { keptIDs.contains($0.id) == false }.map(\.repoName)
     }
 
-    nonisolated static func deduplicationResult(for repositories: [RepositoryConfig]) -> RepositoryDeduplicationResult {
+    nonisolated static func deduplicationResult(
+        for repositories: [RepositoryConfig],
+        protectedRepositoryIDs: Set<UUID> = []
+    ) -> RepositoryDeduplicationResult {
+        // 保留优先级排序:被工作区/同步态引用者 > createdAt 更早者 > 其余。
+        // 旧逻辑按数组顺序"保留第一条、硬删其余",可能删掉的恰是被工作区引用的
+        // 那条而留下新添加的重复记录——工作区静默丢仓库。结果仍按原数组顺序输出,
+        // 不改变列表展示序。
+        let prioritySorted = repositories.sorted { lhs, rhs in
+            let lhsProtected = protectedRepositoryIDs.contains(lhs.id)
+            let rhsProtected = protectedRepositoryIDs.contains(rhs.id)
+            if lhsProtected != rhsProtected { return lhsProtected }
+            return lhs.createdAt < rhs.createdAt
+        }
+
         var existingNormalizedURLs = Set<String>()
         var existingNames = Set<String>()
-        var changed = false
+        var keptIDs = Set<UUID>()
 
-        let deduplicatedRepositories = repositories.filter { repository in
+        for repository in prioritySorted {
             let normalizedURL = normalizedGitURLForComparison(repository.gitURL)
             if existingNormalizedURLs.contains(normalizedURL) || existingNames.contains(repository.repoName) {
-                changed = true
-                return false
+                continue
             }
             existingNormalizedURLs.insert(normalizedURL)
             existingNames.insert(repository.repoName)
-            return true
+            keptIDs.insert(repository.id)
         }
 
+        let deduplicatedRepositories = repositories.filter { keptIDs.contains($0.id) }
         return RepositoryDeduplicationResult(
             repositories: deduplicatedRepositories,
-            changed: changed
+            changed: deduplicatedRepositories.count != repositories.count
         )
     }
 
@@ -383,9 +408,15 @@ final class RepositoryStore: ObservableObject {
         var skippedCount = 0
         var mergedCount = 0
 
-        for entry in cleanedEntries {
+        for (entryIndex, entry) in cleanedEntries.enumerated() {
             let gitURL = entry.gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
-            let repoName = try validatedRepositoryName(from: gitURL)
+            // 单条非法 URL 不得让整个导入中止:备份文件可能来自不同版本/手工编辑,
+            // 一条坏数据毁掉全部有效条目(含本可合并的更新)是最差结果。计入 skipped。
+            guard let repoName = try? validatedRepositoryName(from: gitURL) else {
+                repositoryStoreLog.error("event=import_entry_rejected index=\(entryIndex)")
+                skippedCount += 1
+                continue
+            }
 
             if let existingIndex = updatedRepositories.firstIndex(where: { Self.gitURLsMatch($0.gitURL, gitURL) }) {
                 var changed = false

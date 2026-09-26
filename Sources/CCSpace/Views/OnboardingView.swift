@@ -14,6 +14,9 @@ struct OnboardingView: View {
     @State private var addedRepositoryIDs: [UUID] = []
     @State private var feedback: CCSpaceFeedback?
     @State private var appeared = false
+    /// 备份导入进行中:读文件 + JSON 解码 + store 落盘对大文件不快,
+    /// 期间禁用导入按钮并显示加载指示,避免"点了没反应"。
+    @State private var isImporting = false
 
     enum OnboardingStep: Int, CaseIterable {
         case rootDirectory = 0
@@ -33,6 +36,15 @@ struct OnboardingView: View {
             stepContent
                 .frame(maxWidth: 480)
                 .padding(.horizontal, 48)
+
+            // 反馈横幅挂在步骤之外:此前只渲染在"添加仓库"步骤内,
+            // 选择根目录/完成等步骤的失败没有任何可见提示,用户以为按钮失灵。
+            if let shownFeedback = feedback {
+                CCSpaceFeedbackBanner(feedback: shownFeedback, onClose: { self.feedback = nil })
+                    .frame(maxWidth: 480)
+                    .padding(.horizontal, 48)
+                    .transition(.opacity.combined(with: .scale(scale: 0.95)))
+            }
 
             Spacer(minLength: 20)
 
@@ -207,15 +219,19 @@ struct OnboardingView: View {
                 Button {
                     importRepositoriesBackup()
                 } label: {
-                    Label("从备份文件导入", systemImage: "doc.badge.arrow.up")
+                    HStack(spacing: 6) {
+                        if isImporting {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Label("从备份文件导入", systemImage: "doc.badge.arrow.up")
+                    }
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.regular)
+                .disabled(isImporting)
 
-                if let feedback {
-                    CCSpaceFeedbackBanner(feedback: feedback)
-                        .transition(.opacity.combined(with: .scale(scale: 0.95)))
-                }
+                // 反馈横幅已提升到步骤外统一渲染(见 body),这里不再重复挂。
 
                 repositoryList
             }
@@ -438,8 +454,14 @@ struct OnboardingView: View {
     }
 
     private func completeOnboarding() {
-        try? settingsStore.updateHasCompletedOnboarding(true)
-        onComplete()
+        // 写盘失败不能再 `try?` 吞掉:不落盘下次启动会意外重放整个引导,
+        // 且用户完全没有感知。失败时留在引导页展示错误,允许重试"完成"。
+        do {
+            try settingsStore.updateHasCompletedOnboarding(true)
+            onComplete()
+        } catch {
+            feedback = CCSpaceFeedbackFactory.actionError(action: "完成引导设置", error: error)
+        }
     }
 
     private func chooseRootDirectory() {
@@ -490,22 +512,31 @@ struct OnboardingView: View {
 
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
-        do {
-            let idsBefore = Set(repositoryStore.repositories.map(\.id))
-            let result = try repositoryStore.importBackup(from: url)
-            let newRepos = repositoryStore.repositories.filter { !idsBefore.contains($0.id) }
-            withAnimation(.snappy(duration: 0.25)) {
-                addedRepositoryIDs.append(contentsOf: newRepos.map(\.id))
+        // 导入是重活(读文件 + JSON 解码 + store 落盘),包进 Task 异步执行:
+        // isImporting 先落一帧让忙碌指示渲染出来,再做导入,最后回 MainActor
+        // 更新 UI。RepositoryStore 是 @MainActor,导入本体只能在主 actor 上跑,
+        // 这里至少保证忙碌态可见、按钮不可重复触发。
+        isImporting = true
+        let repositoryStore = repositoryStore
+        Task { @MainActor in
+            defer { isImporting = false }
+            do {
+                let idsBefore = Set(repositoryStore.repositories.map(\.id))
+                let result = try repositoryStore.importBackup(from: url)
+                let newRepos = repositoryStore.repositories.filter { !idsBefore.contains($0.id) }
+                withAnimation(.snappy(duration: 0.25)) {
+                    addedRepositoryIDs.append(contentsOf: newRepos.map(\.id))
+                }
+                if result.importedCount > 0 {
+                    feedback = CCSpaceFeedback(style: .success, message: "已导入 \(result.importedCount) 个仓库")
+                } else if result.mergedCount > 0 {
+                    feedback = CCSpaceFeedback(style: .info, message: "已合并 \(result.mergedCount) 个仓库配置")
+                } else {
+                    feedback = CCSpaceFeedback(style: .info, message: "备份中的仓库均已存在")
+                }
+            } catch {
+                feedback = CCSpaceFeedbackFactory.actionError(action: "导入备份", error: error)
             }
-            if result.importedCount > 0 {
-                feedback = CCSpaceFeedback(style: .success, message: "已导入 \(result.importedCount) 个仓库")
-            } else if result.mergedCount > 0 {
-                feedback = CCSpaceFeedback(style: .info, message: "已合并 \(result.mergedCount) 个仓库配置")
-            } else {
-                feedback = CCSpaceFeedback(style: .info, message: "备份中的仓库均已存在")
-            }
-        } catch {
-            feedback = CCSpaceFeedbackFactory.actionError(action: "导入备份", error: error)
         }
     }
 }

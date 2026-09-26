@@ -14,6 +14,14 @@ struct BranchCompareWindowPayload: Codable, Hashable {
 struct BranchCompareWindowView: View {
     let payload: BranchCompareWindowPayload
     let gitService: GitServicing
+    /// 分支上下文与 diff 的共享加载器(含代际防过期写回),视图只消费加载结果。
+    @StateObject private var context: RepositoryWindowContext
+
+    init(payload: BranchCompareWindowPayload, gitService: GitServicing) {
+        self.payload = payload
+        self.gitService = gitService
+        _context = StateObject(wrappedValue: RepositoryWindowContext(gitService: gitService))
+    }
 
     @State private var baseRef: String?
     @State private var headRef: String?
@@ -23,16 +31,13 @@ struct BranchCompareWindowView: View {
     @State private var isLoading = true
     @State private var errorMessage: String?
     @State private var divergence: GitRefDivergence?
-    @State private var loadTask: Task<Void, Never>?
-    @State private var contextTask: Task<Void, Never>?
     /// 首次加载是否已完成;跳过刚打开时的 becomeKey 重叠(与 Diff/提交记录窗口同一模式)。
     @State private var hasLoadedInitialData = false
     @State private var showingBasePicker = false
     @State private var showingHeadPicker = false
-    /// 分支上下文加载代际号:每次 loadBranchContext 递增,旧任务写回前比对,
-    /// 防止"isCancelled 检查通过但落笔晚于新任务"造成旧结果覆盖新结果。
-    @State private var contextRequestID = 0
-    @State private var diffRequestID = 0
+    /// payload 代际号:WindowGroup 复用同一窗口更换 payload 时,旧仓库的进行中加载
+    /// 不得再把结果写进新仓库的状态(与 DiffWindowView 的 payloadGeneration 同模式)。
+    @State private var payloadGeneration = 0
 
     /// 与 Diff 窗口同构的来源描述:驱动 diff 加载与"展示所有行"的新侧策略。
     private var source: DiffWindowPayload.Source {
@@ -89,8 +94,22 @@ struct BranchCompareWindowView: View {
             reloadDiff()
         }
         .onDisappear {
-            loadTask?.cancel()
-            contextTask?.cancel()
+            context.cancelAll()
+        }
+        .onChange(of: payload) { _, _ in
+            // WindowGroup(for:) 复用同一窗口更换 payload 时 .task/onAppear 不会重跑:
+            // 重置自持状态并按新参数重新加载,避免显示旧仓库的比较结果。
+            // 先作废旧代际:旧仓库在途加载的写回会在代际比对处被丢弃。
+            payloadGeneration += 1
+            baseRef = payload.base
+            headRef = payload.head
+            entries = []
+            divergence = nil
+            errorMessage = nil
+            isLoading = true
+            hasLoadedInitialData = false
+            loadBranchContext()
+            reloadDiff()
         }
         .onWindowBecomeKey {
             // 相等 payload 的 openWindow 只聚焦已开窗口不重建内容:聚焦时刷新上下文与差异;
@@ -191,79 +210,68 @@ struct BranchCompareWindowView: View {
     // MARK: - 加载
 
     /// 分支名单/远端跟踪分支:供两侧选择器;顺带兜底解析未提供的初始 base/head。
+    /// 并发取数与代际防过期写回收进 RepositoryWindowContext,这里只消费快照。
     private func loadBranchContext() {
-        contextTask?.cancel()
-        contextRequestID += 1
-        let requestID = contextRequestID
-        let path = payload.localPath
-        let service = gitService
-        contextTask = Task {
-            async let branchesTask = service.branches(in: path)
-            async let remoteTask = service.remoteTrackingBranches(in: path)
-            async let currentTask = service.currentBranch(in: path)
-            async let defaultTask = service.defaultBranch(in: path)
-            let branches = await branchesTask
-            let remote = await remoteTask
-            let current = await currentTask
-            let defaultBranch = await defaultTask
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                // isCancelled 检查与新任务发起之间仍可能隔着一次挂起:
-                // 落笔前再比对代际号,旧一代结果直接作废。
-                guard requestID == contextRequestID else { return }
-                localBranches = branches
-                remoteTrackingBranches = remote
-                var didResolve = false
-                if baseRef == nil {
-                    baseRef = defaultBranch ?? current ?? branches.first
-                    didResolve = true
-                }
-                if headRef == nil {
-                    headRef = current ?? branches.first
-                    didResolve = true
-                }
-                // 上下文已就绪仍解析不出比较侧:空仓库(无任何分支)。
-                if baseRef == nil || headRef == nil {
-                    entries = []
-                    divergence = nil
-                    errorMessage = "仓库暂无分支，无法比较"
-                    isLoading = false
-                    hasLoadedInitialData = true
-                    return
-                }
-                // 只在首次补全比较侧时触发加载;刷新场景由调用方自己 reloadDiff。
-                if didResolve {
-                    reloadDiff()
-                }
+        let generation = payloadGeneration
+        context.loadBranchContext(
+            directory: payload.localPath,
+            includeMetadata: false
+        ) { [self] snapshot in
+            // payload 已更换(复用窗口换仓库)时旧仓库快照不得落笔。
+            guard generation == payloadGeneration else { return }
+            localBranches = snapshot.branches
+            remoteTrackingBranches = snapshot.remoteTrackingBranches
+            var didResolve = false
+            if baseRef == nil {
+                baseRef = snapshot.defaultBranch ?? snapshot.currentBranch ?? snapshot.branches.first
+                didResolve = true
+            }
+            if headRef == nil {
+                headRef = snapshot.currentBranch ?? snapshot.branches.first
+                didResolve = true
+            }
+            // 上下文已就绪仍解析不出比较侧:空仓库(无任何分支)。
+            if baseRef == nil || headRef == nil {
+                entries = []
+                divergence = nil
+                errorMessage = "仓库暂无分支，无法比较"
+                isLoading = false
+                hasLoadedInitialData = true
+                return
+            }
+            // 只在首次补全比较侧时触发加载;刷新场景由调用方自己 reloadDiff。
+            if didResolve {
+                reloadDiff()
             }
         }
     }
 
     private func reloadDiff() {
-        loadTask?.cancel()
         guard let base = baseRef, let head = headRef else {
             // 分支上下文还没就绪(空仓库等):保持加载态,context 解析后会再次触发。
+            // 早退同样作废在途 diff 写回,窄窗口内旧任务的迟到落笔被代际拦下。
+            context.invalidateDiffLoads()
             isLoading = true
             return
         }
         isLoading = true
         errorMessage = nil
-        // 与 loadBranchContext 同一代际号模式:isCancelled 检查与 MainActor.run
-        // 落笔之间隔着挂起,快速连续切 base/head 时旧任务可能晚于新任务落笔。
-        diffRequestID += 1
-        let requestID = diffRequestID
-        let path = payload.localPath
-        let service = gitService
-        loadTask = Task {
-            let diffEntries = await service.diffBranches(base: base, head: head, in: path)
-            let divergenceResult = await service.divergence(base: base, head: head, in: path)
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                guard requestID == diffRequestID else { return }
+        let generation = payloadGeneration
+        context.loadCompareDiff(directory: payload.localPath, base: base, head: head) { [self] outcome in
+            // payload 已更换(复用窗口换仓库)时旧仓库结果不得落笔。
+            guard generation == payloadGeneration else { return }
+            switch outcome {
+            case .success(let diffEntries, let divergenceResult):
                 entries = diffEntries
                 divergence = divergenceResult
                 isLoading = false
                 hasLoadedInitialData = true
+            case .failure(let message):
+                // 查询失败与「两侧内容完全一致」是两回事:展示错误态而非空态。
+                errorMessage = message
+                isLoading = false
+            case .cancelled:
+                break
             }
         }
     }

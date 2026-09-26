@@ -38,7 +38,10 @@ struct WorkplaceEditService {
         branch: String?,
         progressHandler: WorkplaceOperationProgressHandler? = nil
     ) async throws {
-        guard let originalWorkplace = workplaceStore.workplaces.first(where: { $0.id == workplaceID }) else { return }
+        // 记录在 await 窗口内被磁盘刷新等路径删除时必须报错,不能静默"保存成功"。
+        guard let originalWorkplace = workplaceStore.workplaces.first(where: { $0.id == workplaceID }) else {
+            throw WorkplaceStoreError.workplaceNotFound
+        }
         guard selectedRepositoryIDs.isEmpty == false else { throw WorkplaceStoreError.noRepositoriesSelected }
         let validatedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedBranch = branch?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -73,6 +76,18 @@ struct WorkplaceEditService {
             throw WorkplaceStoreError.pathAlreadyExistsOnDisk
         }
         try ensureManagedSyncStates(originalStates, within: oldPath)
+
+        // ── 磁盘刷新豁免(瞬态标记,必须先于任何磁盘改动)─────────────────────
+        // 从此刻起直到 applyWorkplaceEdit 落库,记录仍指向 oldPath,而磁盘上的目录
+        // 可能已被整树改名/暂存移出。期间并发的定时磁盘刷新若按这一刻的陈旧磁盘
+        // 视图判断,会把"记录在、目录不在"的工作区整条删除(含全部 sync states),
+        // 且不可恢复。防线:先把本工作区全部状态行置为瞬态(被移出→.removing,
+        // 保留→.switching)。diskRefreshResult 对含瞬态行的工作区一律豁免删除
+        // (isWorkplaceOperationInFlight),对瞬态行本身豁免"缺失→假失败"改写。
+        // 失败/回滚路径用 originalStates 原样恢复;成功路径由 applyWorkplaceEdit
+        // 整体覆盖,瞬态不会外泄。瞬态在重启解码时归位 .idle,崩溃也不遗留。
+        workplaceStore.setSyncStatus(.removing, for: workplaceID, repositoryIDs: removedRepositoryIDs)
+        workplaceStore.setSyncStatus(.switching, for: workplaceID, repositoryIDs: nextSelectedIDs)
 
         let renamed = newPath != oldPath
         let removalStagingRoot = FileManager.default.temporaryDirectory
@@ -221,7 +236,10 @@ struct WorkplaceEditService {
                     // 必须把目录自身与每条待克隆的仓库目标路径一起加锁。
                     // 闭包内只捕获 Sendable 的值(不可变副本),避免捕获 MainActor 隔离状态。
                     let workplaceForClone = updatedWorkplace
-                    var cloneLockPaths = [newPath]
+                    // oldPath 也入锁:此刻记录仍指向 oldPath,磁盘刷新的锁快照含
+                    // canonical(oldPath) 时,isWorkplaceOperationInFlight 会据此豁免
+                    // 该工作区(克隆持续数分钟,期间记录路径在盘上"缺失"是正常的)。
+                    var cloneLockPaths = [newPath, oldPath]
                     for repository in addedRepositories {
                         cloneLockPaths.append(
                             try WorkplaceStore.repositoryPath(
@@ -248,22 +266,98 @@ struct WorkplaceEditService {
                 at: removalStagingRoot.path
             )
         } catch {
-            do {
-                // 回滚删除的是整棵已克隆仓库目录,递归删除可能耗时很久,移出主线程。
-                try await removeClonedItemsIfNeeded(clonedStates)
-            } catch {
-                editServiceLog.error("event=rollback_cleanup_failed reason=\(error.localizedDescription)")
+            await performEditRollback(
+                renamed: renamed,
+                oldPath: oldPath,
+                newPath: newPath,
+                clonedStates: clonedStates,
+                branchRollbacks: branchRollbacks,
+                stagedRemovals: stagedRemovals,
+                removalStagingRoot: removalStagingRoot
+            )
+            // 状态回滚:编辑期间本工作区的行被瞬态标记覆盖(见 do 前的豁免注释),
+            // 现用入口快照原样恢复(含被移出仓库的行)。记录若已在 await 窗口内被
+            // 并发删除,不能为已消失的工作区补写孤儿行,只留痕。
+            if workplaceStore.workplaces.contains(where: { $0.id == workplaceID }) {
+                workplaceStore.replaceSyncStates(originalStates, for: workplaceID)
+            } else {
+                editServiceLog.error(
+                    "event=edit_state_rollback_skipped reason=workplace_record_missing workplace_id=\(workplaceID)"
+                )
             }
-            // 暂存根目录里可能装着多棵被移出的仓库树,只有全部还原成功才允许清理;
-            // 否则里面残留的仓库树会被一并删掉,变成用户的本地仓库永久丢失。
-            var stagedItemsRestored = true
-            if renamed {
-                do {
-                    // 回滚同样可能跨卷移动整棵目录树,移出主线程。
-                    try await Self.moveItemOffMainThread(fromPath: newPath, toPath: oldPath)
-                } catch {
-                    editServiceLog.error("event=rollback_rename_failed reason=\(error.localizedDescription)")
-                }
+            throw error
+        }
+    }
+
+    /// 尽力回滚编辑流程已产生的本地变更。所有失败留痕后吞掉(原始错误由调用方抛出);
+    /// 暂存目录只有全部还原成功才删除,否则保留供用户手工取回。
+    ///
+    /// 回滚与正向路径一样必须持锁:等锁的 pull/push 若趁回滚移动目录/切分支时插入,
+    /// 会对同一工作树交错写。锁获取本身被取消时降级为无锁尽力回滚(原始错误往往
+    /// 就来自取消,回滚不能再等待),并留痕供排查。
+    private func performEditRollback(
+        renamed: Bool,
+        oldPath: String,
+        newPath: String,
+        clonedStates: [RepositorySyncState],
+        branchRollbacks: [WorkplaceEditBranchRollback],
+        stagedRemovals: [(originalPath: String, stagedPath: String)],
+        removalStagingRoot: URL
+    ) async {
+        let lock = RepositoryOperationLock.shared
+        var rollbackLockPaths = [oldPath, newPath]
+        rollbackLockPaths += clonedStates.map(\.localPath)
+        for item in stagedRemovals {
+            rollbackLockPaths += [
+                item.originalPath,
+                Self.replacePathPrefix(item.originalPath, oldPrefix: newPath, newPrefix: oldPath),
+            ]
+        }
+        for rollback in branchRollbacks {
+            rollbackLockPaths += [
+                rollback.path,
+                Self.replacePathPrefix(rollback.path, oldPrefix: newPath, newPrefix: oldPath),
+            ]
+        }
+        var rollbackLocksAcquired: [String] = []
+        // 与 withLockPaths 相同的规范化:按 canonicalLockKey(标准化+解析 symlink+
+        // 小写)排序后逐个获取。按原始路径排序与按规范 key 排序可能不一致
+        // (symlink 别名/大小写差异),会造成与其它多路径持有者的获取顺序反转,
+        // 产生环形等待死锁。acquire 内部对 key 的再归一化是幂等的。
+        let rollbackLockKeys = Set(
+            rollbackLockPaths.map { LocalPathSafety.canonicalLockKey(for: $0) }
+        ).sorted()
+        for key in rollbackLockKeys {
+            do {
+                try await lock.acquire(path: key)
+                rollbackLocksAcquired.append(key)
+            } catch {
+                // 等待中被取消:放弃继续收集,带已拿到的锁开始回滚。
+                editServiceLog.error("event=rollback_lock_acquire_stopped reason=\(error.localizedDescription)")
+                break
+            }
+        }
+        // 本函数所有失败路径都在内部 catch 并留痕,不会中途 throw,
+        // 因此按序释放即可,无需 defer(defer 里只能 fire-and-forget,会留出释放真空窗)。
+        do {
+            // 回滚删除的是整棵已克隆仓库目录,递归删除可能耗时很久,移出主线程。
+            try await removeClonedItemsIfNeeded(clonedStates)
+        } catch {
+            editServiceLog.error("event=rollback_cleanup_failed reason=\(error.localizedDescription)")
+        }
+        // 暂存根目录里可能装着多棵被移出的仓库树,只有全部还原成功才允许清理;
+        // 否则里面残留的仓库树会被一并删掉,变成用户的本地仓库永久丢失。
+        var stagedItemsRestored = true
+        if renamed {
+            var renameRolledBack = true
+            do {
+                // 回滚同样可能跨卷移动整棵目录树,移出主线程。
+                try await Self.moveItemOffMainThread(fromPath: newPath, toPath: oldPath)
+            } catch {
+                renameRolledBack = false
+                editServiceLog.fault("event=rollback_rename_failed reason=\(error.localizedDescription)")
+            }
+            if renameRolledBack {
                 let rollbackBranches = branchRollbacks.map { rollback in
                     WorkplaceEditBranchRollback(
                         path: Self.replacePathPrefix(
@@ -296,29 +390,36 @@ struct WorkplaceEditService {
                     stagedItemsRestored = false
                 }
             } else {
-                do {
-                    try await restoreCheckedOutBranches(branchRollbacks)
-                } catch {
-                    editServiceLog.error("event=rollback_branch_restore_failed reason=\(error.localizedDescription)")
-                }
-                do {
-                    try await restoreStagedItems(stagedRemovals)
-                } catch {
-                    editServiceLog.error("event=rollback_restore_failed reason=\(error.localizedDescription)")
-                    stagedItemsRestored = false
-                }
+                // 目录树仍在 newPath 下:后续按 oldPath 做的分支恢复/暂存还原注定
+                // 级联失败,短路保留现场,暂存目录一律不删(等值于还原失败路径)。
+                stagedItemsRestored = false
+                editServiceLog.fault("event=rollback_short_circuited reason=directory_still_at_new_path path=\(newPath, privacy: .private)")
             }
-            if stagedItemsRestored {
-                // 递归删除(暂存目录里可能是整棵仓库树)移出主线程。
-                await Self.removeItemOffMainThread(
-                    syncCoordinator.fileSystemService,
-                    at: removalStagingRoot.path
-                )
-            } else {
-                // 保留暂存目录,用户可从该路径手工取回未还原的仓库目录。
-                editServiceLog.error("event=rollback_incomplete staging_root_preserved path=\(removalStagingRoot.path, privacy: .private)")
+        } else {
+            do {
+                try await restoreCheckedOutBranches(branchRollbacks)
+            } catch {
+                editServiceLog.error("event=rollback_branch_restore_failed reason=\(error.localizedDescription)")
             }
-            throw error
+            do {
+                try await restoreStagedItems(stagedRemovals)
+            } catch {
+                editServiceLog.error("event=rollback_restore_failed reason=\(error.localizedDescription)")
+                stagedItemsRestored = false
+            }
+        }
+        if stagedItemsRestored {
+            // 递归删除(暂存目录里可能是整棵仓库树)移出主线程。
+            await Self.removeItemOffMainThread(
+                syncCoordinator.fileSystemService,
+                at: removalStagingRoot.path
+            )
+        } else {
+            // 保留暂存目录,用户可从该路径手工取回未还原的仓库目录。
+            editServiceLog.error("event=rollback_incomplete staging_root_preserved path=\(removalStagingRoot.path, privacy: .private)")
+        }
+        for path in rollbackLocksAcquired.reversed() {
+            await lock.release(path: path)
         }
     }
 

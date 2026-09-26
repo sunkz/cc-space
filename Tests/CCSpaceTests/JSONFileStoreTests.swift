@@ -90,4 +90,95 @@ final class JSONFileStoreTests: XCTestCase {
         let loadedSettings: AppSettings = try store.load(AppSettings.self, from: "settings.json")
         XCTAssertEqual(loadedSettings.workplaceRootPath, "/original")
     }
+
+    // MARK: - rename(2) 原子覆盖
+
+    func test_atomicReplaceOverwritesExistingDestinationAtomically() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let destination = root.appendingPathComponent("target.json")
+        let staged = root.appendingPathComponent("staged.json")
+        try Data("old".utf8).write(to: destination)
+        try Data("new".utf8).write(to: staged)
+
+        try JSONFileStore.atomicReplace(stagedURL: staged, destinationURL: destination)
+
+        XCTAssertEqual(try Data(contentsOf: destination), Data("new".utf8))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staged.path))
+    }
+
+    func test_atomicReplaceThrowsPosixErrorWhenSourceMissing() {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let missing = root.appendingPathComponent("does-not-exist.json")
+        let destination = root.appendingPathComponent("target.json")
+
+        XCTAssertThrowsError(try JSONFileStore.atomicReplace(stagedURL: missing, destinationURL: destination))
+    }
+
+    func test_saveOverwritePreserves0600Permissions() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = JSONFileStore(rootDirectory: root)
+        let settings = AppSettings(workplaceRootPath: "/tmp/workplaces")
+
+        try store.save(settings, as: "settings.json")
+        // 第二次保存走 rename 覆盖路径:权限应随暂存文件(0600)带到目标。
+        try store.save(AppSettings(workplaceRootPath: "/tmp/other"), as: "settings.json")
+
+        let attrs = try FileManager.default.attributesOfItem(atPath: root.appendingPathComponent("settings.json").path)
+        let permissions = (attrs[.posixPermissions] as? NSNumber)?.uint16Value
+        XCTAssertEqual(permissions, 0o600)
+        let loaded: AppSettings = try store.load(AppSettings.self, from: "settings.json")
+        XCTAssertEqual(loaded.workplaceRootPath, "/tmp/other")
+    }
+
+    // MARK: - 启动清理对备份的保全
+
+    func test_cleanupStaleStagingDirectoriesRescuesBackupBeforeDeletion() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+
+        // 伪造一个"足够老"的崩溃残留暂存目录,内含 backup/settings.json(唯一副本)。
+        let staleStaging = root.appendingPathComponent(".ccspace-json-write-\(UUID().uuidString)", isDirectory: true)
+        let backupDirectory = staleStaging.appendingPathComponent("backup", isDirectory: true)
+        try fileManager.createDirectory(at: backupDirectory, withIntermediateDirectories: true)
+        try Data("precious".utf8).write(to: backupDirectory.appendingPathComponent("settings.json"))
+        try fileManager.setAttributes(
+            [.modificationDate: Date.distantPast],
+            ofItemAtPath: staleStaging.path
+        )
+        // 同时放一个不含 backup 的普通残留,应被直接删掉。
+        let emptyStaging = root.appendingPathComponent(".ccspace-json-write-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: emptyStaging, withIntermediateDirectories: true)
+        try fileManager.setAttributes(
+            [.modificationDate: Date.distantPast],
+            ofItemAtPath: emptyStaging.path
+        )
+
+        JSONFileStore.cleanupStaleStagingDirectories(in: root)
+
+        XCTAssertFalse(fileManager.fileExists(atPath: staleStaging.path))
+        XCTAssertFalse(fileManager.fileExists(atPath: emptyStaging.path))
+        // 备份被逃到 rollback-backup 前缀下,内容完好可手工取回。
+        let survivors = try fileManager.contentsOfDirectory(atPath: root.path)
+        let rescued = survivors.filter { $0.hasPrefix(".ccspace-json-rollback-backup-") }
+        XCTAssertEqual(rescued.count, 1)
+        let rescuedFile = root
+            .appendingPathComponent(rescued[0], isDirectory: true)
+            .appendingPathComponent("settings.json")
+        XCTAssertEqual(try Data(contentsOf: rescuedFile), Data("precious".utf8))
+    }
+
+    func test_cleanupStaleStagingDirectoriesLeavesFreshStagingAlone() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        let freshStaging = root.appendingPathComponent(".ccspace-json-write-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: freshStaging, withIntermediateDirectories: true)
+
+        JSONFileStore.cleanupStaleStagingDirectories(in: root)
+
+        XCTAssertTrue(fileManager.fileExists(atPath: freshStaging.path))
+    }
 }

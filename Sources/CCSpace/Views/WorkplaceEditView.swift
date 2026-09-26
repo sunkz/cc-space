@@ -134,8 +134,8 @@ struct WorkplaceEditView: View {
                         CCSpaceFeedbackBanner(feedback: branchChangeFeedback)
                     }
 
-                    if let feedback {
-                        CCSpaceFeedbackBanner(feedback: feedback)
+                    if let shownFeedback = feedback {
+                        CCSpaceFeedbackBanner(feedback: shownFeedback, onClose: { self.feedback = nil })
                     }
                 }
                 .padding(16)
@@ -161,6 +161,7 @@ struct WorkplaceEditView: View {
         }
         .frame(minWidth: 440, idealWidth: 520, minHeight: 360, idealHeight: 460)
         .navigationTitle("编辑工作区")
+        .ccspaceAutoDismissFeedback($feedback)
         .interactiveDismissDisabled(isSaving)
     }
 

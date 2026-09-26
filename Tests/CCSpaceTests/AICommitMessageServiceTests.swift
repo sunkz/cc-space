@@ -213,6 +213,17 @@ final class AICommitMessageServiceTests: XCTestCase {
         XCTAssertThrowsError(try AICommitEndpoint.make(baseURL: "   "))
     }
 
+    /// Base URL 含 query/fragment 时,拼接 /chat/completions 会得到错误端点,必须拒绝。
+    func test_endpointMakeRejectsBaseURLWithQueryOrFragment() {
+        XCTAssertThrowsError(try AICommitEndpoint.make(baseURL: "https://api.example.com/v1?key=1")) { error in
+            guard case AICommitMessageError.invalidBaseURL = error else {
+                return XCTFail("应为 invalidBaseURL,实际:\(error)")
+            }
+        }
+        XCTAssertThrowsError(try AICommitEndpoint.make(baseURL: "https://api.example.com/v1#frag"))
+        XCTAssertThrowsError(try AICommitEndpoint.makeModelsEndpoint(baseURL: "https://api.example.com/v1?key=1"))
+    }
+
     /// 明文 http 仅放行本机回环;远端主机一律拒绝(HTTPS-only)。
     func test_endpointMakeRejectsPlainHTTPForNonLoopbackHosts() {
         XCTAssertThrowsError(try AICommitEndpoint.make(baseURL: "http://api.example.com/v1")) { error in

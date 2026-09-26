@@ -44,9 +44,13 @@ cmd_run() {
     local dist_dir="${ROOT_DIR}/dist"
     local app_bundle="${dist_dir}/${APP_NAME}.app"
 
-    # Derive version from latest git tag
+    # Derive version from latest tag
+    # 用全局最新 tag 而非 `describe --tags --abbrev=0`(HEAD 最近可达 tag):
+    # 分支分叉后后者会取到旧 tag,本地跑的 app 版本号与最新发布不一致。
     local version
-    version="$(git -C "${ROOT_DIR}" describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")"
+    version="$(git -C "${ROOT_DIR}" tag --list 'v[0-9]*' --sort=-version:refname 2>/dev/null \
+        | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
+    version="${version:-v0.0.0}"
     version="${version#v}"
 
     "${ROOT_DIR}/script/package_app.sh" \
@@ -66,9 +70,12 @@ cmd_run() {
         && [ -f "${app_binary}" ]; then
         # vtool 失败必须可见:此前 `|| true` 吞错后仍无条件打印 "Patched",
         # 真失败(二进制不接受 -replace 等)会误导排查。补丁只影响外观,失败不阻断启动。
-        local patch_output
+        # 输出到临时文件、成功后再 mv 覆盖:vtool 以同一文件作输入与 -output 属原位重写,
+        # 中途失败(磁盘满/进程被杀)会留下损坏的二进制。
+        local patch_output patch_tmp="${app_binary}.vtool-tmp.$$"
         if ! patch_output="$(vtool -set-build-version macos 14.0 "${host_sdk_version}" -replace \
-            -output "${app_binary}" "${app_binary}" 2>&1)"; then
+            -output "${patch_tmp}" "${app_binary}" 2>&1)" || ! mv -f "${patch_tmp}" "${app_binary}"; then
+            rm -f "${patch_tmp}"
             echo "=> WARNING: vtool patch failed, macOS 26 appearance may not apply:" >&2
             echo "${patch_output}" >&2
         elif codesign --force -s - "${app_binary}" >/dev/null 2>&1; then

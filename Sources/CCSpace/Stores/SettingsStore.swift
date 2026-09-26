@@ -6,18 +6,34 @@ private let settingsStoreLog = Logger(
     category: "SettingsStore"
 )
 
+enum SettingsStoreError: LocalizedError, Equatable {
+    case crossStoreRootMismatch
+
+    var errorDescription: String? {
+        switch self {
+        case .crossStoreRootMismatch:
+            return "内部状态异常：设置与工作区的数据目录不一致，已取消本次操作"
+        }
+    }
+}
+
 @MainActor
 final class SettingsStore: ObservableObject {
     @Published private(set) var settings: AppSettings
     private let fileStore: JSONFileStore
+    private let keychain: any APIKeySecretStore
     private var debouncedSettingsWriteTask: Task<Void, Never>?
 
     /// 本次启动 settings.json 是否损坏并被重置为默认值。
     /// 上游 View 可据此提示用户配置已重置(而不是让用户以为自己没设置过)。
     private(set) var didRecoverFromCorruptFile = false
+    /// 最近一次钥匙串写入是否成功:false 表示 API Key 处于明文降级保存态。
+    /// @Published:View 需据此绑定"明文降级"警告横幅,降级态变化必须实时可见。
+    @Published private(set) var apiKeyStoredInKeychain = true
 
-    init(fileStore: JSONFileStore) {
+    init(fileStore: JSONFileStore, keychain: any APIKeySecretStore = SecurityAPIKeyStore.shared) {
         self.fileStore = fileStore
+        self.keychain = keychain
         do {
             self.settings = try fileStore.loadIfPresent(
                 AppSettings.self,
@@ -29,6 +45,44 @@ final class SettingsStore: ObservableObject {
             fileStore.preserveCorruptFile(named: "settings.json")
             self.settings = AppSettings(workplaceRootPath: "")
             didRecoverFromCorruptFile = true
+        }
+        migrateAPIKeyOutOfSettingsFileIfNeeded()
+    }
+
+    /// 启动时把 API Key 收敛进钥匙串:
+    /// - 明文态(旧版本 settings.json 带 apiKey):迁入钥匙串并立即重写 settings(去明文);
+    ///   钥匙串此刻仍不可用则保留明文(降级态),下次启动或下次保存再收敛。
+    /// - 托管态(文件无 apiKey):从钥匙串读回内存,保证本进程内 `settings.aiSettings.apiKey`
+    ///   与保存时同构(消费方——AI 服务、设置页——都按"完整配置"读)。
+    private func migrateAPIKeyOutOfSettingsFileIfNeeded() {
+        guard var ai = settings.aiSettings else { return }
+        if ai.apiKeyManagedExternally {
+            // 托管态:从钥匙串读回内存,保证本进程内 `settings.aiSettings.apiKey`
+            // 与保存时同构(消费方——AI 服务、设置页——都按"完整配置"读)。
+            settings.backfillAPIKeyFromKeychainIfManaged(using: keychain)
+            return
+        }
+        let plaintext = ai.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard plaintext.isEmpty == false else {
+            // 明文态但本来就是空串:无事可做,直接标记托管(编码不会再写字段)。
+            ai.apiKeyManagedExternally = true
+            settings.aiSettings = ai
+            return
+        }
+        do {
+            try keychain.storeAPIKey(plaintext)
+            ai.apiKeyManagedExternally = true
+            settings.aiSettings = ai
+            do {
+                try fileStore.save(settings, as: "settings.json")
+                settingsStoreLog.notice("event=api_key_migrated_to_keychain")
+            } catch {
+                // 迁移已写入钥匙串,落盘失败只说明明文还会多留一份,下次启动重试即可。
+                settingsStoreLog.error("event=keychain_migration_rewrite_failed reason=\(error.localizedDescription)")
+            }
+        } catch {
+            apiKeyStoredInKeychain = false
+            settingsStoreLog.error("event=keychain_migration_failed reason=\(error.localizedDescription)")
         }
     }
 
@@ -52,15 +106,9 @@ final class SettingsStore: ObservableObject {
             // 任务可能已被后续写入/立即写盘取代(cancel 与 sleep 恢复存在竞态窗口):
             // 取消后不得再落盘,否则会用捕获的旧快照覆写更新的 settings.json。
             guard Task.isCancelled == false else { return }
-            // 写当前最新快照而非闭包捕获值:即使本任务仍是 pending,内存里的
-            // `settings` 只会更新不会回退,写最新值更安全。
-            let snapshot = self.settings
-            self.debouncedSettingsWriteTask = nil
-            do {
-                try self.fileStore.save(snapshot, as: "settings.json")
-            } catch {
-                settingsStoreLog.error("event=persist_settings_debounced_failed reason=\(error.localizedDescription)")
-            }
+            // 交给 flushSettings 写当前最新快照:即使本任务仍是 pending,内存里的
+            // `settings` 只会更新不会回退,写最新值更安全;写盘失败还有 5s 重试兜底。
+            self.flushSettings()
         }
     }
 
@@ -69,15 +117,30 @@ final class SettingsStore: ObservableObject {
         debouncedSettingsWriteTask = nil
     }
 
-    /// 把防抖窗口内未落盘的改动立即写入(退出 / 场景切换时调用)。
+    /// 无条件把当前内存快照落盘(防抖窗口到点 / 退出 / 场景切换时调用)。
+    ///
+    /// 注意不能以"是否存在 pending 任务"为前置:重试任务到点时会先清空
+    /// `debouncedSettingsWriteTask` 再进来,若此处提前 return,重试就成了空转,
+    /// 内存与文件会无限期背离。
     func flushSettings() {
-        guard let pending = debouncedSettingsWriteTask else { return }
+        debouncedSettingsWriteTask?.cancel()
         debouncedSettingsWriteTask = nil
-        pending.cancel()
         do {
             try fileStore.save(settings, as: "settings.json")
         } catch {
             settingsStoreLog.error("event=flush_settings_failed reason=\(error.localizedDescription)")
+            scheduleFlushRetry()
+        }
+    }
+
+    /// 写盘失败后 5s 重试一次,避免内存与文件无限期背离(磁盘满/瞬时权限)。
+    private func scheduleFlushRetry() {
+        guard debouncedSettingsWriteTask == nil else { return }
+        debouncedSettingsWriteTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled else { return }
+            self?.debouncedSettingsWriteTask = nil
+            self?.flushSettings()
         }
     }
 
@@ -95,6 +158,12 @@ final class SettingsStore: ObservableObject {
     /// 返回实际改写路径的工作区条数,供 UI 提示"几个工作区需要手动搬目录"。
     @discardableResult
     func updateRootPath(_ path: String, rebasingWorkplaceStore workplaceStore: WorkplaceStore) throws -> Int {
+        // 跨 Store 原子提交的前提是共用同一数据目录,运行时校验防注入分叉导致
+        // 内存与磁盘静默背离(同 RepositoryStore.removeRepository)。
+        guard fileStore.rootDirectory.standardizedFileURL
+            == workplaceStore.rootDirectoryForCrossStoreCheck.standardizedFileURL else {
+            throw SettingsStoreError.crossStoreRootMismatch
+        }
         // 必须先取消防抖写入:pending 的防抖任务若稍后用旧快照落盘,
         // workplaceRootPath 会回到旧根,而 workplaces/sync-states 已 rebase 到新根,
         // 下次磁盘刷新会把"不在旧根下"的工作区判为 missing 永久删除。
@@ -151,11 +220,53 @@ final class SettingsStore: ObservableObject {
         try persistSettings(updatedSettings)
     }
 
-    /// 保存 AI 服务配置;传 nil 表示清除配置。
+    /// 保存 AI 服务配置;传 nil 表示清除配置(钥匙串条目一并删除)。
+    ///
+    /// API Key 优先落钥匙串;钥匙串不可用时降级为明文落盘(编码带 apiKey 字段),
+    /// 不静默丢用户配置。成功迁入钥匙串后,若上一轮是降级明文态,本次落盘即完成收敛。
+    /// 钥匙串写入先于落盘:落盘失败(磁盘满等)时回滚内存与降级标记到旧值,
+    /// 钥匙串里可能暂存新 Key,与文件短暂不一致,由下次保存或启动迁移收敛。
     func updateAISettings(_ aiSettings: AppSettings.AISettings?) throws {
+        let previousSettings = settings
+        let previousStoredInKeychain = apiKeyStoredInKeychain
         var updatedSettings = settings
-        updatedSettings.aiSettings = aiSettings
-        try persistSettings(updatedSettings)
+        var keychainWriteSucceeded = false
+        if var ai = aiSettings {
+            do {
+                try keychain.storeAPIKey(ai.apiKey)
+                ai.apiKeyManagedExternally = true
+                apiKeyStoredInKeychain = true
+                keychainWriteSucceeded = true
+            } catch {
+                ai.apiKeyManagedExternally = false
+                apiKeyStoredInKeychain = false
+                settingsStoreLog.error("event=keychain_store_failed reason=\(error.localizedDescription)")
+            }
+            updatedSettings.aiSettings = ai
+        } else {
+            do {
+                try keychain.storeAPIKey("")
+                apiKeyStoredInKeychain = true
+                keychainWriteSucceeded = true
+            } catch {
+                apiKeyStoredInKeychain = false
+                settingsStoreLog.error("event=keychain_delete_failed reason=\(error.localizedDescription)")
+            }
+            updatedSettings.aiSettings = nil
+        }
+        do {
+            try persistSettings(updatedSettings)
+        } catch {
+            // 落盘失败:内存与降级标记回滚到旧值,维持"内存 == 文件"的一致口径。
+            settings = previousSettings
+            apiKeyStoredInKeychain = previousStoredInKeychain
+            if keychainWriteSucceeded {
+                settingsStoreLog.error("event=ai_settings_persist_failed detail=密钥已写入钥匙串但配置保存失败 reason=\(error.localizedDescription)")
+            } else {
+                settingsStoreLog.error("event=ai_settings_persist_failed reason=\(error.localizedDescription)")
+            }
+            throw error
+        }
     }
 
     func updateHasCompletedOnboarding(_ value: Bool) throws {

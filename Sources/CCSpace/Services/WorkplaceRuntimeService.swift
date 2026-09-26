@@ -59,6 +59,9 @@ struct WorkplaceRuntimeService {
         let fileSystemService = syncCoordinator.fileSystemService
         let lock = RepositoryOperationLock.shared
         try await lock.acquire(path: localPath)
+        // 持锁后立即把该行标为 .cloning 瞬态:删目录→克隆要数分钟,没有瞬态的话,
+        // 磁盘刷新会把这行归为"本地仓库缺失"的假失败(现在瞬态行被刷新豁免)。
+        workplaceStore.setSyncStatus(.cloning, for: workplace.id, repositoryIDs: [repository.id])
         let retriedStates: [RepositorySyncState]
         do {
             try await Self.removeItemOffMainThread(fileSystemService, at: localPath)
@@ -68,6 +71,16 @@ struct WorkplaceRuntimeService {
             )
         } catch {
             await lock.release(path: localPath)
+            // 瞬态必须归位成本轮失败:本进程内没有任何驱动器会把 .cloning 改回终态
+            // (重启归位在解码路径,帮不了还活着的这次会话)。
+            if var row = workplaceStore.syncStates.first(where: {
+                $0.workplaceID == workplace.id && $0.repositoryID == repository.id
+            }) {
+                row.status = .failed
+                row.lastError = error.localizedDescription
+                row.hasLocalDirectory = FileManager.default.fileExists(atPath: localPath)
+                workplaceStore.updateSyncStates([row])
+            }
             throw error
         }
         await lock.release(path: localPath)
@@ -75,7 +88,7 @@ struct WorkplaceRuntimeService {
         // 按 key 增量更新,而不是拿 await 之后的快照整体替换:
         // clone 可能耗时数分钟,期间定时磁盘刷新 / 单仓库 push 写入的状态
         // 会被这份快照整体覆盖(lost update)。
-        try workplaceStore.updateSyncStates(retriedStates)
+        workplaceStore.updateSyncStates(retriedStates)
     }
 
     func pushRepositories(in workplace: Workplace) async throws -> RepositoryPushResult {
@@ -112,11 +125,8 @@ struct WorkplaceRuntimeService {
             }
         }
 
-        do {
-            try workplaceStore.updateSyncStates(results.map { $0.updatedState })
-        } catch {
-            workplaceRuntimeLog.error("批量操作后持久化同步状态失败: \(error.localizedDescription)")
-        }
+        // 持久化走防抖写盘,不会失败,直接落库即可。
+        workplaceStore.updateSyncStates(results.map { $0.updatedState })
 
         let summary = results.summarize()
         return RepositoryPushResult(
@@ -143,7 +153,8 @@ struct WorkplaceRuntimeService {
                 return true
             }
             guard pushed else {
-                normalizeSkippedPushState(state)
+                // 跳过也按成功口径回写,清掉陈旧的失败标记(静态归一化 + 尽力落库)。
+                persistSuccessState(Self.normalizedSkippedPushState(from: state))
                 return .skipped
             }
             var updatedState = state
@@ -177,7 +188,7 @@ struct WorkplaceRuntimeService {
         // "切换中"立即落库:远端分支切换可能带一次单 ref fetch(网络,数秒),
         // 行上必须马上出现转轮——否则只有详情页工具栏角落一个不显眼的指示器。
         // 成功/失败路径末尾会回写终态;进程被杀则由解码兜底归位 .idle。
-        try? workplaceStore.setSyncStatus(.switching, for: state.workplaceID, repositoryIDs: [state.repositoryID])
+        workplaceStore.setSyncStatus(.switching, for: state.workplaceID, repositoryIDs: [state.repositoryID])
 
         do {
             try await RepositoryOperationLock.shared.withLock(path: state.localPath) {
@@ -557,11 +568,8 @@ struct WorkplaceRuntimeService {
             }
         }
 
-        do {
-            try workplaceStore.updateSyncStates(results.map { $0.updatedState })
-        } catch {
-            workplaceRuntimeLog.error("批量操作后持久化同步状态失败: \(error.localizedDescription)")
-        }
+        // 持久化走防抖写盘,不会失败,直接落库即可。
+        workplaceStore.updateSyncStates(results.map { $0.updatedState })
 
         let summary = results.summarize()
         return WorkplaceBulkBranchSwitchResult(
@@ -626,7 +634,7 @@ struct WorkplaceRuntimeService {
                 throw deleteError
             }
             let repoIDs = Set(originalStates.map(\.repositoryID))
-            try workplaceStore.setSyncStatus(.removing, for: workplace.id, repositoryIDs: repoIDs)
+            workplaceStore.setSyncStatus(.removing, for: workplace.id, repositoryIDs: repoIDs)
 
             do {
                 // 删除整棵工作区目录必须与 pull/push/切分支等写路径互斥:否则并发
@@ -654,14 +662,9 @@ struct WorkplaceRuntimeService {
                     )
                 }
             } catch {
-                do {
-                    try workplaceStore.replaceSyncStates(originalStates, for: workplace.id)
-                } catch {
-                    // 回滚失败必须留痕:状态会长期停在 .removing,UI 上表现为"一直进行中"。
-                    workplaceRuntimeLog.error(
-                        "event=delete_workplace_rollback_failed reason=\(error.localizedDescription)"
-                    )
-                }
+                // 状态回滚走防抖写盘,不会失败;若未来引入可失败路径,此处必须留痕,
+                // 否则状态会长期停在 .removing,UI 上表现为"一直进行中"。
+                workplaceStore.replaceSyncStates(originalStates, for: workplace.id)
                 let deleteError = WorkplaceDeletionError.fromRemovalError(
                     error,
                     path: workplace.path
@@ -738,24 +741,16 @@ struct WorkplaceRuntimeService {
         return branchStatus.hasUnpushedCommits || branchStatus.hasRemoteTrackingBranch == false
     }
 
-    /// git 操作成功后的状态回写尽力而为:持久化失败不推翻已成功的操作结果
-    /// (否则用户会看到"推送失败",但实际远端已收到推送),仅记录日志。
+    /// git 操作成功后的状态回写尽力而为:持久化走防抖写盘不会失败,直接落库
+    /// (不推翻已成功的操作结果,否则用户会看到"推送失败",但实际远端已收到推送)。
     private func persistSuccessState(_ state: RepositorySyncState) {
-        do {
-            try workplaceStore.updateSyncState(state)
-        } catch {
-            workplaceRuntimeLog.error("event=persist_success_state_failed reason=\(error.localizedDescription)")
-        }
+        workplaceStore.updateSyncState(state)
     }
 
-    /// git 操作失败后的状态回写同样尽力而为:持久化失败不改变抛给用户的错误,
-    /// 但必须留痕,否则"失败状态没记住"无从排查。
+    /// git 操作失败后的状态回写同样尽力而为:持久化走防抖写盘不会失败,直接落库,
+    /// 不改变抛给用户的错误。
     private func persistFailureState(_ state: RepositorySyncState) {
-        do {
-            try workplaceStore.updateSyncState(state)
-        } catch {
-            workplaceRuntimeLog.error("event=persist_failure_state_failed reason=\(error.localizedDescription)")
-        }
+        workplaceStore.updateSyncState(state)
     }
 
     /// 递归删除目录(大仓库可能耗时数分钟),放到主线程之外执行,避免冻结 UI。
@@ -766,15 +761,6 @@ struct WorkplaceRuntimeService {
         try await Task.detached(priority: .userInitiated) {
             try fileSystem.removeItemIfExists(at: path)
         }.value
-    }
-
-    private func normalizeSkippedPushState(_ state: RepositorySyncState) {
-        guard state.status != .success || state.lastError != nil else { return }
-
-        var updatedState = state
-        updatedState.status = .success
-        updatedState.lastError = nil
-        persistSuccessState(updatedState)
     }
 
     private func switchRepositories(
@@ -803,7 +789,7 @@ struct WorkplaceRuntimeService {
                     let workplaceID = state.workplaceID
                     let repositoryID = state.repositoryID
                     await MainActor.run {
-                        try? workplaceStore.setSyncStatus(
+                        workplaceStore.setSyncStatus(
                             .switching,
                             for: workplaceID,
                             repositoryIDs: [repositoryID]
@@ -836,11 +822,8 @@ struct WorkplaceRuntimeService {
             }
         }
 
-        do {
-            try workplaceStore.updateSyncStates(results.map { $0.updatedState })
-        } catch {
-            workplaceRuntimeLog.error("批量操作后持久化同步状态失败: \(error.localizedDescription)")
-        }
+        // 持久化走防抖写盘,不会失败,直接落库即可。
+        workplaceStore.updateSyncStates(results.map { $0.updatedState })
 
         let summary = results.summarize()
         return WorkplaceBulkBranchSwitchResult(

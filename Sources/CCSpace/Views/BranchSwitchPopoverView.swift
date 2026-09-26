@@ -13,6 +13,11 @@ struct BranchListPopoverView: View {
         case compare
     }
 
+    /// 弹窗同步直关入口(由 ccspacePopover 注入):pick/新建类回调先直关面板
+    /// 再上抛宿主。不依赖 binding 回写链路——那条链路跨窗口、要等下一轮
+    /// SwiftUI 事务,与派发动作的状态写入同帧竞争,面板会间歇性关不掉。
+    @Environment(\.ccspacePopoverDismiss) private var dismissPopover
+
     let mode: Mode
     let currentBranch: String?
     let localBranches: [String]
@@ -54,6 +59,8 @@ struct BranchListPopoverView: View {
     @State private var branchDeleteCandidate: BranchDeleteCandidate?
     /// 行尾 ➕ 在该分支下方插入输入行;nil 表示没有行在展开。
     @State private var creatingFromBranch: String?
+    /// orderedLocalBranches 的排序 memo(见该属性注释)。
+    @State private var orderedLocalBranchesMemo = OrderedLocalBranchesMemo()
 
     /// 弹窗内容的统一横向留白:header、加载态、列表行共用同一常量,
     /// 左右逐像素相等、上下天然同列。
@@ -69,8 +76,19 @@ struct BranchListPopoverView: View {
     }
 
     /// 本地页签展示顺序:按最近活动排序(元数据未到达时保持字母序原样)。
+    /// memo 化:搜索过滤的每次按键都触发 body 重算,全量排序(逐分支查角标)
+    /// 在大仓库时是可观的主线程开销——与 Support 层"重排序在加载时做一次"的原则对齐,
+    /// 输入(branchMetadata/localBranches)不变则复用上次结果。
     private var orderedLocalBranches: [String] {
-        BranchActivityOrder.sorted(localBranches, metadata: branchMetadata)
+        let memo = orderedLocalBranchesMemo
+        if memo.cachedBranches == localBranches, memo.cachedMetadata == branchMetadata {
+            return memo.result
+        }
+        let sorted = BranchActivityOrder.sorted(localBranches, metadata: branchMetadata)
+        memo.cachedBranches = localBranches
+        memo.cachedMetadata = branchMetadata
+        memo.result = sorted
+        return sorted
     }
 
     /// 点击行为:切换模式的远端展示名要还原为裸名,其余原样上抛。
@@ -105,43 +123,19 @@ struct BranchListPopoverView: View {
         // 宽度固定:弹窗尺寸不随分支名单变化,切页签/搜索/加载都不跳动,
         // 长名靠 displayText 护栏 + 行内 .head 省略 + hover 全名兜底。
         .frame(width: BranchNameDisplay.fixedPopoverWidth)
-        .alert(
-            branchDeleteCandidate?.alertTitle ?? "删除分支",
-            isPresented: deleteAlertBinding
-        ) {
-            switch branchDeleteCandidate {
-            case .local(let branch, let remoteBranch):
-                if let remoteBranch {
-                    Button("仅删除本地分支", role: .destructive) {
-                        onDeleteBranch?(branch, nil)
-                        clearDeleteCandidate()
-                    }
-                    Button("同时删除 origin/\(remoteBranch)", role: .destructive) {
-                        onDeleteBranch?(branch, remoteBranch)
-                        clearDeleteCandidate()
-                    }
-                } else {
-                    Button("删除", role: .destructive) {
-                        onDeleteBranch?(branch, nil)
-                        clearDeleteCandidate()
-                    }
-                }
-            case .remote(let branch, _):
-                Button("删除", role: .destructive) {
+        // 回退路径(无宿主承载确认)复用行视图同一套 BranchDeleteConfirmationModifier:
+        // 此前这里是逐行复制的第二套 alert 实现,两处行为被迫人肉同步维护。
+        .modifier(
+            BranchDeleteConfirmationModifier(
+                candidate: $branchDeleteCandidate,
+                onDeleteBranch: { branch, remoteBranch in
+                    onDeleteBranch?(branch, remoteBranch)
+                },
+                onDeleteRemoteBranch: { branch in
                     onDeleteRemoteBranch?(branch)
-                    clearDeleteCandidate()
                 }
-            case nil:
-                Button("删除", role: .destructive) {
-                    clearDeleteCandidate()
-                }
-            }
-            Button("取消", role: .cancel) {
-                branchDeleteCandidate = nil
-            }
-        } message: {
-            Text(branchDeleteCandidate?.alertMessage ?? "")
-        }
+            )
+        )
         .onAppear {
             onLoadBranchMetadata?()
             onLoadRemoteBranches()
@@ -322,6 +316,7 @@ struct BranchListPopoverView: View {
                 metadata: source == .local ? branchMetadata[branch] : nil,
                 showsLeadingIcon: source == .local
             ) {
+                dismissPopover()
                 onPick(pickPayload(for: branch, remote: remote))
             } onCreateFromHere: {
                 // 同一时刻只允许一行展开;点当前展开行则收起。
@@ -333,6 +328,7 @@ struct BranchListPopoverView: View {
                     baseBranch: branch,
                     isDisabled: !canSwitchBranch
                 ) { name in
+                    dismissPopover()
                     onCreateBranch?(name, createBase(for: branch, remote: remote))
                     creatingFromBranch = nil
                 } onCancel: {
@@ -369,33 +365,12 @@ struct BranchListPopoverView: View {
         return { requestDeleteConfirmation(.remote(branch: bareName, displayName: branch)) }
     }
 
-    private var branchDeleteCandidateBinding: Binding<Bool> {
-        Binding(
-            get: { branchDeleteCandidate != nil },
-            set: { isPresented in
-                if isPresented == false {
-                    branchDeleteCandidate = nil
-                }
-            }
-        )
-    }
-
-    /// 宿主承载确认时不弹窗内 alert。
-    private var deleteAlertBinding: Binding<Bool> {
-        guard onRequestDeleteConfirmation == nil else { return .constant(false) }
-        return branchDeleteCandidateBinding
-    }
-
     private func requestDeleteConfirmation(_ candidate: BranchDeleteCandidate) {
         if let onRequestDeleteConfirmation {
             onRequestDeleteConfirmation(candidate)
         } else {
             branchDeleteCandidate = candidate
         }
-    }
-
-    private func clearDeleteCandidate() {
-        branchDeleteCandidate = nil
     }
 
     /// 行是否指向当前所在分支:本地页签按名字;远端页签 origin/x 对应本地 x。
@@ -958,4 +933,13 @@ extension BranchListPopoverView {
             onCancelRemoteBranches: {}
         )
     }
+}
+
+/// orderedLocalBranches 的排序 memo。View struct 每次 body 求值都会重建,
+/// memo 由 @State 持有跨渲染稳定(与 DiffViewerView 的 PatchParseMemo 同模式)。
+/// 只在主线程访问,无并发,故无需锁,标 @unchecked Sendable 仅满足 @State 存储要求。
+final class OrderedLocalBranchesMemo: @unchecked Sendable {
+    var cachedBranches: [String]?
+    var cachedMetadata: [String: GitBranchMetadata]?
+    var result: [String] = []
 }

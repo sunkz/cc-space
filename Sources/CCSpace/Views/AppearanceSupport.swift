@@ -33,7 +33,7 @@ extension AppSettings.AppearanceMode {
     }
 
     var toolbarButtonTitle: String {
-        "外观:\(displayName),点击切换到\(nextInCycle.displayName)"
+        "外观：\(displayName)，点击切换到\(nextInCycle.displayName)"
     }
 }
 

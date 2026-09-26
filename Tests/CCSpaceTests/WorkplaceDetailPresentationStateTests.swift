@@ -134,7 +134,11 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
             selectedRepositoryIDs: []
         )
 
-        let confirmationState = WorkplaceDeleteConfirmationState(workplace: workplace)
+        // directoryPath 由调用方在触发时刻探测后传入(init 不再做磁盘 stat)。
+        let confirmationState = WorkplaceDeleteConfirmationState(
+            workplace: workplace,
+            directoryPath: workplacePath
+        )
 
         XCTAssertEqual(confirmationState.title, "删除 Main")
         XCTAssertEqual(confirmationState.confirmLabel, "确认删除")
@@ -154,7 +158,10 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
             selectedRepositoryIDs: []
         )
 
-        let confirmationState = WorkplaceDeleteConfirmationState(workplace: workplace)
+        let confirmationState = WorkplaceDeleteConfirmationState(
+            workplace: workplace,
+            directoryPath: nil
+        )
 
         XCTAssertEqual(
             confirmationState.message,
@@ -166,7 +173,8 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
         let localPath = try makeLocalDirectory(named: "blog")
         let confirmationState = WorkplaceRepositoryDeleteConfirmationState(
             repositoryName: "blog",
-            localPath: " \(localPath) "
+            localPath: " \(localPath) ",
+            directoryPath: localPath
         )
 
         XCTAssertEqual(confirmationState.title, "删除 blog")
@@ -184,7 +192,8 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
     func test_repositoryDeleteConfirmationFallsBackWhenPathIsEmpty() {
         let confirmationState = WorkplaceRepositoryDeleteConfirmationState(
             repositoryName: "blog",
-            localPath: "   "
+            localPath: "   ",
+            directoryPath: nil
         )
 
         XCTAssertEqual(
@@ -268,6 +277,7 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
                 onSwitchRepositoryToWorkBranch: { _, _ in },
                 onMergeRepositoryDefaultBranchIntoCurrent: { _, _ in },
                 onCreateMergeRequest: { _, _, _ in },
+                onOpenRepositoryWeb: { _, _ in },
                 onDeleteRepository: { _, _ in },
                 onTogglePinnedRepository: { _ in },
                 onStashChanges: { _, _ in },

@@ -1,4 +1,10 @@
 import Foundation
+import os
+
+private let progressTrackerLog = Logger(
+    subsystem: "com.ccspace.app",
+    category: "WorkplaceOperationProgress"
+)
 
 typealias WorkplaceOperationProgressHandler = @MainActor @Sendable (WorkplaceOperationProgress) -> Void
 
@@ -55,9 +61,16 @@ actor WorkplaceOperationProgressTracker {
 
     func didFinish(repositoryName: String) async {
         guard totalCount > 0 else { return }
-        if let index = activeRepositoryNames.firstIndex(of: repositoryName) {
-            activeRepositoryNames.remove(at: index)
+        // 只有真正从进行中列表移除(即该名称确实被 start 过)才计数:
+        // 未 start 就 finish、或对同一名称重复 finish 的孤儿调用不能递增
+        // completedCount,否则进度会被提前推到 100%,掩盖还在进行的操作。
+        guard let index = activeRepositoryNames.firstIndex(of: repositoryName) else {
+            progressTrackerLog.notice(
+                "event=progress_did_finish_orphan repository_name=\(repositoryName, privacy: .public)"
+            )
+            return
         }
+        activeRepositoryNames.remove(at: index)
         completedCount = min(totalCount, completedCount + 1)
         await emitProgress()
     }

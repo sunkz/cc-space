@@ -14,6 +14,8 @@ enum AICommitMessageError: LocalizedError {
     case missingAPIKey
     case invalidBaseURL(String)
     case insecureBaseURL(String)
+    /// 请求未能抵达服务(无响应/非 HTTP 响应),多为网络或服务地址问题。
+    case connectionFailed
     case http(status: Int, detail: String?)
     case emptyResponse
     case invalidModelList
@@ -28,6 +30,8 @@ enum AICommitMessageError: LocalizedError {
             return "AI 服务地址无效：\(raw)"
         case .insecureBaseURL(let raw):
             return "AI 服务地址必须使用 HTTPS；仅本机回环地址（如 http://localhost、http://127.0.0.1）允许明文 HTTP：\(raw)"
+        case .connectionFailed:
+            return "连接 AI 服务失败，请检查网络或服务地址"
         case .http(let status, let detail):
             let suffix = detail.map { "：\($0)" } ?? ""
             switch status {
@@ -71,6 +75,11 @@ enum AICommitEndpoint {
         let host = (url.host ?? "").trimmingCharacters(in: .whitespaces).lowercased()
         guard host.isEmpty == false else {
             throw AICommitMessageError.invalidBaseURL(baseURL)
+        }
+        // Base URL 含 query/fragment 时,拼接 "/chat/completions" 会得到错误端点
+        // (参数落在错误位置或被丢弃),明确拒绝并在文案中说明原因。
+        guard url.query == nil, url.fragment == nil else {
+            throw AICommitMessageError.invalidBaseURL("\(baseURL)（Base URL 不能包含 ? 或 #）")
         }
         if scheme == "http", isLoopbackHost(host) == false {
             throw AICommitMessageError.insecureBaseURL(baseURL)
@@ -351,8 +360,14 @@ protocol AIServiceInfoServicing: Sendable {
 }
 
 extension AIServiceInfoServicing {
-    func fetchModels(baseURL: String, apiKey: String) async throws -> [String] { [] }
-    func testConnection(baseURL: String, modelName: String, apiKey: String) async throws {}
+    /// 默认实现必须**显式失败**,不能静默成功:此前 conformer 漏实现时设置页
+    /// 显示假"连接成功"/空模型列表,用户以为配置可用。
+    func fetchModels(baseURL: String, apiKey: String) async throws -> [String] {
+        throw AICommitMessageError.notConfigured
+    }
+    func testConnection(baseURL: String, modelName: String, apiKey: String) async throws {
+        throw AICommitMessageError.notConfigured
+    }
 }
 
 /// chat completions 请求体(生成提交信息与测试连接共用)。
@@ -382,6 +397,54 @@ private struct ChatCompletionBody: Encodable {
 struct AICommitMessageService: AICommitMessageServicing, AIServiceInfoServicing {
     typealias DataLoader = @Sendable (URLRequest) async throws -> (Data, URLResponse)
 
+    /// 拒绝自动跟随重定向的共享会话。URLSession 默认对 3xx(含跨主机)自动跟随,
+    /// 而 `Authorization: Bearer <key>` 会原样转发到重定向目标——baseURL 虽是用户输入,
+    /// 但服务端(或被劫持的网关)一句话就能把用户的 API Key 送到第三个主机。
+    /// 拒绝后 3xx 响应原样返回,ensureOK 转成可见错误。
+    private static let noRedirectSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(
+            configuration: configuration,
+            delegate: RedirectRejectingDelegate.shared,
+            delegateQueue: nil
+        )
+    }()
+
+    /// 默认加载器:比 `URLSession.shared.data(for:)` 多两层防护——
+    /// 1. 拒绝重定向(见 noRedirectSession);
+    /// 2. Task 取消直达底层 URLSessionTask:此前只在响应返回后检查
+    ///    `Task.isCancelled`,用户取消生成后请求仍占用连接最长 60s。
+    static func defaultDataLoader(request: URLRequest) async throws -> (Data, URLResponse) {
+        let session = noRedirectSession
+        let taskBox = URLSessionTaskBox()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<(Data, URLResponse), any Error>) in
+                let task = session.dataTask(with: request) { data, response, error in
+                    if let error {
+                        let nsError = error as NSError
+                        if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled {
+                            continuation.resume(throwing: CancellationError())
+                        } else {
+                            continuation.resume(throwing: error)
+                        }
+                        return
+                    }
+                    guard let data, let response else {
+                        continuation.resume(throwing: AICommitMessageError.connectionFailed)
+                        return
+                    }
+                    continuation.resume(returning: (data, response))
+                }
+                taskBox.set(task)
+                task.resume()
+            }
+        } onCancel: {
+            taskBox.cancel()
+        }
+    }
+
     private let settingsReader: @Sendable () -> AppSettings?
     private let timeoutInterval: TimeInterval
     private let dataLoader: DataLoader
@@ -389,9 +452,7 @@ struct AICommitMessageService: AICommitMessageServicing, AIServiceInfoServicing 
     init(
         settingsReader: @escaping @Sendable () -> AppSettings?,
         timeoutInterval: TimeInterval = 60,
-        dataLoader: @escaping DataLoader = { request in
-            try await URLSession.shared.data(for: request)
-        }
+        dataLoader: @escaping DataLoader = AICommitMessageService.defaultDataLoader
     ) {
         self.settingsReader = settingsReader
         self.timeoutInterval = timeoutInterval
@@ -499,7 +560,7 @@ struct AICommitMessageService: AICommitMessageServicing, AIServiceInfoServicing 
     /// 校验 HTTP 响应为 2xx,否则抛出带中文原因的错误。
     private static func ensureOK(response: URLResponse, data: Data, event: String) throws {
         guard let httpResponse = response as? HTTPURLResponse else {
-            throw AICommitMessageError.http(status: -1, detail: nil)
+            throw AICommitMessageError.connectionFailed
         }
         guard (200..<300).contains(httpResponse.statusCode) else {
             let detail = errorMessage(in: data)
@@ -524,5 +585,45 @@ struct AICommitMessageService: AICommitMessageServicing, AIServiceInfoServicing 
             return nil
         }
         return message
+    }
+}
+
+/// 拒绝 HTTP 自动重定向的 URLSessionTask delegate(见 noRedirectSession 注释)。
+private final class RedirectRejectingDelegate: NSObject, URLSessionTaskDelegate, Sendable {
+    static let shared = RedirectRejectingDelegate()
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        // 传 nil = 不跟随:响应以 3xx 原样回到 completionHandler。
+        completionHandler(nil)
+    }
+}
+
+/// 供 withTaskCancellationHandler 触达底层 URLSessionTask 的中转盒
+/// (task 在 continuation 闭包内创建,onCancel 闭包在其外,需跨闭包共享)。
+private final class URLSessionTaskBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var task: URLSessionTask?
+    private var cancelRequested = false
+
+    func set(_ newTask: URLSessionTask) {
+        lock.lock()
+        task = newTask
+        let early = cancelRequested
+        lock.unlock()
+        if early { newTask.cancel() }
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelRequested = true
+        let pending = task
+        lock.unlock()
+        pending?.cancel()
     }
 }

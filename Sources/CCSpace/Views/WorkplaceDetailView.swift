@@ -32,6 +32,8 @@ struct WorkplaceDetailActions {
     let onSwitchRepositoryToWorkBranch: (RepositorySyncState, String) -> Void
     let onMergeRepositoryDefaultBranchIntoCurrent: (RepositorySyncState, String) -> Void
     let onCreateMergeRequest: (RepositorySyncState, RepositoryConfig, String?) -> Void
+    /// 在浏览器打开仓库主页(仓库行右键/⋯ 菜单)。
+    let onOpenRepositoryWeb: (RepositorySyncState, RepositoryConfig) -> Void
     let onDeleteRepository: (RepositorySyncState, String) -> Void
     let onTogglePinnedRepository: (RepositorySyncState) -> Void
     let onStashChanges: (RepositorySyncState, String) -> Void
@@ -62,6 +64,9 @@ struct WorkplaceDetailView: View {
     @Binding var feedback: CCSpaceFeedback?
     @State private var branchSnapshots: [RepositoryBranchCacheKey: RepositoryBranchSnapshot] = [:]
     @State private var showingDeleteConfirmation = false
+    /// 删除确认弹窗内容:在删除按钮触发时刻做一次目录探测后写入。
+    /// 不能按 body 求值现算——此前 .alert 参数直接读计算属性,每帧一次主线程 stat。
+    @State private var deleteConfirmation: WorkplaceDeleteConfirmationState?
     @State private var periodicRefreshSeed = 0
     @State private var manualRefreshSeed = 0
     @State private var pendingRefreshFeedback: CCSpaceFeedback?
@@ -123,14 +128,10 @@ struct WorkplaceDetailView: View {
         )
     }
 
-    private var deleteConfirmationState: WorkplaceDeleteConfirmationState {
-        WorkplaceDeleteConfirmationState(workplace: workplace)
-    }
-
     @ViewBuilder
     private var feedbackBanner: some View {
-        if let feedback {
-            CCSpaceFeedbackBanner(feedback: feedback)
+        if let shownFeedback = feedback {
+            CCSpaceFeedbackBanner(feedback: shownFeedback, onClose: { self.feedback = nil })
                 .transition(.move(edge: .top).combined(with: .opacity))
                 .ccspaceAutoDismissFeedback($feedback)
         }
@@ -195,8 +196,14 @@ struct WorkplaceDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 // 每轮 body 求值只构建一次,沿渲染路径下发给每一行/toolbar。
+                // 排序含 localizedStandardCompare,同样不能进 ForEach 现算。
                 let lookup = repositoryByID
-                repositorySection(lookup: lookup, detailState: presentationState)
+                let sortedStates = sortedWorkplaceSyncStates
+                repositorySection(
+                    sortedStates: sortedStates,
+                    lookup: lookup,
+                    detailState: presentationState
+                )
             }
             .frame(maxWidth: 980, alignment: .topLeading)
             .padding(12)
@@ -226,15 +233,15 @@ struct WorkplaceDetailView: View {
         .animation(.snappy(duration: 0.22), value: repositories.count)
         .animation(.snappy(duration: 0.22), value: syncStates.count)
         .alert(
-            deleteConfirmationState.title,
+            deleteConfirmation?.title ?? "",
             isPresented: $showingDeleteConfirmation
         ) {
-            Button(deleteConfirmationState.confirmLabel, role: .destructive) {
+            Button(deleteConfirmation?.confirmLabel ?? "确认删除", role: .destructive) {
                 actions.onDelete()
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text(deleteConfirmationState.message)
+            Text(deleteConfirmation?.message ?? "")
         }
         // 定时轮询用 .task 长循环驱动;Timer.publish 写在 body 里会随每次渲染
         // 重建、倒计时归零,交互频繁时轮询会被无限推迟。
@@ -264,6 +271,13 @@ struct WorkplaceDetailView: View {
         .onChange(of: branchRefreshToken, initial: true) { _, _ in
             scheduleBranchSnapshotRefresh()
         }
+        // 兜底:锁释放瞬间补一次快照重载。动作完成时的 invalidate 若恰好在
+        // isActionLocked 仍为 true 的渲染帧里被消费,loadBranches 会被守卫跳过
+        // 且不再有第二次 token 变化——分支面板对号停在旧值直到 30s 轮询。
+        .onChange(of: presentationState.isActionLocked) { _, locked in
+            guard locked == false else { return }
+            scheduleBranchSnapshotRefresh()
+        }
         .onDisappear {
             stopPeriodicStatusRefresh()
             branchRefreshTask?.cancel()
@@ -290,7 +304,10 @@ struct WorkplaceDetailView: View {
     }
 
     /// 常驻轮询 git 状态;仅在 App 活跃期间存在(由 scenePhase 门控启停)。
-    /// 场景退出活跃时任务会被取消而退出循环,避免后台仍触发全量分支快照。
+    /// 场景退出活跃时 onChange 会取消任务而退出循环,避免后台仍触发全量分支快照。
+    /// 契约:循环内不做 scenePhase 检查——@Environment 的值在长驻任务捕获的视图
+    /// 拷贝上是冻结快照,读不到实时值;启停完全依赖 .onChange(of: scenePhase)
+    /// 的取消与重建,这里的循环只需响应 Task.sleep 的取消错误。
     private func runPeriodicStatusRefresh() async {
         var lastSnapshotReload = Date.distantPast
         while true {
@@ -299,7 +316,6 @@ struct WorkplaceDetailView: View {
             } catch {
                 return // 任务被取消(视图销毁或退到后台),退出循环
             }
-            guard scenePhase == .active else { return }
             guard syncStates.contains(where: \.hasLocalDirectory) else { continue }
             // 分支快照按最小间隔节流推进,不跟着 5 秒心跳每次都重载。
             let now = Date()
@@ -456,6 +472,11 @@ struct WorkplaceDetailView: View {
     private func deleteToolbarItem(_ state: WorkplaceDetailPresentationState) -> some ToolbarContent {
         ToolbarItem(placement: .primaryAction) {
             Button(role: .destructive) {
+                // 目录探测收敛到触发时刻,每次点击只 stat 一次,body 路径零 IO。
+                deleteConfirmation = WorkplaceDeleteConfirmationState(
+                    workplace: workplace,
+                    directoryPath: existingDirectoryPath(workplace.path)
+                )
                 showingDeleteConfirmation = true
             } label: {
                 Image(systemName: "trash")
@@ -517,7 +538,9 @@ struct WorkplaceDetailView: View {
         periodicRefreshSeed += 1
     }
 
+    /// sortedStates 由调用方在 body 顶部求值一次后传入,避免每轮重复排序。
     private func repositorySection(
+        sortedStates: [RepositorySyncState],
         lookup: [UUID: RepositoryConfig],
         detailState: WorkplaceDetailPresentationState
     ) -> some View {
@@ -544,7 +567,7 @@ struct WorkplaceDetailView: View {
                 }
             } else {
                 LazyVStack(spacing: 6) {
-                    ForEach(sortedWorkplaceSyncStates) { state in
+                    ForEach(sortedStates) { state in
                         repositoryRow(for: state, lookup: lookup, detailState: detailState)
                             .transition(.opacity.combined(with: .scale(scale: 0.95)))
                     }
@@ -609,6 +632,9 @@ struct WorkplaceDetailView: View {
             },
             onCreateMergeRequest: { repository, targetBranch in
                 actions.onCreateMergeRequest(state, repository, targetBranch)
+            },
+            onOpenRepositoryWeb: { repository in
+                actions.onOpenRepositoryWeb(state, repository)
             },
             actionsDisabled: detailState.isActionLocked,
             openActions: openActions,

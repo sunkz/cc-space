@@ -76,8 +76,4 @@ struct Workplace: Codable, Equatable, Identifiable, Sendable {
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(updatedAt, forKey: .updatedAt)
     }
-
-    var hasLocalDirectory: Bool {
-        FileManager.default.fileExists(atPath: path)
-    }
 }

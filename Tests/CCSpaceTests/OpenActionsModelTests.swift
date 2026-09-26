@@ -3,7 +3,7 @@ import XCTest
 
 @MainActor
 final class OpenActionsModelTests: XCTestCase {
-    func test_initRunsInitialDetection() {
+    func test_initRunsInitialDetection() async throws {
         let model = OpenActionsModel(
             editorDetector: detector(resolving: ["com.microsoft.VSCode"]),
             terminalDetector: detector(
@@ -12,11 +12,16 @@ final class OpenActionsModelTests: XCTestCase {
             )
         )
 
+        // 检测已移到后台线程异步发布,轮询等待结果落位(替代旧的同步断言)。
+        try await waitUntilPublished(timeout: 2) {
+            model.installedEditors.map(\.id) == ["vscode"]
+                && model.installedTerminals.map(\.id) == ["terminal", "iterm2"]
+        }
         XCTAssertEqual(model.installedEditors.map(\.id), ["vscode"])
         XCTAssertEqual(model.installedTerminals.map(\.id), ["terminal", "iterm2"])
     }
 
-    func test_refreshPicksUpNewlyInstalledTerminal() {
+    func test_refreshPicksUpNewlyInstalledTerminal() async throws {
         let installed = MutableBundleSet(["com.apple.Terminal"])
         let terminalDetector = ExternalEditorDetector(
             resolveApplicationURL: { bundleIdentifier in
@@ -32,11 +37,17 @@ final class OpenActionsModelTests: XCTestCase {
             editorDetector: detector(resolving: []),
             terminalDetector: terminalDetector
         )
+        try await waitUntilPublished(timeout: 2) {
+            model.installedTerminals.map(\.id) == ["terminal"]
+        }
         XCTAssertEqual(model.installedTerminals.map(\.id), ["terminal"])
 
         installed.insert("com.googlecode.iterm2")
         model.refresh()
 
+        try await waitUntilPublished(timeout: 2) {
+            model.installedTerminals.map(\.id) == ["terminal", "iterm2"]
+        }
         XCTAssertEqual(model.installedTerminals.map(\.id), ["terminal", "iterm2"])
     }
 
@@ -81,6 +92,19 @@ final class OpenActionsModelTests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    /// 轮询等待异步发布的检测结果;超时即失败(避免慢环境下无限挂起)。
+    private func waitUntilPublished(
+        timeout: TimeInterval,
+        _ condition: @MainActor () -> Bool
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTFail("等待检测结果发布超时")
+    }
 
     private func detector(
         resolving bundleIDs: Set<String>,

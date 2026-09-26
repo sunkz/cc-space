@@ -15,6 +15,9 @@ struct WorkplaceCreateView: View {
     @State private var isSubmitting = false
     @State private var repositorySearchText = ""
     @State private var operationProgress: WorkplaceOperationProgress?
+    /// 进行中的创建任务:多仓库克隆可达数分钟,没有取消通道时用户只能对着
+    /// `interactiveDismissDisabled` 的关不掉的弹窗干等。
+    @State private var submitTask: Task<Void, Never>?
 
     init(
         settingsStore: SettingsStore,
@@ -81,15 +84,22 @@ struct WorkplaceCreateView: View {
                     operationProgress = progress
                 }
             )
+            // 服务已返回但用户恰好点了取消:半成品工作区已建好,不能再来一次
+            // "创建成功"跳转;服务内部 catch 会在更早的阶段把取消转成错误抛出。
+            try Task.checkCancellation()
 
             appViewModel.showWorkplace(workplace.id)
             onDismiss()
+        } catch is CancellationError {
+            // 取消路径:Service 的 catch 已负责删记录/清目录,这里只反馈。
+            feedback = CCSpaceFeedback(style: .info, message: "已取消创建，工作区与半成品目录已清理")
         } catch {
             feedback = CCSpaceFeedbackFactory.actionError(
                 action: "创建工作区",
                 error: error
             )
         }
+        submitTask = nil
     }
 
     var body: some View {
@@ -123,8 +133,8 @@ struct WorkplaceCreateView: View {
                         CCSpaceFeedbackBanner(feedback: branchStrategyFeedback)
                     }
 
-                    if let feedback {
-                        CCSpaceFeedbackBanner(feedback: feedback)
+                    if let shownFeedback = feedback {
+                        CCSpaceFeedbackBanner(feedback: shownFeedback, onClose: { self.feedback = nil })
                     } else if let missingRootPathFeedback = presentationState.missingRootPathFeedback {
                         CCSpaceFeedbackBanner(feedback: missingRootPathFeedback)
                     }
@@ -141,10 +151,16 @@ struct WorkplaceCreateView: View {
                 isSubmitDisabled: !presentationState.canSubmit,
                 progress: progressPresentationState,
                 onCancel: {
-                    onDismiss()
+                    if isSubmitting {
+                        // 提交中点"取消":终止任务并让 Service 走清理路径,
+                        // 而不是留下孤儿工作区后直接关窗。
+                        submitTask?.cancel()
+                    } else {
+                        onDismiss()
+                    }
                 },
                 onSubmit: {
-                    Task {
+                    submitTask = Task {
                         await submitCreate()
                     }
                 }
@@ -152,6 +168,7 @@ struct WorkplaceCreateView: View {
         }
         .frame(minWidth: 440, idealWidth: 520, minHeight: 360, idealHeight: 460)
         .navigationTitle("创建工作区")
+        .ccspaceAutoDismissFeedback($feedback)
         .interactiveDismissDisabled(isSubmitting)
         .onAppear {
             applySeed(initialSeed)

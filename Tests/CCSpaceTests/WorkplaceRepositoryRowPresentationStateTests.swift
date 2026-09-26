@@ -215,8 +215,7 @@ final class WorkplaceRepositoryRowPresentationStateTests: XCTestCase {
         XCTAssertFalse(locked.canViewChanges)
     }
 
-    func test_conflictsDisableStashAndViewChangesAndEnableAbort() throws {
-        let localPath = try makeLocalDirectory(named: "conflict-actions")
+    func test_conflictsDisableStashAndViewChangesAndEnableAbort() throws {        let localPath = try makeLocalDirectory(named: "conflict-actions")
         let state = RepositorySyncState(
             workplaceID: UUID(),
             repositoryID: UUID(),
@@ -239,10 +238,11 @@ final class WorkplaceRepositoryRowPresentationStateTests: XCTestCase {
             )
         }
 
-        // git 在有未合并路径时拒绝 stash:"查看改动"也无心义,冲突态一并禁用;中止入口打开。
+        // git 在有未合并路径时拒绝 stash → Stash 禁用;"查看改动"必须保持可用:
+        // 冲突时用户最需要的就是看 diff;中止入口打开。
         let conflicted = makeState(hasConflicts: true)
         XCTAssertFalse(conflicted.canStashChanges)
-        XCTAssertFalse(conflicted.canViewChanges)
+        XCTAssertTrue(conflicted.canViewChanges, "冲突态下查看改动是解决冲突的前提,不得被 Stash 规则连带禁用")
         XCTAssertTrue(conflicted.canAbortInterruptedOperation)
 
         let clean = makeState(hasConflicts: false)

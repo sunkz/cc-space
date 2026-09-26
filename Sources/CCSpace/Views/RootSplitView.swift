@@ -8,6 +8,14 @@ private let rootSplitViewLog = Logger(
 
 struct RootSplitView: View {
     @Environment(\.scenePhase) private var scenePhase
+    /// scenePhase 的 @State 镜像:长驻 `.task` 闭包捕获的是挂载时刻的**视图结构体拷贝**,
+    /// `@Environment` 的值在拷贝上是冻结的——周期任务里直接读 scenePhase 永远看到启动瞬间
+    /// 的快照(active 判定整体失效)。@State 读写走外部存储,任何时刻读到的都是当前值。
+    /// onAppear/onChange 双点同步,保证镜像与真实环境一致。
+    @State private var mirroredScenePhase: ScenePhase = .active
+    /// 磁盘刷新任务世代号:被取消的旧任务晚于新任务返回时,若无条件清 refreshTask
+    /// 会把**新任务**的句柄抹掉,后续调度 guard 放行、并发磁盘刷新。
+    @State private var refreshGeneration: UInt64 = 0
     /// 设置页当前页签:tab 栏挂在标题栏 principal 位置,状态放在根视图共享给 SettingsView。
     @State private var settingsTab: SettingsTab = .general
     @StateObject private var appViewModel = AppViewModel()
@@ -92,18 +100,32 @@ struct RootSplitView: View {
         let fileStore = JSONFileStore(
             rootDirectory: launchConfiguration.resolvedAppSupportDirectory()
         )
-        _settingsStore = StateObject(wrappedValue: SettingsStore(fileStore: fileStore))
+        let settingsStoreInstance = SettingsStore(fileStore: fileStore)
+        _settingsStore = StateObject(wrappedValue: settingsStoreInstance)
         _repositoryStore = StateObject(wrappedValue: RepositoryStore(fileStore: fileStore))
         _workplaceStore = StateObject(wrappedValue: WorkplaceStore(fileStore: fileStore))
         self.gitService = gitService
         self.aiService = aiService
         syncCoordinator = SyncCoordinator(gitService: gitService)
+
+        let appViewModel = AppViewModel()
+        // 路由持久化回调在此注入:AppViewModel 是路由的唯一事实来源,
+        // 写 settings.json 镜像由其内部触发,View 修饰链不再承担持久化职责。
+        // 捕获局部实例而非 self.settingsStore——escaping 闭包不能捕获 mutating self。
+        appViewModel.onRouteChange = { settingsStoreInstance.updateLastSelectedRoute($0.rawValue) }
+        appViewModel.onSelectedWorkplaceChange = {
+            settingsStoreInstance.updateLastSelectedWorkplaceID($0?.uuidString)
+        }
+        _appViewModel = StateObject(wrappedValue: appViewModel)
+
         // 首帧外观:直接读盘一次并应用(仅进程内第一次构造执行)。
         // 不能读 _settingsStore.wrappedValue——那会强制求值 autoclosure,
         // 视图结构体每次重建都新造一个 SettingsStore 又丢弃(白白同步读盘,
         // 且 corrupt 文件还会触发 preserveCorruptFile 副作用)。
         // onAppear 里的 reconcileOverride 兜底后续变更与 SwiftUI 实际持有的实例。
-        if Self.hasAppliedLaunchAppearance == false {
+        // View init 必在主线程执行,但编译器无法证明——assumeIsolated 显式声明。
+        MainActor.assumeIsolated {
+            guard Self.hasAppliedLaunchAppearance == false else { return }
             Self.hasAppliedLaunchAppearance = true
             let persistedMode = (try? fileStore.loadIfPresent(
                 AppSettings.self,
@@ -114,8 +136,9 @@ struct RootSplitView: View {
         }
     }
 
-    /// 首帧外观只应用一次;init 均在主线程执行,无并发写。
-    nonisolated(unsafe) private static var hasAppliedLaunchAppearance = false
+    /// 首帧外观只应用一次;@MainActor 隔离由编译器强制主线程访问,
+    /// View 构造虽然总在主线程,但需经 assumeIsolated 声明后才能触达。
+    @MainActor private static var hasAppliedLaunchAppearance = false
 
     var body: some View {
         rootSheetModifiers(
@@ -190,6 +213,8 @@ struct RootSplitView: View {
             }
             .background(EffectiveAppearanceObserver(onChange: handleEffectiveAppearanceChange))
             .onAppear {
+                // 镜像先于一切周期任务对齐(onChange 只在**变化**时触发,首帧必须补一次)。
+                mirroredScenePhase = scenePhase
                 // 启动恢复持久化的外观;覆盖若已被外部清空(显式模式下即不一致)会在此重新应用。
                 AppearanceModeApplier.reconcileOverride(with: settingsStore.settings.appearanceMode)
                 applyLaunchConfigurationIfNeeded()
@@ -211,12 +236,23 @@ struct RootSplitView: View {
                         rootSplitViewLog.error("event=startup_reconcile_failed reason=\(error.localizedDescription)")
                     }
                 }
+                // settings.json 本次启动曾损坏并重置:必须让用户知道"配置变默认值"
+                // 不是自己没设置过(SettingsStore.didRecoverFromCorruptFile 的消费点)。
+                if settingsStore.didRecoverFromCorruptFile {
+                    rootSplitViewLog.error("event=settings_corrupt_recovered_banner")
+                    appearanceFeedback = CCSpaceFeedback(
+                        style: .warning,
+                        message: "设置文件曾损坏并已重置为默认值",
+                        details: "工作区根目录、AI 服务等配置回到了初始状态;若有备份文件请重新导入。仓库与工作区记录未受影响。"
+                    )
+                }
                 scheduleDiskRefresh()
                 if shouldShowOnboarding {
                     showOnboarding = true
                 }
             }
             .onChange(of: scenePhase) { _, newPhase in
+                mirroredScenePhase = newPhase
                 if newPhase == .active {
                     scheduleDiskRefresh()
                 } else {
@@ -230,14 +266,12 @@ struct RootSplitView: View {
                 workplaceStore.flushSyncStates()
                 settingsStore.flushSettings()
             }
-            .onChange(of: appViewModel.selectedWorkplaceID) { _, newID in
+            .onChange(of: appViewModel.selectedWorkplaceID) { _, _ in
+                // 持久化镜像由 AppViewModel 的回调负责(见 init 注入),
+                // 这里只清理视图层的动作反馈。
                 detailActionCoordinator.feedback = nil
-                settingsStore.updateLastSelectedWorkplaceID(newID?.uuidString)
             }
-            .onChange(of: appViewModel.route) { _, newRoute in
-                settingsStore.updateLastSelectedRoute(newRoute.rawValue)
-            }
-            // 兜底:磁盘刷新(refreshFromDisk)也可能静默删除工作区,此时选中项会悬空,
+            // 兜底:磁盘刷新也可能静默删除工作区,此时选中项会悬空,
             // 这里在工作区集合变化时校验选中项仍然有效。
             .onChange(of: Set(workplaceStore.workplaces.map(\.id))) { _, currentIDs in
                 if let selected = appViewModel.selectedWorkplaceID,
@@ -251,8 +285,8 @@ struct RootSplitView: View {
             }
             // 外观保存失败等根级操作的可见提示:挂顶层 overlay,任意路由下都能呈现。
             .overlay(alignment: .top) {
-                if let appearanceFeedback {
-                    CCSpaceFeedbackBanner(feedback: appearanceFeedback)
+                if let shownFeedback = appearanceFeedback {
+                    CCSpaceFeedbackBanner(feedback: shownFeedback, onClose: { appearanceFeedback = nil })
                         .fixedSize(horizontal: true, vertical: false)
                         .padding(.top, 6)
                         .ccspaceAutoDismissFeedback($appearanceFeedback)
@@ -514,7 +548,7 @@ struct RootSplitView: View {
                 )
             },
             onSwitchRepositoryToWorkBranch: { state, repositoryName in
-                let workBranch = latestWorkplace(for: workplace.id)?.branch?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let workBranch = currentWorkBranch(for: workplace.id)
                 detailActionCoordinator.run(
                     actionName: "切到工作分支",
                     refreshBranches: true,
@@ -570,6 +604,17 @@ struct RootSplitView: View {
                     },
                     openInBrowser: { mergeRequestURL in
                         try WorkplaceSystemActions.openInBrowser(mergeRequestURL)
+                    }
+                )
+            },
+            onOpenRepositoryWeb: { _, repository in
+                RootSplitWorkplaceActions.runOpenRepositoryWeb(
+                    coordinator: detailActionCoordinator,
+                    resolveRepositoryURL: {
+                        try GitURLParser.repositoryWebURL(from: repository.gitURL)
+                    },
+                    openInBrowser: { url in
+                        try WorkplaceSystemActions.openInBrowser(url)
                     }
                 )
             },
@@ -707,7 +752,7 @@ struct RootSplitView: View {
                 )
             },
             onSwitchAllRepositoriesToWorkBranch: {
-                let workBranch = latestWorkplace(for: workplace.id)?.branch?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let workBranch = currentWorkBranch(for: workplace.id)
                 detailActionCoordinator.run(
                     actionName: "批量切到工作分支",
                     refreshBranches: true,
@@ -723,7 +768,7 @@ struct RootSplitView: View {
                 )
             },
             onRefreshStatuses: {
-                try? workplaceStore.clearFailedStatusesWhereDirectoryExists(workplaceID: workplace.id)
+                workplaceStore.clearFailedStatusesWhereDirectoryExists(workplaceID: workplace.id)
             },
             onCancelAction: {
                 detailActionCoordinator.cancelRunningAction()
@@ -962,12 +1007,25 @@ struct RootSplitView: View {
         _ feedback: CCSpaceFeedback,
         for workplaceID: UUID
     ) {
-        guard appViewModel.selectedWorkplaceID == workplaceID else { return }
+        guard appViewModel.selectedWorkplaceID == workplaceID else {
+            // 从侧栏对"未选中"的工作区操作(置顶/归档等)时,详情区的反馈通道不在
+            // 当前屏上——此前直接 return,失败与成功提示双双被吞。错误改走根级
+            // overlay 横幅(任意路由可见);成功提示同样上抛,避免"点了没反应"。
+            appearanceFeedback = feedback
+            return
+        }
         detailActionCoordinator.feedback = feedback
     }
 
     private func latestWorkplace(for id: UUID) -> Workplace? {
         workplaceStore.workplaces.first { $0.id == id }
+    }
+
+    /// 取工作区当前配置的工作分支(去首尾空白);未配置时返回空串。
+    /// 单个/批量"切到工作分支"两个入口共用,避免裁剪逻辑两处漂移。
+    private func currentWorkBranch(for workplaceID: UUID) -> String {
+        latestWorkplace(for: workplaceID)?.branch?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
     private func syncState(
@@ -1023,13 +1081,18 @@ struct RootSplitView: View {
         // 恢复上次选中会把它覆盖掉(截图场景拍成上次退出时的页面),直接跳过。
         guard launchConfiguration.screenshotScene == nil else { return }
         let settings = settingsStore.settings
-        guard let lastRoute = settings.lastSelectedRoute else { return }
-        if lastRoute == AppRoute.workplaces.rawValue,
-           let idString = settings.lastSelectedWorkplaceID,
-           let workplaceID = UUID(uuidString: idString),
-           workplaceStore.workplaces.contains(where: { $0.id == workplaceID }) {
-            appViewModel.showWorkplace(workplaceID)
-        } else if lastRoute == AppRoute.settings.rawValue {
+        // 经 AppRoute(rawValue:) 校验而非裸字符串比较:
+        // 持久化值可能来自旧版本/手改文件,非法值直接忽略,落到默认路由。
+        guard let lastRoute = settings.lastSelectedRoute,
+              let route = AppRoute(rawValue: lastRoute) else { return }
+        switch route {
+        case .workplaces:
+            if let idString = settings.lastSelectedWorkplaceID,
+               let workplaceID = UUID(uuidString: idString),
+               workplaceStore.workplaces.contains(where: { $0.id == workplaceID }) {
+                appViewModel.showWorkplace(workplaceID)
+            }
+        case .settings:
             appViewModel.showRoute(.settings)
         }
     }
@@ -1039,7 +1102,7 @@ struct RootSplitView: View {
         let refreshState = RootSplitDiskRefreshState(
             route: appViewModel.route,
             selectedWorkplaceID: appViewModel.selectedWorkplaceID,
-            scenePhase: scenePhase,
+            scenePhase: mirroredScenePhase,
             rootPath: settingsStore.settings.workplaceRootPath
         )
 
@@ -1048,19 +1111,25 @@ struct RootSplitView: View {
 
         let shouldInvalidateBranches = refreshState.shouldInvalidateBranchesAfterRefresh
         let rootPath = refreshState.normalizedRootPath
+        refreshGeneration += 1
+        let generation = refreshGeneration
         refreshTask = Task {
-            defer {
+            await diskRefreshService.refresh(rootPath: rootPath)
+            let isCurrentGeneration = refreshGeneration == generation
+            if isCurrentGeneration {
+                refreshTask = nil
+                // 被取消的旧任务绝不能触碰句柄与分支缓存:它返回时新任务可能正在跑,
+                // 清句柄会导致下一轮调度与前一轮并发。
                 if Task.isCancelled == false, shouldInvalidateBranches {
                     detailActionCoordinator.invalidateBranches()
                 }
-                refreshTask = nil
             }
-            await diskRefreshService.refresh(rootPath: rootPath)
         }
     }
 
     /// 每小时检查一次更新;仅 App 处于活跃状态时执行。
     /// Task 取消(视图消失)时 sleep 抛错退出循环。
+    /// 读 mirroredScenePhase(@State)而非 @Environment:后者的值在长驻闭包里是首帧快照。
     private func runPeriodicUpdateCheck() async {
         while true {
             do {
@@ -1068,7 +1137,7 @@ struct RootSplitView: View {
             } catch {
                 return // 任务被取消(视图销毁),退出循环
             }
-            guard scenePhase == .active else { continue }
+            guard mirroredScenePhase == .active else { continue }
             await updateChecker.check()
         }
     }

@@ -64,6 +64,10 @@ struct SyncCoordinator: Sendable {
         self.fileSystemService = fileSystemService
     }
 
+    /// 批量克隆仓库并产出初始同步状态。
+    ///
+    /// 调用方必须已持有涉及路径的 RepositoryOperationLock(批量克隆约定);本方法不自行加锁
+    /// (锁不支持重入,内部再加锁会与已持锁的调用方死锁)。
     @MainActor
     func cloneRepositories(
         repositories: [RepositoryConfig],
@@ -93,15 +97,28 @@ struct SyncCoordinator: Sendable {
                 group.addTask {
                     try Task.checkCancellation()
                     await progressTracker.didStart(repositoryName: repositoryName)
+                    // 路径校验失败与 clone 失败同权:落为该仓库的 .failed 状态,
+                    // 不让单个非法路径抛出任务组、作废整批已完成的克隆;只有取消可以冲出任务组。
                     let localPath: String
                     do {
                         localPath = try WorkplaceStore.repositoryPath(
                             workplacePath: workplacePath,
                             repositoryName: repositoryName
                         )
+                    } catch is CancellationError {
+                        await progressTracker.didFinish(repositoryName: repositoryName)
+                        throw CancellationError()
                     } catch {
                         await progressTracker.didFinish(repositoryName: repositoryName)
-                        throw error
+                        return RepositorySyncState(
+                            workplaceID: workplaceID,
+                            repositoryID: repositoryID,
+                            status: .failed,
+                            localPath: "",
+                            lastError: error.localizedDescription,
+                            lastSyncedAt: nil,
+                            hasLocalDirectory: false
+                        )
                     }
                     let state: RepositorySyncState
                     do {
@@ -184,11 +201,8 @@ struct SyncCoordinator: Sendable {
             pullingState.lastError = nil
             return pullingState
         }
-        do {
-            try workplaceStore.updateSyncStates(preparation.failed + pullingStates)
-        } catch {
-            syncCoordinatorLog.error("event=update_pulling_states_failed reason=\(error.localizedDescription)")
-        }
+        // 防抖持久化不抛错（见 WorkplaceStore.persistSyncStates），直接落库。
+        workplaceStore.updateSyncStates(preparation.failed + pullingStates)
 
         let gitService = gitService
         let repoLock = RepositoryOperationLock.shared
@@ -218,6 +232,10 @@ struct SyncCoordinator: Sendable {
                 successState.lastSyncedAt = .now
                 successState.lastError = nil
                 return (successState, summary)
+            } catch is CancellationError {
+                // 取消不是失败:恢复操作前状态(pulling 只是副本状态,入参 state 未被改动),
+                // 不把 "cancelled" 落库成 .failed,避免取消后 UI 出现整列假失败。
+                return (state, nil)
             } catch {
                 var failedState = state
                 failedState.status = .failed
@@ -236,11 +254,7 @@ struct SyncCoordinator: Sendable {
             }
             resultStates.append(resultState)
         }
-        do {
-            try workplaceStore.updateSyncStates(resultStates)
-        } catch {
-            syncCoordinatorLog.error("event=update_result_states_failed reason=\(error.localizedDescription)")
-        }
+        workplaceStore.updateSyncStates(resultStates)
 
         let failedNames = resultStates
             .filter { $0.status == .failed }
@@ -272,6 +286,9 @@ struct SyncCoordinator: Sendable {
             candidates,
             maxConcurrentTasks: Self.maxConcurrentPullTasks
         ) { state in
+            // branchStatus 探测在锁外执行,与后续加锁的 pull 之间存在 TOCTOU 窗口:
+            // 探测结果可能过期(上游配置恰好变化)。可接受的取舍:探测只读且瞬时,
+            // 若全程持锁会让每个仓库的检查串行排队,锁竞争代价远高于偶发的过期判断。
             guard let branchStatus = await gitService.branchStatus(in: state.localPath) else {
                 return PullPreparationDecision.failed(
                     failedPullInspectionState(
@@ -310,6 +327,37 @@ struct SyncCoordinator: Sendable {
             failed: failedStates,
             skippedCount: skippedCount
         )
+    }
+
+    // MARK: - 独立窗口的仓库写操作(与后台 pull/push/切分支共用 per-path 锁)
+    //
+    // Diff / 提交记录窗口不经主工作区流程直接发起写操作;若不走锁,
+    // 定时 pull 可在"git add 已执行、commit 未跑"的中间态插进来合并远端,
+    // 或与 discard 交错产生 index.lock 冲突。这里统一收口到 RepositoryOperationLock。
+
+    @MainActor
+    func discardFileChanges(filePath: String, in directory: String) async throws {
+        try await RepositoryOperationLock.shared.withLock(path: directory) {
+            try await gitService.discardChanges(filePath: filePath, in: directory)
+        }
+    }
+
+    @MainActor
+    func commitAllChanges(message: String, in directory: String) async throws {
+        try await RepositoryOperationLock.shared.withLock(path: directory) {
+            try await gitService.commitAllChanges(message: message, in: directory)
+        }
+    }
+
+    @MainActor
+    func createBranchFromRevision(
+        _ branch: String,
+        fromRev rev: String,
+        in directory: String
+    ) async throws {
+        try await RepositoryOperationLock.shared.withLock(path: directory) {
+            try await gitService.createBranch(branch, fromRev: rev, in: directory)
+        }
     }
 
     @MainActor

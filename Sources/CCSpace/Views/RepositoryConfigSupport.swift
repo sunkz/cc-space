@@ -36,9 +36,15 @@ struct RepositorySearchPresentationState {
 
 struct RepositoryAddPresentationState {
     let canSubmit: Bool
+    /// 非空输入是否通过 URL 格式预检(协议白名单/选项注入防护,与 GitURLParser 同一口径)。
+    /// 不并入 canSubmit:禁用按钮而无解释更糟;用于输入框下即时行内提示,
+    /// 免得用户等到提交才看到 store 抛出的错误。
+    let isURLFormatValid: Bool
 
     init(gitURL: String) {
-        canSubmit = !gitURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let trimmed = gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        canSubmit = !trimmed.isEmpty
+        isURLFormatValid = trimmed.isEmpty ? true : (try? GitURLParser.validateRemoteURL(trimmed)) != nil
     }
 }
 

@@ -58,8 +58,8 @@ extension View {
             .foregroundStyle(.secondary)
     }
 
-    func ccspaceIconActionButton() -> some View {
-        modifier(CCSpaceIconActionButtonModifier())
+    func ccspaceIconActionButton(large: Bool = false) -> some View {
+        modifier(CCSpaceIconActionButtonModifier(large: large))
     }
 
     @ViewBuilder
@@ -238,15 +238,18 @@ private struct CCSpaceScreenBackground: View {
 }
 
 private struct CCSpaceIconActionButtonModifier: ViewModifier {
+    /// 尺寸档:设置页仓库行的操作按钮用 `large`(28pt 框 + 一号图标),
+    /// 工作区仓库行等保持 compact 原规格,不连带变化。
+    var large: Bool = false
     @State private var isHovering = false
 
     func body(content: Content) -> some View {
         content
             .buttonStyle(.plain)
             .controlSize(.small)
-            .font(.footnote.weight(.medium))
+            .font(large ? .body.weight(.medium) : .footnote.weight(.medium))
             .foregroundStyle(isHovering ? Color.primary : .secondary)
-            .frame(width: 24, height: 24)
+            .frame(width: large ? 28 : 24, height: large ? 28 : 24)
             .contentShape(Rectangle())
             .animation(.snappy(duration: 0.18), value: isHovering)
             .onHover { isHovering = $0 }

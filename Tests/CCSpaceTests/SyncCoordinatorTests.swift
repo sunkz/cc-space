@@ -363,11 +363,21 @@ final class SyncCoordinatorTests: XCTestCase {
 
         let maxActiveCount = await gitService.recorder.maxActiveCount
         XCTAssertLessThanOrEqual(maxActiveCount, SyncCoordinator.maxConcurrentCloneTasks)
+        // 下界防"限流被删仍绿":任务数明显超过限制时,若限流失效任务会全部并发,
+        // maxActiveCount 应达到 2 以上;限流被整体删除且调度串行时此断言会失败。
+        XCTAssertGreaterThanOrEqual(
+            maxActiveCount, 2,
+            "clone 应实际并发执行(共 \(repositories.count) 个任务,限制 \(SyncCoordinator.maxConcurrentCloneTasks))"
+        )
     }
 
     func test_pullRepositoriesLimitsConcurrentGitOperations() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: workspaceRoot)
+        }
         let fileStore = JSONFileStore(rootDirectory: root)
         let store = WorkplaceStore(fileStore: fileStore)
 
@@ -402,7 +412,7 @@ final class SyncCoordinatorTests: XCTestCase {
             state.status = .success
             state.hasLocalDirectory = true
             state.localPath = localPath
-            try store.updateSyncState(state)
+            store.updateSyncState(state)
         }
 
         let gitService = PullConcurrencyGitServiceSpy()
@@ -421,11 +431,87 @@ final class SyncCoordinatorTests: XCTestCase {
         XCTAssertEqual(result.skippedCount, 0)
         let maxActiveCount = await gitService.recorder.maxActiveCount
         XCTAssertLessThanOrEqual(maxActiveCount, SyncCoordinator.maxConcurrentPullTasks)
+        // 下界防"限流被删仍绿":任务数明显超过限制时,若限流失效任务会全部并发,
+        // maxActiveCount 应达到 2 以上;限流被整体删除且调度串行时此断言会失败。
+        XCTAssertGreaterThanOrEqual(
+            maxActiveCount, 2,
+            "pull 应实际并发执行(共 \(repositories.count) 个任务,限制 \(SyncCoordinator.maxConcurrentPullTasks))"
+        )
+    }
+
+    /// 回归锁:批量 pull 中途取消后,不得有任何行停留在 .pulling 瞬态。
+    /// pullRepositories 会先把全部 pullable 行预标 .pulling 落库,再逐仓拉取;
+    /// 曾有版本在取消时跳过剩余仓库的任务调度,那些行永远等不到终态回写,
+    /// isBusy 恒真把详情页与分支面板整体锁死(所有分支置灰不可点)。
+    func test_pullRepositoriesCancellationLeavesNoRowStuckInPulling() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: workspaceRoot)
+        }
+        let fileStore = JSONFileStore(rootDirectory: root)
+        let store = WorkplaceStore(fileStore: fileStore)
+
+        let repositories = (0..<(SyncCoordinator.maxConcurrentPullTasks * 3)).map { index in
+            RepositoryConfig(
+                id: UUID(),
+                gitURL: "git@github.com:org/repo-\(index).git",
+                repoName: "repo-\(index)",
+                createdAt: .now,
+                updatedAt: .now
+            )
+        }
+        let workplace = try store.createWorkplace(
+            name: "pull-cancel",
+            rootPath: workspaceRoot.path,
+            selectedRepositories: repositories
+        )
+        for repository in repositories {
+            let localPath = URL(fileURLWithPath: workplace.path).appendingPathComponent(repository.repoName).path
+            try FileManager.default.createDirectory(atPath: localPath, withIntermediateDirectories: true)
+            var state = try XCTUnwrap(
+                store.syncStates.first {
+                    $0.workplaceID == workplace.id && $0.repositoryID == repository.id
+                }
+            )
+            state.status = .success
+            state.hasLocalDirectory = true
+            state.localPath = localPath
+            store.updateSyncState(state)
+        }
+
+        let coordinator = SyncCoordinator(
+            gitService: PullConcurrencyGitServiceSpy(),
+            fileSystemService: FileSystemServiceSpy()
+        )
+        let task = Task {
+            await coordinator.pullRepositories(
+                syncStates: store.syncStates.filter { $0.workplaceID == workplace.id },
+                workplaceStore: store
+            )
+        }
+        // 让前几仓进入拉取后取消:其余仓库此时仍是预标的 .pulling,必须被收敛为终态。
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        task.cancel()
+        _ = await task.value
+
+        let stuck = store.syncStates.filter {
+            $0.workplaceID == workplace.id && $0.status == .pulling
+        }
+        XCTAssertTrue(
+            stuck.isEmpty,
+            "取消后仍有 \(stuck.count) 行卡在 .pulling 瞬态,会把工作区 UI 永久锁灰"
+        )
     }
 
     func test_pullUpdatesStatusToSuccessAndSetsLastSyncedAt() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: workspaceRoot)
+        }
         let fileStore = JSONFileStore(rootDirectory: root)
         let store = WorkplaceStore(fileStore: fileStore)
         let repository = RepositoryConfig(
@@ -447,7 +533,7 @@ final class SyncCoordinatorTests: XCTestCase {
             withIntermediateDirectories: true,
             attributes: nil
         )
-        try store.updateSyncState(clonedState)
+        store.updateSyncState(clonedState)
 
         let coordinator = SyncCoordinator(
             gitService: GitServiceStub(behavior: .success),
@@ -470,6 +556,10 @@ final class SyncCoordinatorTests: XCTestCase {
     func test_pullSetsFailedStatusWithErrorOnFailure() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: workspaceRoot)
+        }
         let fileStore = JSONFileStore(rootDirectory: root)
         let store = WorkplaceStore(fileStore: fileStore)
         let repository = RepositoryConfig(
@@ -491,7 +581,7 @@ final class SyncCoordinatorTests: XCTestCase {
             withIntermediateDirectories: true,
             attributes: nil
         )
-        try store.updateSyncState(clonedState)
+        store.updateSyncState(clonedState)
 
         let coordinator = SyncCoordinator(
             gitService: GitServiceStub(behavior: .fail),
@@ -515,6 +605,10 @@ final class SyncCoordinatorTests: XCTestCase {
     func test_pullMarksRepositoryFailedWhenBranchStatusCannotBeResolved() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: workspaceRoot)
+        }
         let fileStore = JSONFileStore(rootDirectory: root)
         let store = WorkplaceStore(fileStore: fileStore)
         let repository = RepositoryConfig(
@@ -536,7 +630,7 @@ final class SyncCoordinatorTests: XCTestCase {
             withIntermediateDirectories: true,
             attributes: nil
         )
-        try store.updateSyncState(clonedState)
+        store.updateSyncState(clonedState)
 
         let gitService = GitServiceStub(
             behavior: .success,
@@ -567,6 +661,10 @@ final class SyncCoordinatorTests: XCTestCase {
     func test_pullSkipsRepositoryWhenNoRemoteTrackingBranch() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: workspaceRoot)
+        }
         let fileStore = JSONFileStore(rootDirectory: root)
         let store = WorkplaceStore(fileStore: fileStore)
         let repository = RepositoryConfig(
@@ -588,7 +686,7 @@ final class SyncCoordinatorTests: XCTestCase {
             withIntermediateDirectories: true,
             attributes: nil
         )
-        try store.updateSyncState(clonedState)
+        store.updateSyncState(clonedState)
 
         let gitService = GitServiceStub(
             behavior: .success,
@@ -619,6 +717,10 @@ final class SyncCoordinatorTests: XCTestCase {
     func test_pullSkipsNonSuccessRepositories() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: workspaceRoot)
+        }
         let fileStore = JSONFileStore(rootDirectory: root)
         let store = WorkplaceStore(fileStore: fileStore)
         let repo1 = RepositoryConfig(
@@ -645,7 +747,7 @@ final class SyncCoordinatorTests: XCTestCase {
             withIntermediateDirectories: true,
             attributes: nil
         )
-        try store.updateSyncState(state2)
+        store.updateSyncState(state2)
 
         let coordinator = SyncCoordinator(
             gitService: GitServiceStub(behavior: .success),
@@ -670,6 +772,10 @@ final class SyncCoordinatorTests: XCTestCase {
     func test_pullSkipsRepositoryWithoutTrackingBranchAndPreservesStatus() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: workspaceRoot)
+        }
         let fileStore = JSONFileStore(rootDirectory: root)
         let store = WorkplaceStore(fileStore: fileStore)
         let repository = RepositoryConfig(
@@ -695,7 +801,7 @@ final class SyncCoordinatorTests: XCTestCase {
             withIntermediateDirectories: true,
             attributes: nil
         )
-        try store.updateSyncState(state)
+        store.updateSyncState(state)
 
         let gitService = GitServiceStub(
             behavior: .success,
@@ -728,6 +834,7 @@ final class SyncCoordinatorTests: XCTestCase {
 
     func test_pullSkipsFailedRepositoryWithoutTrackingBranch() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
         let fileStore = JSONFileStore(rootDirectory: root)
         let store = WorkplaceStore(fileStore: fileStore)
         let repository = RepositoryConfig(
@@ -758,7 +865,7 @@ final class SyncCoordinatorTests: XCTestCase {
         state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = "There is no tracking information for the current branch."
-        try store.updateSyncState(state)
+        store.updateSyncState(state)
 
         let gitService = GitServiceStub(
             behavior: .success,
@@ -792,6 +899,10 @@ final class SyncCoordinatorTests: XCTestCase {
     func test_replaceSyncStatesReplacesTargetWorkplaceOnly() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: workspaceRoot)
+        }
         let fileStore = JSONFileStore(rootDirectory: root)
         let store = WorkplaceStore(fileStore: fileStore)
 
@@ -828,7 +939,7 @@ final class SyncCoordinatorTests: XCTestCase {
             lastError: nil,
             lastSyncedAt: .now
         )
-        try store.replaceSyncStates([replacement], for: targetWorkplace.id)
+        store.replaceSyncStates([replacement], for: targetWorkplace.id)
 
         let targetState = store.syncStates.first {
             $0.workplaceID == targetWorkplace.id && $0.repositoryID == targetRepo.id
@@ -854,6 +965,7 @@ final class SyncCoordinatorTests: XCTestCase {
         let stub = PullAllBranchesGitServiceStub(outcomeMap: ["/tmp/repo-a": outcomeForRepoA])
         let coordinator = SyncCoordinator(gitService: stub, fileSystemService: FileSystemService())
         let storeRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: storeRoot) }
         let store = WorkplaceStore(fileStore: JSONFileStore(rootDirectory: storeRoot))
         let workplaceID = UUID()
         let repositoryID = UUID()

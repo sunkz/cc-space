@@ -5,7 +5,8 @@ APP_NAME="CCSpace"
 DISPLAY_NAME="CCSpace"
 BUNDLE_ID="com.ccspace.app"
 MINIMUM_SYSTEM_VERSION="14.0"
-ICON_PATH="Resources/AppIcon.icns"
+# 图标路径锚定到脚本自身位置(仓库根/Resources):不依赖调用方的 cwd。
+ICON_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/Resources/AppIcon.icns"
 
 usage() {
   cat <<EOF
@@ -96,16 +97,18 @@ cp "$BINARY_PATH" "$APP_BINARY"
 chmod +x "$APP_BINARY"
 cp "$ICON_PATH" "$APP_RESOURCES/AppIcon.icns"
 
+# 值统一内层双引号:PlistBuddy 的 -c 命令串按空格切词,
+# DISPLAY_NAME/APP_NAME 等含空格时必须让 PlistBuddy 看到带引号的值,否则 Add 失败。
 /usr/libexec/PlistBuddy \
   -c "Clear dict" \
-  -c "Add :CFBundleExecutable string $APP_NAME" \
-  -c "Add :CFBundleIdentifier string $BUNDLE_ID" \
+  -c "Add :CFBundleExecutable string \"$APP_NAME\"" \
+  -c "Add :CFBundleIdentifier string \"$BUNDLE_ID\"" \
   -c "Add :CFBundleIconFile string AppIcon" \
-  -c "Add :CFBundleName string $DISPLAY_NAME" \
+  -c "Add :CFBundleName string \"$DISPLAY_NAME\"" \
   -c "Add :CFBundlePackageType string APPL" \
-  -c "Add :CFBundleShortVersionString string $VERSION" \
-  -c "Add :CFBundleVersion string $VERSION" \
-  -c "Add :LSMinimumSystemVersion string $MINIMUM_SYSTEM_VERSION" \
+  -c "Add :CFBundleShortVersionString string \"$VERSION\"" \
+  -c "Add :CFBundleVersion string \"$VERSION\"" \
+  -c "Add :LSMinimumSystemVersion string \"$MINIMUM_SYSTEM_VERSION\"" \
   -c "Add :NSPrincipalClass string NSApplication" \
   "$INFO_PLIST"
 

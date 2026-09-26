@@ -89,13 +89,29 @@ struct DiskRefreshService {
         rootPath: String
     ) async -> DiskRefreshComputationResult {
         await Task.detached(priority: .utility) {
-            DiskRefreshComputationResult(
+            // 取锁的 in-flight 快照:创建/改名/克隆进行中的路径要在豁免名单里跳过破坏性改写。
+            // 快照与磁盘扫描之间的窗口无害:拿快照之后才 acquire 的锁,其操作自身
+            // 也遵守"先持锁再改盘"的顺序,磁盘与记录的中间态对刷新不可见。
+            let lockedPathKeys = await RepositoryOperationLock.shared.inFlightPathKeys()
+            // 去重保留优先级要参考"谁在被使用":被任一工作区选中/置顶或仍有
+            // 同步态行的仓库必须优先保留,否则可能硬删掉正在用的那条而留下新重复项。
+            var protectedRepositoryIDs: Set<UUID> = []
+            for workplace in snapshot.workplace.workplaces {
+                protectedRepositoryIDs.formUnion(workplace.selectedRepositoryIDs)
+                protectedRepositoryIDs.formUnion(workplace.pinnedRepositoryIDs)
+            }
+            protectedRepositoryIDs.formUnion(snapshot.workplace.syncStates.map(\.repositoryID))
+            return DiskRefreshComputationResult(
                 workplaceResult: WorkplaceStore.diskRefreshResult(
                     workplaces: snapshot.workplace.workplaces,
                     syncStates: snapshot.workplace.syncStates,
-                    rootPath: rootPath
+                    rootPath: rootPath,
+                    lockedPathKeys: lockedPathKeys
                 ),
-                repositoryResult: RepositoryStore.deduplicationResult(for: snapshot.repositories)
+                repositoryResult: RepositoryStore.deduplicationResult(
+                    for: snapshot.repositories,
+                    protectedRepositoryIDs: protectedRepositoryIDs
+                )
             )
         }.value
     }

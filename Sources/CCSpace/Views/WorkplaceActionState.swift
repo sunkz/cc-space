@@ -24,10 +24,12 @@ struct WorkplaceActionState {
 
         let selectedRepositoryIDs = Set(workplace.selectedRepositoryIDs)
         var hasLocal = false
+        var hasAnySyncStateRow = false
         var activeCount = 0
         var failedIDs = Set<UUID>()
 
         for state in syncStates where state.workplaceID == workplace.id && selectedRepositoryIDs.contains(state.repositoryID) {
+            hasAnySyncStateRow = true
             if state.hasLocalDirectory { hasLocal = true }
             switch state.status {
             case .cloning, .pulling, .switching, .removing: activeCount += 1
@@ -48,6 +50,13 @@ struct WorkplaceActionState {
         }
         canRetryFailedRepositories = !failedRepositories.isEmpty && !isBusy
         canSyncAllRepositories = hasPullableRepositories && !isBusy
-        canOpenDirectory = workplace.hasLocalDirectory
+        // 有同步态行时用"任一仓库目录在盘"推断工作区目录存在(仓库目录必然
+        // 在工作区目录下),避免此前每次 body 求值走一次主线程 fileExists;
+        // 没有任何仓库行的工作区无从推断,回退一次 stat(仅空工作区的冷路径)。
+        if hasAnySyncStateRow {
+            canOpenDirectory = hasLocal
+        } else {
+            canOpenDirectory = FileManager.default.fileExists(atPath: workplace.path)
+        }
     }
 }

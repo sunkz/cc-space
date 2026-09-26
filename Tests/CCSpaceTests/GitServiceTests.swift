@@ -3,8 +3,8 @@ import XCTest
 
 final class GitServiceTests: XCTestCase {
     func test_checkoutBranchSwitchesToExistingLocalBranch() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
         let repository = root.appendingPathComponent("repo")
 
         _ = try shell(["git", "init", repository.path])
@@ -28,8 +28,8 @@ final class GitServiceTests: XCTestCase {
     }
 
     func test_checkoutBranchCreatesTrackingBranchFromRemoteWhenLocalBranchMissing() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
         let source = root.appendingPathComponent("source")
         let bareRemote = root.appendingPathComponent("remote.git")
         let clone = root.appendingPathComponent("clone")
@@ -63,8 +63,8 @@ final class GitServiceTests: XCTestCase {
     }
 
     func test_checkoutBranchFetchesRemoteBranchWhenOriginReferenceIsStale() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
         let source = root.appendingPathComponent("source")
         let bareRemote = root.appendingPathComponent("remote.git")
         let clone = root.appendingPathComponent("clone")
@@ -115,8 +115,8 @@ final class GitServiceTests: XCTestCase {
     }
 
     func test_checkoutBranchCreatesLocalBranchFromCurrentHeadWhenRemoteBranchMissing() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
         let repository = root.appendingPathComponent("repo")
 
         _ = try shell(["git", "init", repository.path])
@@ -144,8 +144,8 @@ final class GitServiceTests: XCTestCase {
     }
 
     func test_defaultBranchUsesLocalOriginHeadReference() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
         let source = root.appendingPathComponent("source")
         let bareRemote = root.appendingPathComponent("remote.git")
         let clone = root.appendingPathComponent("clone")
@@ -173,8 +173,8 @@ final class GitServiceTests: XCTestCase {
     }
 
     func test_pushSetsUpstreamWhenCurrentBranchHasNoTrackingBranch() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
         let source = root.appendingPathComponent("source")
         let bareRemote = root.appendingPathComponent("remote.git")
 
@@ -211,8 +211,8 @@ final class GitServiceTests: XCTestCase {
     }
 
     func test_pushUsesExistingTrackingBranch() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
         let source = root.appendingPathComponent("source")
         let bareRemote = root.appendingPathComponent("remote.git")
         let clone = root.appendingPathComponent("clone")
@@ -253,8 +253,8 @@ final class GitServiceTests: XCTestCase {
     }
 
     func test_stashIncludesUntrackedFilesAndRestoresThem() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
         let repository = root.appendingPathComponent("repo")
 
         _ = try shell(["git", "init", repository.path])
@@ -289,8 +289,8 @@ final class GitServiceTests: XCTestCase {
     }
 
     func test_recentCommitsIncludesChangeStats() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
         let repository = root.appendingPathComponent("repo")
 
         _ = try shell(["git", "init", repository.path])
@@ -339,8 +339,8 @@ final class GitServiceTests: XCTestCase {
     }
 
     func test_diffWorkingDirectoryShowsUncommittedChanges() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
         let repository = root.appendingPathComponent("repo")
 
         _ = try shell(["git", "init", repository.path])
@@ -361,7 +361,7 @@ final class GitServiceTests: XCTestCase {
         )
 
         let service = GitService()
-        let diffs = await service.diffWorkingDirectory(in: repository.path)
+        let diffs = try await service.diffWorkingDirectory(in: repository.path)
 
         // 两种改动都应展示:已跟踪文件的修改 + untracked 新文件。
         XCTAssertEqual(diffs.count, 2)
@@ -378,8 +378,8 @@ final class GitServiceTests: XCTestCase {
     }
 
     func test_diffCommitShowsCommitChanges() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
         let repository = root.appendingPathComponent("repo")
 
         _ = try shell(["git", "init", repository.path])
@@ -402,7 +402,7 @@ final class GitServiceTests: XCTestCase {
         let service = GitService()
         let commits = await service.recentCommits(in: repository.path, count: 5)
         let secondCommit = commits[0]
-        let diffs = await service.diffCommit(hash: secondCommit.hash, in: repository.path)
+        let diffs = try await service.diffCommit(hash: secondCommit.hash, in: repository.path)
 
         // 第二次 commit 只新增 feature.txt。
         XCTAssertEqual(diffs.count, 1)
@@ -412,8 +412,8 @@ final class GitServiceTests: XCTestCase {
     }
 
     func test_blobContentReturnsFileContentAtRevision() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
         let repository = root.appendingPathComponent("repo")
 
         _ = try shell(["git", "init", repository.path])
@@ -450,8 +450,8 @@ final class GitServiceTests: XCTestCase {
     }
 
     func test_diffCommitShowsMergeChangesWithPatchContent() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
         let repository = root.appendingPathComponent("repo")
 
         _ = try shell(["git", "init", repository.path])
@@ -487,7 +487,7 @@ final class GitServiceTests: XCTestCase {
         let commits = await service.recentCommits(in: repository.path, count: 5)
         let mergeCommit = commits.first { $0.subject.contains("Merge") }
         XCTAssertNotNil(mergeCommit)
-        let diffs = await service.diffCommit(hash: mergeCommit!.hash, in: repository.path)
+        let diffs = try await service.diffCommit(hash: mergeCommit!.hash, in: repository.path)
 
         // merge commit 应按第一父提交展示改动:文件列表与 patch 内容都非空。
         XCTAssertEqual(diffs.count, 1)
@@ -497,8 +497,8 @@ final class GitServiceTests: XCTestCase {
     }
 
     func test_diffBranchesShowsChangesFromBaseToHead() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
         let repository = root.appendingPathComponent("repo")
 
         _ = try shell(["git", "init", repository.path])
@@ -522,7 +522,7 @@ final class GitServiceTests: XCTestCase {
         _ = try shell(["git", "-C", repository.path, "commit", "-m", "add feature"])
 
         let service = GitService()
-        let diffs = await service.diffBranches(base: "main", head: "feature", in: repository.path)
+        let diffs = try await service.diffBranches(base: "main", head: "feature", in: repository.path)
 
         // feature 相对 main 多出 feature.txt 一个文件。
         XCTAssertEqual(diffs.count, 1)
@@ -532,8 +532,8 @@ final class GitServiceTests: XCTestCase {
     }
 
     func test_diffBranchesWithHeadAsCurrentBranchIncludesUncommittedChanges() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
         let repository = root.appendingPathComponent("repo")
 
         _ = try shell(["git", "init", repository.path])
@@ -558,7 +558,7 @@ final class GitServiceTests: XCTestCase {
         let service = GitService()
 
         // head 为当前分支:走 base → 工作区,包含未提交改动。
-        let againstWorkingTree = await service.diffBranches(
+        let againstWorkingTree = try await service.diffBranches(
             base: "remote-main",
             head: "main",
             in: repository.path
@@ -566,7 +566,7 @@ final class GitServiceTests: XCTestCase {
         XCTAssertEqual(againstWorkingTree.map(\.filePath), ["base.txt"])
 
         // head 非当前分支:仍按提交对比,不含工作区改动。
-        let betweenBranches = await service.diffBranches(
+        let betweenBranches = try await service.diffBranches(
             base: "main",
             head: "remote-main",
             in: repository.path
@@ -577,8 +577,8 @@ final class GitServiceTests: XCTestCase {
     func test_diffBranchesPreservesNonASCIIFilePaths() async throws {
         // 回归:中文等非 ASCII 路径在 git 默认 `core.quotepath=true` 下会被转义成八进制
         // (如 `\346\212...`),导致 diff 查看器显示乱码。应用需以 UTF-8 原样输出路径。
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
         let repository = root.appendingPathComponent("repo")
 
         _ = try shell(["git", "init", repository.path])
@@ -601,7 +601,7 @@ final class GitServiceTests: XCTestCase {
         _ = try shell(["git", "-C", repository.path, "commit", "-m", "add doc"])
 
         let service = GitService()
-        let diffs = await service.diffBranches(base: "main", head: "feature", in: repository.path)
+        let diffs = try await service.diffBranches(base: "main", head: "feature", in: repository.path)
 
         XCTAssertEqual(diffs.count, 1)
         XCTAssertEqual(diffs.first?.filePath, "技术文档.md")
@@ -610,8 +610,8 @@ final class GitServiceTests: XCTestCase {
     }
 
     func test_diffBranchesReturnsEmptyWhenBranchesAreIdentical() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
         let repository = root.appendingPathComponent("repo")
 
         _ = try shell(["git", "init", repository.path])
@@ -628,7 +628,7 @@ final class GitServiceTests: XCTestCase {
         _ = try shell(["git", "-C", repository.path, "branch", "feature"])
 
         let service = GitService()
-        let diffs = await service.diffBranches(base: "main", head: "feature", in: repository.path)
+        let diffs = try await service.diffBranches(base: "main", head: "feature", in: repository.path)
 
         XCTAssertTrue(diffs.isEmpty)
     }
@@ -685,8 +685,8 @@ final class GitServiceTests: XCTestCase {
     }
 
     func test_unpushedCommitsReturnsOnlyCommitsAheadOfUpstream() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
         let source = root.appendingPathComponent("source")
         let bareRemote = root.appendingPathComponent("remote.git")
         let clone = root.appendingPathComponent("clone")
@@ -739,8 +739,8 @@ final class GitServiceTests: XCTestCase {
     }
 
     func test_stashListPushPopAndDropRoundTrip() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
         let repository = root.appendingPathComponent("repo")
 
         _ = try shell(["git", "init", repository.path])
@@ -793,8 +793,8 @@ final class GitServiceTests: XCTestCase {
     }
 
     func test_remoteBranchesReturnsBareBranchNames() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
         let source = root.appendingPathComponent("source")
         let bareRemote = root.appendingPathComponent("remote.git")
 
@@ -901,8 +901,8 @@ final class GitServiceTests: XCTestCase {
     }
 
     func test_commitAllChangesInRepositoryWithoutCommits() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
         let repository = root.appendingPathComponent("repo")
         _ = try shell(["git", "init", "-b", "main", repository.path])
         _ = try shell(["git", "-C", repository.path, "config", "user.email", "test@example.com"])
@@ -936,8 +936,9 @@ final class GitServiceTests: XCTestCase {
 
     /// 建一个含单次提交(单文件)的本地仓库,返回仓库目录。
     private func makeRepositoryWithCommittedFile(named name: String, content: String) throws -> URL {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        // 辅助方法里的 defer 会在 return 时立即删除,改挂用例 teardown 统一清理。
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let repository = root.appendingPathComponent("repo")
         _ = try shell(["git", "init", repository.path])
         _ = try shell(["git", "-C", repository.path, "config", "user.email", "test@example.com"])
@@ -988,8 +989,9 @@ final class GitServiceTests: XCTestCase {
 
     /// 构造带一次提交的 main 与指定分支的仓库;`mergeIntoCurrent` 控制分支是否已合并。
     private func makeBranchRepository(mergedIntoCurrent: Bool) throws -> URL {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        // 辅助方法里的 defer 会在 return 时立即删除,改挂用例 teardown 统一清理。
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let repository = root.appendingPathComponent("repo")
 
         _ = try shell(["git", "init", repository.path])
@@ -1062,8 +1064,9 @@ final class GitServiceTests: XCTestCase {
 
     /// 构造 bare 远端 + 克隆仓库:远端有 main 与 feature/to-delete 两个分支。
     private func makeRemoteBranchRepository() throws -> (source: URL, clone: URL) {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        // 辅助方法里的 defer 会在 return 时立即删除,改挂用例 teardown 统一清理。
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let source = root.appendingPathComponent("source")
         let bareRemote = root.appendingPathComponent("remote.git")
         let clone = root.appendingPathComponent("clone")
@@ -1216,8 +1219,8 @@ final class GitServiceTests: XCTestCase {
     }
 
     func test_branchSnapshotDetectsMergeConflictInterruptedOperationAndAbortClearsIt() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
         let repository = root.appendingPathComponent("repo")
 
         _ = try shell(["git", "init", repository.path])
@@ -1269,8 +1272,8 @@ final class GitServiceTests: XCTestCase {
     }
 
     func test_recentAndUnpushedCommitsQuerySpecificBranchRev() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
         let source = root.appendingPathComponent("source")
         let bareRemote = root.appendingPathComponent("remote.git")
 
@@ -1327,8 +1330,8 @@ final class GitServiceTests: XCTestCase {
     }
 
     func test_branchMetadataReportsAheadBehindAndDate() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
         let source = root.appendingPathComponent("source")
         let bareRemote = root.appendingPathComponent("remote.git")
         let worker = root.appendingPathComponent("worker")
@@ -1400,8 +1403,8 @@ final class GitServiceTests: XCTestCase {
     }
 
     func test_commitDetailAndCreateBranchFromRev() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
         let repository = root.appendingPathComponent("repo")
 
         _ = try shell(["git", "init", repository.path])
@@ -1456,8 +1459,8 @@ final class GitServiceTests: XCTestCase {
     /// (另一份工作区推送后 fetch --prune 掉了),创建必须先 fetch 刷新引用再作基线;
     /// 并验证远端不存在的基线如实报错。
     func test_createBranchFromRemoteBranchFetchesStaleReferenceFirst() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
         let bareRemote = root.appendingPathComponent("remote.git")
         let publisher = root.appendingPathComponent("publisher")
         let clone = root.appendingPathComponent("clone")
@@ -1519,10 +1522,164 @@ final class GitServiceTests: XCTestCase {
         XCTAssertEqual(stillOn, "feature/off-release")
     }
 
+    // MARK: - SHA 可回查的暂存恢复(P0-3 回归锁)
+
+    func test_trackedStashRestorePopsTopWhenStackUntouched() async throws {
+        let repository = try makeRepositoryWithCommittedFile(named: "README.md", content: "base")
+        try Data("temp change".utf8).write(to: repository.appendingPathComponent("README.md"))
+
+        let service = GitService()
+        let sha = try await service.trackedStashCreate(in: repository.path)
+        XCTAssertNotNil(sha)
+        let listBefore = await service.stashList(in: repository.path)
+        XCTAssertEqual(listBefore.count, 1)
+
+        try await service.trackedStashRestore(sha: sha, in: repository.path)
+
+        let content = try String(contentsOf: repository.appendingPathComponent("README.md"), encoding: .utf8)
+        XCTAssertEqual(content, "temp change")
+        let listAfter = await service.stashList(in: repository.path)
+        XCTAssertTrue(listAfter.isEmpty, "栈顶仍是本次暂存时应 pop(不留冗余条目)")
+    }
+
+    func test_trackedStashRestoreAppliesBySHAWhenConcurrentUserStashPreemptsStack() async throws {
+        let repository = try makeRepositoryWithCommittedFile(named: "README.md", content: "base")
+        try Data("temp change".utf8).write(to: repository.appendingPathComponent("README.md"))
+
+        let service = GitService()
+        let sha = try await service.trackedStashCreate(in: repository.path)
+        XCTAssertNotNil(sha)
+
+        // 模拟窗口期内用户又 stash 了一条(栈顶变成别人的):
+        try Data("user work".utf8).write(to: repository.appendingPathComponent("USER.md"))
+        _ = try shell(["git", "-C", repository.path, "add", "USER.md"])
+        _ = try shell([
+            "git", "-C", repository.path,
+            "stash", "push", "--include-untracked", "--message", "user stash",
+        ])
+        let listMid = await service.stashList(in: repository.path)
+        XCTAssertEqual(listMid.count, 2)
+
+        try await service.trackedStashRestore(sha: sha, in: repository.path)
+
+        // 我们的改动回来了,但不是以"弹掉栈顶"的方式:
+        let content = try String(contentsOf: repository.appendingPathComponent("README.md"), encoding: .utf8)
+        XCTAssertEqual(content, "temp change")
+        let listAfter = await service.stashList(in: repository.path)
+        XCTAssertEqual(listAfter.count, 2, "错位时只 apply 不 drop:弹错/删错别人的 stash 比留一条冗余严重")
+        XCTAssertTrue(listAfter[0].message.contains("user stash"), "用户的栈顶条目必须原样在位")
+        // 且工作树里没有混入 user stash 的内容:
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repository.appendingPathComponent("USER.md").path))
+    }
+
+    func test_withCleanWorkingTreeDoesNotPopConcurrentUserStash() async throws {
+        let repository = try makeRepositoryWithCommittedFile(named: "README.md", content: "base")
+        try Data("auto stashed change".utf8).write(to: repository.appendingPathComponent("README.md"))
+
+        let service = GitService()
+        try await GitWorktreeSafety.withCleanWorkingTree(
+            in: repository.path,
+            gitService: service,
+            blockedOperation: .switchBranch
+        ) {
+            // body 执行期间(相当于联网窗口)用户手动 stash 了一条自己的改动。
+            // 闭包是 @Sendable:只用 GitService 接口,不触碰 self/shell。
+            try Data("user dirty".utf8).write(to: repository.appendingPathComponent("USER.md"))
+            try await service.stashPush(in: repository.path, message: "user stash")
+        }
+
+        let content = try String(contentsOf: repository.appendingPathComponent("README.md"), encoding: .utf8)
+        XCTAssertEqual(content, "auto stashed change", "自动暂存必须按 SHA 找回,而不是弹走用户的栈顶")
+        let entries = await service.stashList(in: repository.path)
+        XCTAssertEqual(entries.count, 2)
+        XCTAssertTrue(entries[0].message.contains("user stash"))
+    }
+
+    // MARK: - clone 失败不留半成品死局(P0-4 回归锁)
+
+    func test_cloneIntoExistingNonEmptyDirectoryFailsWithoutDeletingUserContent() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let marker = root.appendingPathComponent("precious.txt")
+        try Data("do not touch".utf8).write(to: marker)
+
+        let service = GitService()
+        // 不可达端口,clone 必然失败。
+        do {
+            try await service.clone(
+                repositoryURL: "https://127.0.0.1:1/nonexistent/repo.git",
+                into: root.path
+            )
+            XCTFail("clone 应当失败")
+        } catch {}
+
+        XCTAssertEqual(
+            try String(contentsOf: marker, encoding: .utf8),
+            "do not touch",
+            "调用前已存在的目录绝不许被清理路径删除"
+        )
+    }
+
+    func test_cloneFailureLeavesNoPartialDirectory() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let target = root.appendingPathComponent("fresh")
+
+        let service = GitService()
+        do {
+            try await service.clone(
+                repositoryURL: "https://127.0.0.1:1/nonexistent/repo.git",
+                into: target.path
+            )
+            XCTFail("clone 应当失败")
+        } catch {}
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: target.path),
+            "失败后不得留下让重新 clone 永久失败的目录残留"
+        )
+    }
+
+    // MARK: - isSafeRefName 守卫
+
+    func test_isSafeRefNameRejectsOptionSmugglingAndAmbiguousForms() {
+        XCTAssertTrue(GitService.isSafeRefName("feature/login"))
+        XCTAssertTrue(GitService.isSafeRefName("origin/main"))
+        XCTAssertTrue(GitService.isSafeRefName("v1.2.3-rc1"))
+        XCTAssertFalse(GitService.isSafeRefName(""))
+        XCTAssertFalse(GitService.isSafeRefName("-b"), "以 - 开头会被 git 解析为选项")
+        XCTAssertFalse(GitService.isSafeRefName("a b"))
+        XCTAssertFalse(GitService.isSafeRefName("a\nb"))
+        XCTAssertFalse(GitService.isSafeRefName("/dev/null\u{0}x"), "NUL/控制字符")
+        XCTAssertFalse(GitService.isSafeRefName("main..HEAD"), "允许 .. 会改写 range 语义")
+        XCTAssertFalse(GitService.isSafeRefName("@{u}"))
+        XCTAssertFalse(GitService.isSafeRefName("a:b"), "冒号有 refspec 语义,会被改写为查找远程分支")
+    }
+
+    /// 建立本用例专属的临时根;调用方必须紧跟
+    /// `defer { try? FileManager.default.removeItem(at: root) }`,
+    /// 否则一轮测试会在系统临时目录泄漏几十个含完整 git 仓库的目录。
+    private func makeTempRoot() throws -> URL {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    /// 隔离开发者全局 git 配置对测试仓库的干扰(gpgsign 弹签名、hooks、模板等)。
+    private let gitConfigIsolationArguments = [
+        "-c", "commit.gpgsign=false",
+        "-c", "core.hooksPath=/dev/null",
+    ]
+
     private func shell(_ arguments: [String]) throws -> String {
+        // 固定系统 git:经 /usr/bin/env 解析会吃进 PATH 里的同名遮蔽品。
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = arguments
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        // executableURL 已固定为系统 git,调用方习惯传入的首个 "git" 字面量必须剥掉,
+        // 否则会作为子命令传给 git 本身(git: 'git' is not a git command)。
+        process.arguments = arguments.first == "git"
+            ? gitConfigIsolationArguments + Array(arguments.dropFirst())
+            : arguments
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -1530,10 +1687,11 @@ final class GitServiceTests: XCTestCase {
         process.standardError = stderrPipe
 
         try process.run()
-        process.waitUntilExit()
-
+        // 先排空两根管道再等退出:若先 waitUntilExit,输出超过 64KB 管道缓冲时
+        // 子进程阻塞在写端、我们阻塞在 wait,互相死锁。
         let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        process.waitUntilExit()
 
         guard process.terminationStatus == 0 else {
             throw NSError(

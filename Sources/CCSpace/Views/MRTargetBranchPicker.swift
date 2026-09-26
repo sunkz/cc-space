@@ -13,6 +13,9 @@ struct MRTargetBranchPicker: View {
     @FocusState.Binding var inputFocused: Bool
 
     var body: some View {
+        // 每遍 body 求值只计算一次建议列表:此前"可见性判断 + ForEach"各算一遍,
+        // 每遍都对远端全量分支 filter+sort,搜索输入时是双倍主线程开销。
+        let visibleSuggestions = filteredSuggestions
         VStack(alignment: .leading, spacing: 8) {
             if !selectedBranches.isEmpty {
                 chipsRow
@@ -42,8 +45,8 @@ struct MRTargetBranchPicker: View {
                     }
                 }
 
-            if showsSuggestions, !filteredSuggestions.isEmpty {
-                suggestionsList
+            if showsSuggestions, !visibleSuggestions.isEmpty {
+                suggestionsList(visibleSuggestions)
             }
         }
     }
@@ -92,10 +95,10 @@ struct MRTargetBranchPicker: View {
         )
     }
 
-    private var suggestionsList: some View {
+    private func suggestionsList(_ suggestions: [String]) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(filteredSuggestions, id: \.self) { branch in
+                ForEach(suggestions, id: \.self) { branch in
                     suggestionRow(branch: branch)
                 }
             }

@@ -85,13 +85,8 @@ final class SidebarViewSupportTests: XCTestCase {
     }
 
     func test_rowAccessoryUsesCompactLayout() {
-        let state = SidebarWorkplaceRowPresentationState(
-            workplace: makeWorkplace(name: "Pinned", isPinned: true, isArchived: false),
-            hasFailed: false
-        )
-
-        XCTAssertEqual(state.pinIndicatorColumnWidth, 12)
-        XCTAssertEqual(state.accessorySpacing, 4)
+        XCTAssertEqual(SidebarWorkplaceRowPresentationState.pinIndicatorColumnWidth, 12)
+        XCTAssertEqual(SidebarWorkplaceRowPresentationState.accessorySpacing, 4)
     }
 
     func test_rowAccessoryStateOnlyShowsPinnedIndicatorForActivePinnedWorkplace() {

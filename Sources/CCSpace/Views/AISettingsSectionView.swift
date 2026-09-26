@@ -2,7 +2,9 @@ import SwiftUI
 
 /// 设置页「AI 服务」区块:配置 OpenAI 兼容服务,供提交信息生成等 AI 功能共用。
 ///
-/// 服务地址、模型名与 API Key 统一保存在 settings.json。支持从服务拉取模型列表选择、测试连接。
+/// 服务地址与模型名保存在 settings.json;API Key 优先存入钥匙串,
+/// 钥匙串不可用时降级为明文保存在 settings.json(界面据此展示明文落盘警示)。
+/// 支持从服务拉取模型列表选择、测试连接。
 struct AISettingsSection: View {
     @ObservedObject private var settingsStore: SettingsStore
     private let aiService: AIServiceInfoServicing
@@ -38,8 +40,8 @@ struct AISettingsSection: View {
             headerRow
             configPanel
 
-            if let feedback {
-                CCSpaceFeedbackBanner(feedback: feedback)
+            if let shownFeedback = feedback {
+                CCSpaceFeedbackBanner(feedback: shownFeedback, onClose: { self.feedback = nil })
                     .ccspaceAutoDismissFeedback($feedback)
             }
         }
@@ -50,7 +52,8 @@ struct AISettingsSection: View {
             borderOpacity: 0.03
         )
         .onDisappear {
-            // 视图消失(离开设置页/切换页签)时取消在途请求并复位进行中状态。
+            // 视图从视图树移除(设置页整体关闭)时取消在途请求并复位进行中状态。
+            // 页签切换不再触发本回调:两页签常驻视图树以保留未保存输入。
             fetchModelsTask?.cancel()
             fetchModelsTask = nil
             testConnectionTask?.cancel()
@@ -135,6 +138,15 @@ struct AISettingsSection: View {
                     .frame(minWidth: 100, maxWidth: 140)
 
                 fetchModelsButton
+            }
+
+            // 钥匙串不可用时的明文降级是持久状态,提示常驻展示直到恢复;
+            // apiKeyStoredInKeychain 由 SettingsStore 维护,这里只读。
+            if settingsStore.apiKeyStoredInKeychain == false {
+                Text("钥匙串不可用，API Key 正以明文保存在 settings.json 中")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .ccspaceInsetPanel(

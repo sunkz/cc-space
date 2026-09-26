@@ -124,33 +124,88 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertFalse(json.contains("editorCommand"))
     }
 
-    func test_updateAISettingsPersistsAndLoadsFromNewStore() throws {
+    func test_updateAISettingsStoresKeyInKeychainAndStripsPlaintextFromFile() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let fileStore = JSONFileStore(rootDirectory: root)
-        let firstStore = SettingsStore(fileStore: fileStore)
+        let keychain = InMemoryAPIKeyStore()
+        let firstStore = SettingsStore(fileStore: fileStore, keychain: keychain)
         let aiSettings = AppSettings.AISettings(
             baseURL: "https://api.example.com/v1",
-            modelName: "gpt-test"
+            modelName: "gpt-test",
+            apiKey: "sk-secret-123"
         )
 
         try firstStore.updateAISettings(aiSettings)
 
-        let secondStore = SettingsStore(fileStore: fileStore)
-        XCTAssertEqual(secondStore.settings.aiSettings, aiSettings)
+        // 密钥进钥匙串;settings.json 里绝不出现明文。
+        XCTAssertEqual(keychain.storedKey, "sk-secret-123")
+        let rawJSON = try String(
+            contentsOf: root.appendingPathComponent("settings.json"),
+            encoding: .utf8
+        )
+        XCTAssertFalse(rawJSON.contains("sk-secret-123"), "API Key 不得再明文落盘")
+        XCTAssertFalse(rawJSON.contains("\"apiKey\""))
+
+        // 新 Store 从钥匙串覆盖回内存,消费方(settings.aiSettings.apiKey)口径不变。
+        let secondStore = SettingsStore(fileStore: fileStore, keychain: keychain)
+        let loaded = try XCTUnwrap(secondStore.settings.aiSettings)
+        XCTAssertEqual(loaded.baseURL, aiSettings.baseURL)
+        XCTAssertEqual(loaded.modelName, aiSettings.modelName)
+        XCTAssertEqual(loaded.apiKey, "sk-secret-123")
+        XCTAssertTrue(loaded.apiKeyManagedExternally)
     }
 
-    func test_clearAISettingsPersistsNil() throws {
+    func test_clearAISettingsPersistsNilAndDeletesKeychainItem() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let fileStore = JSONFileStore(rootDirectory: root)
-        let firstStore = SettingsStore(fileStore: fileStore)
+        let keychain = InMemoryAPIKeyStore()
+        let firstStore = SettingsStore(fileStore: fileStore, keychain: keychain)
         try firstStore.updateAISettings(
-            .init(baseURL: "https://api.example.com/v1", modelName: "gpt-test")
+            .init(baseURL: "https://api.example.com/v1", modelName: "gpt-test", apiKey: "sk-x")
         )
 
         try firstStore.updateAISettings(nil)
 
-        let secondStore = SettingsStore(fileStore: fileStore)
+        XCTAssertNil(keychain.storedKey, "清除配置必须连钥匙串条目一起删除")
+        let secondStore = SettingsStore(fileStore: fileStore, keychain: keychain)
         XCTAssertNil(secondStore.settings.aiSettings)
+    }
+
+    /// 旧版本明文 settings.json → 启动一次性迁入钥匙串并重写文件。
+    func test_legacyPlaintextAPIKeyMigratesToKeychainOnLaunch() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let legacyJSON = """
+        {"workplaceRootPath":"/Users/demo/Workplaces","aiSettings":{"baseURL":"https://api.example.com/v1","modelName":"glm","apiKey":"legacy-secret"}}
+        """
+        let settingsURL = root.appendingPathComponent("settings.json")
+        try legacyJSON.write(to: settingsURL, atomically: true, encoding: .utf8)
+
+        let keychain = InMemoryAPIKeyStore()
+        let store = SettingsStore(fileStore: JSONFileStore(rootDirectory: root), keychain: keychain)
+
+        XCTAssertEqual(keychain.storedKey, "legacy-secret")
+        XCTAssertEqual(store.settings.aiSettings?.apiKey, "legacy-secret", "迁入后内存仍持有完整配置")
+        let rewritten = try String(contentsOf: settingsURL, encoding: .utf8)
+        XCTAssertFalse(rewritten.contains("legacy-secret"), "重写后的文件不得保留明文")
+    }
+
+    /// 钥匙串不可用时降级:明文照旧落盘不丢配置,且保留降级标记供后续收敛。
+    func test_keychainFailureFallsBackToPlaintextPersistence() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fileStore = JSONFileStore(rootDirectory: root)
+        let store = SettingsStore(fileStore: fileStore, keychain: FailingAPIKeyStore())
+
+        try store.updateAISettings(
+            .init(baseURL: "https://api.example.com/v1", modelName: "glm", apiKey: "sk-degraded")
+        )
+
+        XCTAssertFalse(store.apiKeyStoredInKeychain)
+        let rawJSON = try String(
+            contentsOf: root.appendingPathComponent("settings.json"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(rawJSON.contains("sk-degraded"), "钥匙串失败时明文降级落盘,不能静默丢密钥")
     }
 
     func test_decodingSettingsWithoutAISettingsYieldsNil() throws {
@@ -252,10 +307,19 @@ final class SettingsStoreTests: XCTestCase {
         store.updateLastSelectedRoute("workplace")
         try store.updateRootPath("/Users/demo/NewWorkplaces", rebasingWorkplaceStore: WorkplaceStore(fileStore: fileStore))
 
-        // 越过防抖窗口后,落盘内容必须仍是新根。
-        try await Task.sleep(for: .milliseconds(800))
-        let reloaded = SettingsStore(fileStore: fileStore)
-        XCTAssertEqual(reloaded.settings.workplaceRootPath, "/Users/demo/NewWorkplaces")
+        // 落盘内容必须始终是新根(防抖任务已被换根取消,旧快照不得覆写)。
+        // 用"截止时间 + 50ms 轮询"代替固定 800ms 后单次断言:慢 CI 上调度抖动
+        // 不会造成假失败,且覆盖整个防抖窗口,旧快照任何时刻落盘都会被抓到。
+        let deadline = Date().timeIntervalSince1970 + 2
+        while Date().timeIntervalSince1970 < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+            let reloaded = SettingsStore(fileStore: fileStore)
+            XCTAssertEqual(
+                reloaded.settings.workplaceRootPath,
+                "/Users/demo/NewWorkplaces",
+                "防抖窗口内落盘内容被覆写回旧根"
+            )
+        }
     }
 
     func test_existingSettingsWithLegacyEditorCommandPreservesRootPath() throws {
@@ -268,5 +332,35 @@ final class SettingsStoreTests: XCTestCase {
 
         let store = SettingsStore(fileStore: fileStore)
         XCTAssertEqual(store.settings.workplaceRootPath, "/Users/demo/Workplaces")
+    }
+}
+
+// MARK: - 测试用钥匙串替身
+
+/// 内存钥匙串:测试不得触碰真实 Security 框架(避免在 CI/开发机留真实条目)。
+final class InMemoryAPIKeyStore: APIKeySecretStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _storedKey: String?
+
+    var storedKey: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _storedKey
+    }
+
+    func readAPIKey() -> String? { storedKey }
+
+    func storeAPIKey(_ apiKey: String) throws {
+        lock.lock()
+        let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        _storedKey = trimmed.isEmpty ? nil : trimmed
+        lock.unlock()
+    }
+}
+
+struct FailingAPIKeyStore: APIKeySecretStore {
+    func readAPIKey() -> String? { nil }
+    func storeAPIKey(_ apiKey: String) throws {
+        throw APIKeySecretStoreError.unavailable(reason: "test")
     }
 }

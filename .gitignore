@@ -39,6 +39,9 @@ DerivedData/
 # ZCode
 .zcode/
 
+# Qoder
+.qoder/
+
 # Docs
 docs/superpowers/
 

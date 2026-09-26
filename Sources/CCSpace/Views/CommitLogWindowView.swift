@@ -16,6 +16,21 @@ struct CommitLogWindowPayload: Codable, Hashable {
 struct CommitLogWindowView: View {
     let payload: CommitLogWindowPayload
     let gitService: GitServicing
+    /// 写操作(基于提交建分支)的唯一入口:协调器内部持 per-path 锁与后台 pull/push 互斥。
+    let syncCoordinator: SyncCoordinator
+    /// 分支上下文与提交列表的共享加载器(含代际防过期写回),视图只消费加载结果。
+    @StateObject private var context: RepositoryWindowContext
+
+    init(
+        payload: CommitLogWindowPayload,
+        gitService: GitServicing,
+        syncCoordinator: SyncCoordinator
+    ) {
+        self.payload = payload
+        self.gitService = gitService
+        self.syncCoordinator = syncCoordinator
+        _context = StateObject(wrappedValue: RepositoryWindowContext(gitService: gitService))
+    }
 
     @State private var selectedBranch: String?
     @State private var currentBranch: String?
@@ -31,13 +46,9 @@ struct CommitLogWindowView: View {
     @State private var isUnpushedOnly = false
     @State private var limit = Self.pageSize
     @State private var hasMore = false
-    @State private var loadTask: Task<Void, Never>?
-    @State private var branchContextTask: Task<Void, Never>?
-    /// 加载代际号:isCancelled 检查与 MainActor.run 落笔之间隔着挂起,
-    /// 快速切分支/筛选时旧任务可能晚于新任务落笔,用代际比对作废旧结果
-    /// (与 BranchCompareWindowView 的 contextRequestID/diffRequestID 同模式)。
-    @State private var loadRequestID = 0
-    @State private var contextRequestID = 0
+    /// payload 代际号:WindowGroup 复用同一窗口更换 payload 时,旧仓库的进行中加载
+    /// 不得再把结果写进新仓库的状态(与 DiffWindowView 的 payloadGeneration 同模式)。
+    @State private var payloadGeneration = 0
     /// 首次加载是否已完成;用于跳过窗口刚打开时的 becomeKey 通知,避免重复加载
     /// (与 DiffWindowView 同一套模式:后台打开的窗口聚焦事件不可靠,首载由 task 驱动)。
     @State private var hasLoadedInitialData = false
@@ -148,6 +159,37 @@ struct CommitLogWindowView: View {
             }
         }
         .task {
+            reload()
+        }
+        .onChange(of: payload) { _, _ in
+            // WindowGroup(for:) 复用同一窗口更换 payload 时 .task 不会重跑:
+            // 重置自持状态并按新参数重新加载,避免把旧仓库的提交列表展示进新仓库窗口。
+            // 「基于提交建分支」等写动作据此不会指向旧仓库路径:弹窗输入与候选提交
+            // 先行作废,在途加载的写回由代际比对拦下。
+            payloadGeneration += 1
+            cancelAllTasks()
+            selectedBranch = nil
+            currentBranch = nil
+            branchNames = []
+            remoteTrackingBranches = []
+            branchMetadata = [:]
+            commits = []
+            isLoading = true
+            isLoadingMore = false
+            errorMessage = nil
+            searchText = ""
+            isUnpushedOnly = false
+            limit = Self.pageSize
+            hasMore = false
+            hasLoadedInitialData = false
+            expandedIDs = []
+            commitDetails = [:]
+            detailLoadingIDs = []
+            detailFailedIDs = []
+            createBranchCandidate = nil
+            newBranchName = ""
+            isCreatingBranch = false
+            noticeMessage = nil
             reload()
         }
         .onWindowBecomeKey {
@@ -376,10 +418,8 @@ struct CommitLogWindowView: View {
     // MARK: - 加载
 
     private func cancelAllTasks() {
-        loadTask?.cancel()
-        loadTask = nil
-        branchContextTask?.cancel()
-        branchContextTask = nil
+        // 共享加载器(分支上下文/提交列表)的在途任务一并取消,避免迟到写回。
+        context.cancelAll()
         // 详情任务与提示任务同样纳入取消:此前遗漏,窗口关闭后 git show 仍在后台跑。
         cancelExpandAllBatch()
         for task in detailTasks.values {
@@ -400,43 +440,25 @@ struct CommitLogWindowView: View {
     }
 
     /// 分支名单/远端跟踪分支/元数据/当前分支:供标题栏分支选择器与"仅看未推送"可用性判断。
+    /// 并发取数与代际防过期写回收进 RepositoryWindowContext,这里只消费快照。
     private func loadBranchContext() {
-        branchContextTask?.cancel()
-        contextRequestID += 1
-        let requestID = contextRequestID
-        let path = payload.localPath
-        let gitService = gitService
-        branchContextTask = Task {
-            async let branchesTask = gitService.branches(in: path)
-            async let remoteTask = gitService.remoteTrackingBranches(in: path)
-            async let metadataTask = gitService.branchMetadata(in: path)
-            async let currentTask = gitService.currentBranch(in: path)
-            let branches = await branchesTask
-            let remote = await remoteTask
-            let metadata = await metadataTask
-            let current = await currentTask
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                guard requestID == contextRequestID else { return }
-                branchNames = branches
-                remoteTrackingBranches = remote
-                branchMetadata = metadata
-                currentBranch = current
-            }
+        let generation = payloadGeneration
+        context.loadBranchContext(
+            directory: payload.localPath,
+            includeMetadata: true
+        ) { [self] snapshot in
+            // payload 已更换(复用窗口换仓库)时旧仓库快照不得落笔。
+            guard generation == payloadGeneration else { return }
+            branchNames = snapshot.branches
+            remoteTrackingBranches = snapshot.remoteTrackingBranches
+            branchMetadata = snapshot.metadata ?? [:]
+            currentBranch = snapshot.currentBranch
         }
     }
 
     private func reloadCommits(resetting: Bool, showLoading: Bool) {
-        loadTask?.cancel()
+        let generation = payloadGeneration
         let path = payload.localPath
-        // 目录缺失(工作区被外部删除等)是硬失败:给出明确报错而非静默空列表。
-        guard FileManager.default.fileExists(atPath: path) else {
-            errorMessage = "本地目录不存在：\(path)"
-            isLoading = false
-            isLoadingMore = false
-            hasLoadedInitialData = true
-            return
-        }
         if resetting {
             if showLoading {
                 isLoading = true
@@ -450,20 +472,22 @@ struct CommitLogWindowView: View {
         let unpushedOnly = isUnpushedOnly
         let rev = selectedBranch
         let currentLimit = limit
-        let gitService = gitService
-        loadRequestID += 1
-        let requestID = loadRequestID
-        loadTask = Task {
-            let fetched: [GitCommitEntry]
-            if unpushedOnly {
-                fetched = await gitService.unpushedCommits(in: path, count: currentLimit + 1, rev: rev)
-            } else {
-                fetched = await gitService.recentCommits(in: path, count: currentLimit + 1, rev: rev)
-            }
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                guard requestID == loadRequestID else { return }
-                hasMore = fetched.count > currentLimit
+        context.loadCommits(
+            directory: path,
+            limit: currentLimit,
+            rev: rev,
+            unpushedOnly: unpushedOnly
+        ) { [self] outcome in
+            // payload 已更换(复用窗口换仓库)时旧仓库结果不得落笔。
+            guard generation == payloadGeneration else { return }
+            switch outcome {
+            case .directoryMissing(let missingPath):
+                errorMessage = "本地目录不存在：\(missingPath)"
+                isLoading = false
+                isLoadingMore = false
+                hasLoadedInitialData = true
+            case .success(let fetched, let hasMoreResult):
+                hasMore = hasMoreResult
                 commits = hasMore ? Array(fetched.prefix(currentLimit)) : fetched
                 isLoading = false
                 isLoadingMore = false
@@ -644,14 +668,21 @@ struct CommitLogWindowView: View {
     private func submitCreateBranch() {
         let branch = newBranchName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard branch.isEmpty == false, let commit = createBranchCandidate else { return }
+        // 与 BranchSwitchPopoverView 的内联建分支同一套校验规则:空格/^/../等
+        // 非法名在提交前拦下并提示,而不是把裸 git 报错甩给用户。
+        if let validationProblem = BranchNameValidation.validate(branch) {
+            showNotice(validationProblem, isError: true)
+            return
+        }
         isCreatingBranch = true
         let path = payload.localPath
-        let gitService = gitService
+        let coordinator = syncCoordinator
         createBranchTask?.cancel()
+        let generation = payloadGeneration
         createBranchTask = Task {
             do {
-                try await gitService.createBranch(branch, fromRev: commit.hash, in: path)
-                guard !Task.isCancelled else { return }
+                try await coordinator.createBranchFromRevision(branch, fromRev: commit.hash, in: path)
+                guard !Task.isCancelled, generation == payloadGeneration else { return }
                 await MainActor.run {
                     createBranchCandidate = nil
                     newBranchName = ""
@@ -662,7 +693,8 @@ struct CommitLogWindowView: View {
                     showNotice("已基于 \(commit.shortHash) 创建并切换到 \(branch)", isError: false)
                 }
             } catch {
-                guard !Task.isCancelled else { return }
+                // payload 已更换时旧仓库的建分支结果不得写进新仓库窗口。
+                guard !Task.isCancelled, generation == payloadGeneration else { return }
                 await MainActor.run {
                     isCreatingBranch = false
                     showNotice("创建分支失败：\(error.localizedDescription)", isError: true)

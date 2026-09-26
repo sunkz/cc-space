@@ -235,16 +235,20 @@ struct WorkplaceDeleteConfirmationState: Equatable {
     let message: String
     let confirmLabel: String
 
-    init(workplace: Workplace) {
-        let trimmedPath = existingDirectoryPath(workplace.path)
-
+    /// `directoryPath` 为触发时刻的磁盘探测结果(existingDirectoryPath),
+    /// 不在 init 里做 stat:本状态此前被 body 内的 .alert 直接消费,
+    /// 一次渲染一次 fileExists 卡主线程,现在由调用方在按钮动作里探测一次。
+    init(
+        workplace: Workplace,
+        directoryPath: String?
+    ) {
         title = "删除 \(workplace.name)"
         confirmLabel = "确认删除"
 
-        if let trimmedPath {
+        if let directoryPath {
             message = """
             将删除工作区记录，并删除本地目录中的所有文件。
-            目录：\(trimmedPath)
+            目录：\(directoryPath)
             此操作不可撤销。
             """
         } else {
@@ -258,19 +262,20 @@ struct WorkplaceRepositoryDeleteConfirmationState: Equatable {
     let message: String
     let confirmLabel: String
 
+    /// 同 WorkplaceDeleteConfirmationState:`directoryPath` 由调用方在
+    /// 触发时刻探测后传入,init 保持纯内存构造。
     init(
         repositoryName: String,
-        localPath: String
+        localPath: String,
+        directoryPath: String?
     ) {
-        let trimmedPath = existingDirectoryPath(localPath)
-
         title = "删除 \(repositoryName)"
         confirmLabel = "确认删除"
 
-        if let trimmedPath {
+        if let directoryPath {
             message = """
             将从当前工作区移除该仓库，并删除本地目录中的所有文件。
-            目录：\(trimmedPath)
+            目录：\(directoryPath)
             此操作不可撤销。
             """
         } else {
@@ -506,7 +511,11 @@ struct WorkplaceRepositoryRowPresentationState {
         canPushToRemote = canOpenLocalActions && !actionsDisabled
         canDeleteRepository = allowsDeleteRepository && !actionsDisabled
         canCreateMergeRequest = canOpenLocalActions && !actionsDisabled
-        canSwitchBranch = canCreateMergeRequest
+        // 各动作独立从自身条件推导,不做链式别名:此前
+        // `canSwitchBranch = canCreateMergeRequest`、`canViewChanges = canStashChanges`
+        // 把语义无关的动作绑死——冲突态下 Stash 被 git 拒绝本应禁用 Stash,
+        // 却连带禁掉了"查看改动",而冲突时恰恰最需要看 diff。
+        canSwitchBranch = canOpenLocalActions && !actionsDisabled
         // 状态未知(nil)时先禁用,快照加载完成后自动恢复;干净工作区无需 Stash。
         // 冲突未解决时 git 拒绝 stash,冲突态下同样禁用入口。
         canStashChanges =
@@ -514,8 +523,12 @@ struct WorkplaceRepositoryRowPresentationState {
             !actionsDisabled &&
             hasUncommittedChanges == true &&
             hasConflicts != true
-        // "查看改动"同理:没有未提交改动时无可查看的 diff,直接置灰。
-        canViewChanges = canStashChanges
+        // "查看改动"同理:没有未提交改动时无可查看的 diff,直接置灰;
+        // 但冲突文件本身就是"未提交改动",查看 diff 在冲突态必须可用。
+        canViewChanges =
+            canOpenLocalActions &&
+            !actionsDisabled &&
+            hasUncommittedChanges == true
         canAbortInterruptedOperation =
             canOpenLocalActions &&
             !actionsDisabled &&
@@ -860,7 +873,10 @@ enum WorkplaceDetailFeedbackFactory {
     }
 }
 
-private func existingDirectoryPath(_ path: String) -> String? {
+/// 目录存在性探测:路径去空白后非空且在盘上是目录时返回该路径,否则 nil。
+/// 注意:这是磁盘 stat,绝不能放进 body 求值路径——调用点必须收敛到
+/// 用户动作(如删除按钮)触发的一刻(见 P1-11)。
+func existingDirectoryPath(_ path: String) -> String? {
     let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
     guard trimmedPath.isEmpty == false else { return nil }
 
@@ -926,6 +942,8 @@ enum BranchPullOutcomeFormatter {
                 return "\(outcome.branch) 跳过(发散)"
             case .skippedNoUpstream:
                 return "\(outcome.branch) 跳过(无 upstream)"
+            case .skippedCheckedOutElsewhere:
+                return nil
             case .failed:
                 if let msg = sanitizedErrorMessage(outcome.errorMessage) {
                     return "\(outcome.branch) 失败:\(msg)"

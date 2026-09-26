@@ -34,8 +34,47 @@ latest_semver_tag() {
 
 BUMP="${1:-patch}"
 
+# 多余的位置参数此前被静默忽略,极易掩盖"想传 minor 却多敲了参数"的失误。
+if [[ $# -gt 1 ]]; then
+  echo "错误: 参数过多,只接受一个位置参数(patch|minor|major|x.y.z)" >&2
+  exit 2
+fi
+
 if ! git -C "$ROOT_DIR" diff --quiet || ! git -C "$ROOT_DIR" diff --cached --quiet; then
   echo "错误: 工作区有未提交的修改，请先提交或暂存" >&2
+  exit 1
+fi
+
+# --- 分支防护:只允许在默认分支上发布 ---
+# 此前在 feature 分支执行会把该分支全部历史 `push origin HEAD` 并打 tag 触发发布。
+branch="$(git -C "$ROOT_DIR" branch --show-current)"
+if [[ -z "$branch" ]]; then
+  echo "错误: 当前处于游离 HEAD,请先切回分支" >&2
+  exit 1
+fi
+default_branch="$(git -C "$ROOT_DIR" symbolic-ref refs/remotes/origin/HEAD --short 2>/dev/null | sed 's#^origin/##')" || true
+if [[ -z "$default_branch" ]]; then
+  echo "错误: 无法确定远端默认分支(origin/HEAD 缺失),请先: git remote set-head origin -a" >&2
+  exit 1
+fi
+if [[ "$branch" != "$default_branch" ]]; then
+  echo "错误: 只允许在默认分支 '$default_branch' 上发布,当前分支为 '$branch'" >&2
+  exit 1
+fi
+
+# 先同步远端 tag/分支:不 fetch 时与远端已发版本撞号只能靠 push 拒绝兜底,
+# 且本地算出的"最新 tag"可能落后于远端。fetch 失败(离线/网络)直接终止:
+# 反正后续 push 也需要网络,带着过期信息走下去只会更糟。
+if ! git -C "$ROOT_DIR" fetch --tags origin; then
+  echo "错误: git fetch --tags origin 失败,无法基于最新远端 tag 计算版本" >&2
+  exit 1
+fi
+
+# 本地 HEAD 必须包含远端默认分支的全部内容(fast-forward 前提):
+# 落后于远端时直接 push 会 non-FF 失败,但更糟的是版本号可能基于过期 tag 序列。
+remote_head="$(git -C "$ROOT_DIR" ls-remote origin "refs/heads/${branch}" 2>/dev/null | awk 'NR==1{print $1}')" || true
+if [[ -n "$remote_head" ]] && ! git -C "$ROOT_DIR" merge-base --is-ancestor "$remote_head" HEAD; then
+  echo "错误: 本地 ${branch} 落后或已与远端分叉(远端 $remote_head 不是 HEAD 的祖先),请先 rebase/merge 远端变更" >&2
   exit 1
 fi
 
@@ -77,6 +116,13 @@ fi
 
 if [[ "$CURRENT_VERSION" == "$NEW_VERSION" ]]; then
   echo "错误: 新版本与当前版本相同 ($NEW_VERSION)" >&2
+  exit 1
+fi
+
+# 禁止版本回退发布(主要防护显式版本号模式):v1.0.3 之后再发 1.0.1
+# 会破坏 "latest release" 语义——GitHub 的 latest 由 tag 创建时间决定,回退号会让旧语义的新 tag 反而不是最新。
+if [[ "$(printf '%s\n%s\n' "$CURRENT_VERSION" "$NEW_VERSION" | sort -V | head -n 1)" != "$CURRENT_VERSION" ]]; then
+  echo "错误: 新版本 $NEW_VERSION 低于当前最新发布 $CURRENT_VERSION,禁止回退发布" >&2
   exit 1
 fi
 

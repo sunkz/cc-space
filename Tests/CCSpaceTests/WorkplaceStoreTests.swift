@@ -288,13 +288,39 @@ final class WorkplaceStoreTests: XCTestCase {
         var updatedState = store.syncStates.first!
         updatedState.status = .success
         updatedState.lastSyncedAt = Date(timeIntervalSince1970: 1000)
-        try store.updateSyncState(updatedState)
+        store.updateSyncState(updatedState)
 
         let result = store.syncStates.first { $0.workplaceID == workplace.id && $0.repositoryID == repository.id }
         XCTAssertEqual(result?.status, .success)
         XCTAssertEqual(result?.lastSyncedAt, Date(timeIntervalSince1970: 1000))
     }
 
+    /// 行在 await 窗口内被整体替换掉(如 prune/去重)后,单行更新必须补录,
+    /// 而不是静默丢弃(与 updateSyncStates 的补录语义一致)。
+    func test_updateSyncStateBackfillsRowWhenWorkplaceStillExists() throws {
+        let fileStore = JSONFileStore(rootDirectory: tempRoot())
+        let store = WorkplaceStore(fileStore: fileStore)
+        let repository = makeRepository(repoName: "api")
+        let workplace = try store.createWorkplace(
+            name: "ios-dev",
+            rootPath: tempRoot().path,
+            selectedRepositories: [repository]
+        )
+        let existing = try XCTUnwrap(store.syncStates.first { $0.repositoryID == repository.id })
+
+        store.replaceSyncStates([], for: workplace.id)
+        XCTAssertTrue(store.syncStates.isEmpty)
+
+        var arrived = existing
+        arrived.status = .success
+        store.updateSyncState(arrived)
+
+        let restored = store.syncStates.first { $0.repositoryID == repository.id }
+        XCTAssertEqual(restored?.status, .success)
+        XCTAssertEqual(restored?.workplaceID, workplace.id)
+    }
+
+    /// 工作区记录已不存在时,单行更新不补录孤儿行(无 UI 入口,只会在 JSON 里累积)。
     func test_updateSyncStateNoOpWhenNotFound() throws {
         let fileStore = JSONFileStore(rootDirectory: tempRoot())
         let store = WorkplaceStore(fileStore: fileStore)
@@ -314,7 +340,7 @@ final class WorkplaceStoreTests: XCTestCase {
             lastError: nil,
             lastSyncedAt: nil
         )
-        try store.updateSyncState(orphanState)
+        store.updateSyncState(orphanState)
 
         XCTAssertEqual(store.syncStates.count, 1)
     }
@@ -334,13 +360,13 @@ final class WorkplaceStoreTests: XCTestCase {
         let existing = try XCTUnwrap(store.syncStates.first { $0.repositoryID == repository.id })
 
         // 模拟"await 期间该行被删":整体替换成不含该行的集合。
-        try store.replaceSyncStates([], for: workplace.id)
+        store.replaceSyncStates([], for: workplace.id)
         XCTAssertTrue(store.syncStates.isEmpty)
 
         var arrived = existing
         arrived.status = .success
         arrived.hasLocalDirectory = true
-        try store.updateSyncStates([arrived])
+        store.updateSyncStates([arrived])
 
         let persisted = try XCTUnwrap(store.syncStates.first { $0.repositoryID == repository.id })
         XCTAssertEqual(persisted.status, .success)
@@ -376,7 +402,7 @@ final class WorkplaceStoreTests: XCTestCase {
             lastError: nil,
             lastSyncedAt: nil
         )
-        try store.updateSyncStates([orphanRow])
+        store.updateSyncStates([orphanRow])
 
         XCTAssertNil(store.syncStates.first { $0.repositoryID == dropped.id })
         XCTAssertEqual(store.syncStates.count, 1)   // 只剩仍被选中的 api 行
@@ -401,7 +427,7 @@ final class WorkplaceStoreTests: XCTestCase {
             selectedRepositories: [repo1, repo2]
         )
 
-        try store.setSyncStatus(.removing, for: workplace.id, repositoryIDs: [repo1.id])
+        store.setSyncStatus(.removing, for: workplace.id, repositoryIDs: [repo1.id])
 
         let state1 = store.syncStates.first { $0.repositoryID == repo1.id }
         let state2 = store.syncStates.first { $0.repositoryID == repo2.id }
@@ -471,7 +497,13 @@ final class WorkplaceStoreTests: XCTestCase {
             withIntermediateDirectories: true
         )
 
-        store.refreshFromDisk(rootPath: root.path)
+        store.applyDiskRefreshResult(
+            WorkplaceStore.diskRefreshResult(
+                workplaces: store.workplaces,
+                syncStates: store.syncStates,
+                rootPath: root.path
+            )
+        )
 
         XCTAssertTrue(store.workplaces.isEmpty)
         XCTAssertTrue(store.syncStates.isEmpty)
@@ -496,9 +528,15 @@ final class WorkplaceStoreTests: XCTestCase {
         var state = try XCTUnwrap(store.syncStates.first { $0.workplaceID == workplace.id })
         state.status = .success
         state.lastSyncedAt = .now
-        try store.updateSyncState(state)
+        store.updateSyncState(state)
 
-        store.refreshFromDisk(rootPath: root.path)
+        store.applyDiskRefreshResult(
+            WorkplaceStore.diskRefreshResult(
+                workplaces: store.workplaces,
+                syncStates: store.syncStates,
+                rootPath: root.path
+            )
+        )
 
         let refreshedState = try XCTUnwrap(
             store.syncStates.first { $0.workplaceID == workplace.id && $0.repositoryID == repository.id }
@@ -831,7 +869,10 @@ final class WorkplaceStoreTests: XCTestCase {
         XCTAssertEqual(updated.pinnedRepositoryIDs, [secondRepository.id])
     }
 
-    func test_removeRepositoryAssociationsAlsoRemovesPinnedIDsFromAllWorkplaces() throws {
+    /// removeRepositoryAssociations 已删除(死代码),等价覆盖指向其替代品
+    /// stateAfterRemovingRepositoryAssociations(RepositoryStore.removeRepository
+    /// 原子提交流程使用的数据源)。
+    func test_stateAfterRemovingRepositoryAssociationsAlsoRemovesPinnedIDs() throws {
         let fileStore = JSONFileStore(rootDirectory: tempRoot())
         let store = WorkplaceStore(fileStore: fileStore)
         let removedRepository = makeRepository(
@@ -851,14 +892,18 @@ final class WorkplaceStoreTests: XCTestCase {
         try store.setRepositoryPinned(true, repositoryID: removedRepository.id, in: workplace.id)
         try store.setRepositoryPinned(true, repositoryID: keptRepository.id, in: workplace.id)
 
-        try store.removeRepositoryAssociations(repositoryID: removedRepository.id)
+        let plan = try XCTUnwrap(
+            store.stateAfterRemovingRepositoryAssociations(repositoryID: removedRepository.id)
+        )
 
-        let updated = try XCTUnwrap(store.workplaces.first(where: { $0.id == workplace.id }))
+        let updated = try XCTUnwrap(plan.workplaces.first(where: { $0.id == workplace.id }))
         XCTAssertEqual(updated.selectedRepositoryIDs, [keptRepository.id])
         XCTAssertEqual(updated.pinnedRepositoryIDs, [keptRepository.id])
+        XCTAssertTrue(plan.syncStates.allSatisfy { $0.repositoryID != removedRepository.id })
     }
 
-    func test_removeRepositoryAssociationsKeepsWorkplaceWhenSelectionBecomesEmpty() throws {
+    /// 选中列表变空时工作区记录保留,仅移除对应 sync state。
+    func test_stateAfterRemovingRepositoryAssociationsKeepsWorkplaceWhenSelectionBecomesEmpty() throws {
         let fileStore = JSONFileStore(rootDirectory: tempRoot())
         let store = WorkplaceStore(fileStore: fileStore)
         let repository = makeRepository(repoName: "api")
@@ -869,12 +914,13 @@ final class WorkplaceStoreTests: XCTestCase {
             selectedRepositories: [repository]
         )
 
-        try store.removeRepositoryAssociations(repositoryID: repository.id)
+        let plan = try XCTUnwrap(
+            store.stateAfterRemovingRepositoryAssociations(repositoryID: repository.id)
+        )
 
-        // 选中列表变空时工作区记录保留,仅移除对应 sync state。
-        let updated = try XCTUnwrap(store.workplaces.first(where: { $0.id == workplace.id }))
+        let updated = try XCTUnwrap(plan.workplaces.first(where: { $0.id == workplace.id }))
         XCTAssertEqual(updated.selectedRepositoryIDs, [])
-        XCTAssertTrue(store.syncStates.isEmpty)
+        XCTAssertTrue(plan.syncStates.isEmpty)
     }
 
     func test_backfillMissingSyncStatesRestoresLostStatesAndPersists() throws {
@@ -889,7 +935,7 @@ final class WorkplaceStoreTests: XCTestCase {
         )
 
         // 模拟 sync-states.json 损坏被重置后与 workplaces 脱节。
-        try store.replaceSyncStates([], for: workplace.id)
+        store.replaceSyncStates([], for: workplace.id)
 
         try store.backfillMissingSyncStates(repositories: [repository])
 
@@ -914,7 +960,7 @@ final class WorkplaceStoreTests: XCTestCase {
             rootPath: rootPath,
             selectedRepositories: [repository]
         )
-        try store.replaceSyncStates([], for: workplace.id)
+        store.replaceSyncStates([], for: workplace.id)
 
         // 配置缺失的仓库跳过补建,不报错。
         try store.backfillMissingSyncStates(repositories: [])
@@ -990,7 +1036,7 @@ final class WorkplaceStoreTests: XCTestCase {
             lastError: nil,
             lastSyncedAt: nil
         )
-        try store.replaceSyncStates(keptStates + [orphanState], for: workplace.id)
+        store.replaceSyncStates(keptStates + [orphanState], for: workplace.id)
         XCTAssertEqual(store.syncStates.count, 2)
 
         try store.pruneReferencesToRepositories(validRepositoryIDs: [repository.id])
@@ -1055,7 +1101,11 @@ final class WorkplaceStoreTests: XCTestCase {
 
     // MARK: - 工作区根目录迁移
 
-    func test_rebaseWorkplacePathsMovesWorkplaceAndSyncStatesToNewRoot() throws {
+    /// rebaseWorkplacePaths 已删除(死代码),等价覆盖指向其替代品 rebasePlan
+    /// (SettingsStore.updateRootPath 原子提交流程使用的数据源)。
+    /// 换根只改记录、不移动磁盘文件——目录要不要搬由用户决定,但记录必须跟着走,
+    /// 否则磁盘刷新会认为这些工作区"目录已不存在"而把整库清掉。
+    func test_rebasePlanMovesWorkplaceAndSyncStatesToNewRoot() throws {
         let store = WorkplaceStore(fileStore: JSONFileStore(rootDirectory: tempRoot()))
         let oldRoot = "/Users/demo/OldWorkplaces"
         _ = try store.createWorkplace(
@@ -1064,32 +1114,31 @@ final class WorkplaceStoreTests: XCTestCase {
             selectedRepositories: [makeRepository(repoName: "api")]
         )
 
-        let rebasedCount = try store.rebaseWorkplacePaths(fromRoot: oldRoot, toRoot: "/Users/demo/NewWorkplaces")
+        let plan = try XCTUnwrap(
+            store.rebasePlan(fromRoot: oldRoot, toRoot: "/Users/demo/NewWorkplaces")
+        )
 
-        XCTAssertEqual(rebasedCount, 1)
-        XCTAssertEqual(store.workplaces.first?.path, "/Users/demo/NewWorkplaces/ios-dev")
-        XCTAssertEqual(store.syncStates.first?.localPath, "/Users/demo/NewWorkplaces/ios-dev/api")
+        XCTAssertEqual(plan.rebasedCount, 1)
+        XCTAssertEqual(plan.workplaces.first?.path, "/Users/demo/NewWorkplaces/ios-dev")
+        XCTAssertEqual(plan.syncStates.first?.localPath, "/Users/demo/NewWorkplaces/ios-dev/api")
     }
 
-    func test_rebaseWorkplacePathsLeavesWorkplacesOutsideOldRootUntouched() throws {
+    func test_rebasePlanLeavesWorkplacesOutsideOldRootUntouched() throws {
         let store = WorkplaceStore(fileStore: JSONFileStore(rootDirectory: tempRoot()))
-        let originalPath = "/Users/demo/OldWorkplaces/ios-dev"
         _ = try store.createWorkplace(
             name: "ios-dev",
             rootPath: "/Users/demo/OldWorkplaces",
             selectedRepositories: [makeRepository(repoName: "api")]
         )
 
-        let rebasedCount = try store.rebaseWorkplacePaths(fromRoot: "/Users/demo/Elsewhere", toRoot: "/Users/demo/NewWorkplaces")
+        let plan = store.rebasePlan(fromRoot: "/Users/demo/Elsewhere", toRoot: "/Users/demo/NewWorkplaces")
 
-        XCTAssertEqual(rebasedCount, 0)
-        XCTAssertEqual(store.workplaces.first?.path, originalPath)
-        XCTAssertEqual(store.syncStates.first?.localPath, originalPath + "/api")
+        XCTAssertNil(plan, "没有需要迁移的工作区时返回 nil")
     }
 
     /// 嵌套选择新根(新根是旧根的子目录)时,已位于新根下的工作区保持原样,
     /// 不能被二次嵌套(如 /A/team/x 被搬成 /A/team/team/x),其余工作区搬入新根。
-    func test_rebaseWorkplacePathsKeepsWorkplacesAlreadyUnderNestedNewRoot() throws {
+    func test_rebasePlanKeepsWorkplacesAlreadyUnderNestedNewRoot() throws {
         let store = WorkplaceStore(fileStore: JSONFileStore(rootDirectory: tempRoot()))
         _ = try store.createWorkplace(
             name: "ios-dev",
@@ -1102,29 +1151,31 @@ final class WorkplaceStoreTests: XCTestCase {
             selectedRepositories: [makeRepository(repoName: "web")]
         )
 
-        let rebasedCount = try store.rebaseWorkplacePaths(
-            fromRoot: "/Users/demo/OldWorkplaces",
-            toRoot: "/Users/demo/OldWorkplaces/team"
+        let plan = try XCTUnwrap(
+            store.rebasePlan(
+                fromRoot: "/Users/demo/OldWorkplaces",
+                toRoot: "/Users/demo/OldWorkplaces/team"
+            )
         )
 
-        XCTAssertEqual(rebasedCount, 1)
-        let iosDev = try XCTUnwrap(store.workplaces.first { $0.name == "ios-dev" })
+        XCTAssertEqual(plan.rebasedCount, 1)
+        let iosDev = try XCTUnwrap(plan.workplaces.first { $0.name == "ios-dev" })
         XCTAssertEqual(iosDev.path, "/Users/demo/OldWorkplaces/team/ios-dev")
         XCTAssertEqual(
-            store.syncStates.first { $0.workplaceID == iosDev.id }?.localPath,
+            plan.syncStates.first { $0.workplaceID == iosDev.id }?.localPath,
             "/Users/demo/OldWorkplaces/team/ios-dev/api",
             "已在新根下的工作区,其同步态同样保持原样"
         )
-        let web = try XCTUnwrap(store.workplaces.first { $0.name == "web" })
+        let web = try XCTUnwrap(plan.workplaces.first { $0.name == "web" })
         XCTAssertEqual(web.path, "/Users/demo/OldWorkplaces/team/web")
         XCTAssertEqual(
-            store.syncStates.first { $0.workplaceID == web.id }?.localPath,
+            plan.syncStates.first { $0.workplaceID == web.id }?.localPath,
             "/Users/demo/OldWorkplaces/team/web/web"
         )
     }
 
     /// 换到父级目录(扩大根范围)时,工作区本来就都在新根下,应全部原地不动。
-    func test_rebaseWorkplacePathsKeepsEverythingWhenNewRootIsAncestor() throws {
+    func test_rebasePlanKeepsEverythingWhenNewRootIsAncestor() throws {
         let store = WorkplaceStore(fileStore: JSONFileStore(rootDirectory: tempRoot()))
         let currentRoot = "/Users/demo/Workplaces/team"
         _ = try store.createWorkplace(
@@ -1133,14 +1184,12 @@ final class WorkplaceStoreTests: XCTestCase {
             selectedRepositories: [makeRepository(repoName: "api")]
         )
 
-        let rebasedCount = try store.rebaseWorkplacePaths(fromRoot: currentRoot, toRoot: "/Users/demo/Workplaces")
+        let plan = store.rebasePlan(fromRoot: currentRoot, toRoot: "/Users/demo/Workplaces")
 
-        XCTAssertEqual(rebasedCount, 0)
-        XCTAssertEqual(store.workplaces.first?.path, "/Users/demo/Workplaces/team/ios-dev")
-        XCTAssertEqual(store.syncStates.first?.localPath, "/Users/demo/Workplaces/team/ios-dev/api")
+        XCTAssertNil(plan, "扩大根范围时无需迁移")
     }
 
-    func test_rebaseWorkplacePathsIsNoOpWhenRootIsUnchanged() throws {
+    func test_rebasePlanIsNoOpWhenRootIsUnchanged() throws {
         let store = WorkplaceStore(fileStore: JSONFileStore(rootDirectory: tempRoot()))
         let root = "/Users/demo/Workplaces"
         _ = try store.createWorkplace(
@@ -1150,9 +1199,9 @@ final class WorkplaceStoreTests: XCTestCase {
         )
         let updatedAtBefore = try XCTUnwrap(store.workplaces.first).updatedAt
 
-        let rebasedCount = try store.rebaseWorkplacePaths(fromRoot: root, toRoot: root)
+        let plan = store.rebasePlan(fromRoot: root, toRoot: root)
 
-        XCTAssertEqual(rebasedCount, 0)
+        XCTAssertNil(plan, "根目录未变化时返回 nil")
         XCTAssertEqual(store.workplaces.first?.updatedAt, updatedAtBefore)
     }
 
@@ -1240,6 +1289,118 @@ final class WorkplaceStoreTests: XCTestCase {
             "损坏的 workplaces.json 应被改名为 .corrupt-<时间戳> 保全"
         )
         XCTAssertFalse(contents.contains("workplaces.json"), "原损坏文件应已被改名,不再留在原位")
+    }
+
+    // MARK: - 磁盘刷新对进行中长操作的豁免(P0 竞态回归锁)
+
+    func test_diskRefreshResultSparesMissingWorkplaceWhosePathIsLocked() throws {
+        let rootURL = tempRoot()
+        try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        // 另一份工作区目录在盘上,避免触发"全缺失=根目录异常"的整体保护,
+        // 精确验证豁免只在被豁免的那条生效。
+        try FileManager.default.createDirectory(
+            at: rootURL.appendingPathComponent("other"),
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+
+        let workplace = Workplace(
+            id: UUID(),
+            name: "creating",
+            path: rootURL.appendingPathComponent("creating").path,
+            selectedRepositoryIDs: [],
+            createdAt: .now,
+            updatedAt: .now
+        )
+        // "other" 必须同时有记录:只有一条缺失记录时 missing.count == 记录总数,
+        // 会先命中"全缺失=根目录异常"的整体保护,测不到逐条豁免/清理的分支。
+        let survivor = Workplace(
+            id: UUID(),
+            name: "other",
+            path: rootURL.appendingPathComponent("other").path,
+            selectedRepositoryIDs: [],
+            createdAt: .now,
+            updatedAt: .now
+        )
+        let lockedKeys: Set<String> = [LocalPathSafety.canonicalLockKey(for: workplace.path)]
+
+        let result = WorkplaceStore.diskRefreshResult(
+            workplaces: [workplace, survivor],
+            syncStates: [],
+            rootPath: rootURL.path,
+            lockedPathKeys: lockedKeys
+        )
+        XCTAssertEqual(result.workplaces.map(\.id), [workplace.id, survivor.id], "持锁路径的记录不得被本轮刷新删除")
+        XCTAssertFalse(result.changed)
+
+        let unguarded = WorkplaceStore.diskRefreshResult(
+            workplaces: [workplace, survivor],
+            syncStates: [],
+            rootPath: rootURL.path
+        )
+        XCTAssertEqual(unguarded.workplaces.map(\.id), [survivor.id], "对照组:不持锁时缺失记录仍会被清理")
+    }
+
+    func test_diskRefreshResultSparesTransientCloningRowFromMissingRewrite() throws {
+        let rootURL = tempRoot()
+        let workplaceURL = rootURL.appendingPathComponent("ws")
+        try FileManager.default.createDirectory(at: workplaceURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+
+        let workplace = Workplace(
+            id: UUID(),
+            name: "ws",
+            path: workplaceURL.path,
+            selectedRepositoryIDs: [],
+            createdAt: .now,
+            updatedAt: .now
+        )
+        let cloningRow = RepositorySyncState(
+            workplaceID: workplace.id,
+            repositoryID: UUID(),
+            status: .cloning,
+            localPath: workplaceURL.appendingPathComponent("api").path,
+            lastError: nil,
+            lastSyncedAt: nil
+        )
+
+        let result = WorkplaceStore.diskRefreshResult(
+            workplaces: [workplace],
+            syncStates: [cloningRow],
+            rootPath: rootURL.path
+        )
+        XCTAssertEqual(result.syncStates.first?.status, .cloning, "瞬态 .cloning 行正在被活跃操作驱动,不得被改写成假失败")
+        XCTAssertFalse(result.changed)
+
+        let idleRow = RepositorySyncState(
+            workplaceID: workplace.id,
+            repositoryID: cloningRow.repositoryID,
+            status: .idle,
+            localPath: cloningRow.localPath
+        )
+        let unguarded = WorkplaceStore.diskRefreshResult(
+            workplaces: [workplace],
+            syncStates: [idleRow],
+            rootPath: rootURL.path
+        )
+        XCTAssertEqual(unguarded.syncStates.first?.status, .failed, "对照组:.idle 的缺失行仍按缺失改写")
+    }
+
+    func test_applyWorkplaceEditThrowsWhenRecordMissing() throws {
+        let fileStore = JSONFileStore(rootDirectory: tempRoot())
+        let store = WorkplaceStore(fileStore: fileStore)
+        let ghost = Workplace(
+            id: UUID(),
+            name: "ghost",
+            path: "/Users/demo/Workplaces/ghost",
+            selectedRepositoryIDs: [],
+            createdAt: .now,
+            updatedAt: .now
+        )
+
+        XCTAssertThrowsError(try store.applyWorkplaceEdit(ghost, syncStates: [])) { error in
+            XCTAssertEqual(error as? WorkplaceStoreError, .workplaceNotFound)
+        }
     }
 
     private func tempRoot() -> URL {

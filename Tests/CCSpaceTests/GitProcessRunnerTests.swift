@@ -68,4 +68,25 @@ final class GitProcessRunnerTests: XCTestCase {
             )
         }
     }
+
+    /// 含 NUL 字节的参数会在 argv 构造处 fatalError 崩掉整个 App,
+    /// 必须在进程入口被拒绝而不是透传。
+    func test_argumentsWithNULByteRejectedAtProcessEntrance() async {
+        let evil = "/tmp\u{0}evil"
+        do {
+            _ = try await GitProcessRunner().run(
+                arguments: ["-C", evil, "status"],
+                captureStdout: true,
+                captureStderr: true,
+                timeout: 5
+            )
+            XCTFail("含 NUL 的参数必须被拒绝")
+        } catch {
+            XCTAssertTrue(
+                error.localizedDescription.contains("非法控制字符"),
+                "应抛出入参校验错误,实际: \(error.localizedDescription)"
+            )
+        }
+    }
+
 }

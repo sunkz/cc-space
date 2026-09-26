@@ -31,9 +31,8 @@ final class RunScriptTests: XCTestCase {
     }
 
     /// vtool 外观补丁失败必须可见:此前 `|| true` 吞错后仍无条件打印 "Patched",
-    /// 真失败时误导排查。锁定"走 if ! 判错分支、vtool 调用行无静默吞错"两个特征。
-    /// 负向断言逐行匹配模式而非整段旧实现原文:匹配精确多行字符串的断言,
-    /// 只要换种格式重新引入吞错就恒真,锁不住任何东西。
+    /// 真失败时误导排查。只锁语义不变量——失败提示存在、vtool 调用行不吞错不静默——
+    /// 不锁定具体变量名/命令拼接形式/调用行数等实现细节,避免重构即碎。
     func test_runScriptReportsVtoolPatchFailureInsteadOfSwallowing() throws {
         let script = try String(
             contentsOf: repoRoot.appendingPathComponent("run.sh"),
@@ -41,9 +40,8 @@ final class RunScriptTests: XCTestCase {
         )
 
         XCTAssertTrue(script.contains("vtool patch failed"))
-        XCTAssertTrue(script.contains("if ! patch_output="))
         let vtoolLines = script.split(separator: "\n").filter { $0.contains("vtool -set-build-version") }
-        XCTAssertEqual(vtoolLines.count, 1)
+        XCTAssertFalse(vtoolLines.isEmpty, "run.sh 应存在 vtool 补丁调用,否则本测试没有覆盖对象")
         for line in vtoolLines {
             XCTAssertFalse(line.contains("|| true"), "vtool 调用行不得吞错: \(line)")
             XCTAssertFalse(line.contains(">/dev/null"), "vtool 调用行不得丢弃输出: \(line)")

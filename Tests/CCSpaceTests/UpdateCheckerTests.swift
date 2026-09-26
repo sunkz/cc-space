@@ -90,6 +90,45 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertNil(checker.latestVersion)
     }
 
+    /// 网络错误(NSURLError)不得把英文 localizedDescription 透给用户,须映射为中文。
+    func test_checkMapsNetworkErrorToChineseMessage() async throws {
+        let apiURL = try XCTUnwrap(URL(string: "https://api.github.com/repos/sunkz/cc-space/releases/latest"))
+
+        let checker = UpdateChecker(
+            currentVersion: "0.0.1",
+            latestReleaseAPIURL: apiURL,
+            dataLoader: { _ in
+                throw URLError(.timedOut)
+            }
+        )
+
+        await checker.check()
+
+        XCTAssertEqual(checker.lastErrorMessage, "检查更新失败：连接超时，请检查网络后重试")
+        XCTAssertFalse(
+            checker.lastErrorMessage?.localizedCaseInsensitiveContains("timed out") == true,
+            "不得包含英文系统错误描述"
+        )
+        XCTAssertNil(checker.latestVersion)
+    }
+
+    /// 未逐一映射的网络错误走通用兜底文案,同样不透英文原文。
+    func test_checkMapsUnknownNetworkErrorToGenericChineseMessage() async throws {
+        let apiURL = try XCTUnwrap(URL(string: "https://api.github.com/repos/sunkz/cc-space/releases/latest"))
+
+        let checker = UpdateChecker(
+            currentVersion: "0.0.1",
+            latestReleaseAPIURL: apiURL,
+            dataLoader: { _ in
+                throw URLError(.dnsLookupFailed)
+            }
+        )
+
+        await checker.check()
+
+        XCTAssertEqual(checker.lastErrorMessage, "检查更新失败，请稍后重试")
+    }
+
     func test_isNewerVersionTreatsStableReleaseAsNewerThanPrerelease() {
         XCTAssertTrue(UpdateChecker.isNewerVersion("1.0.0", than: "1.0.0-beta.1"))
     }

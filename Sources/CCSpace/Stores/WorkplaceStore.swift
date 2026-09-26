@@ -24,6 +24,7 @@ enum WorkplaceStoreError: LocalizedError, Equatable {
     case noRepositoriesSelected
     case duplicatePath
     case pathAlreadyExistsOnDisk
+    case workplaceNotFound
 
     var errorDescription: String? {
         switch self {
@@ -39,6 +40,8 @@ enum WorkplaceStoreError: LocalizedError, Equatable {
             return "目标工作区已存在"
         case .pathAlreadyExistsOnDisk:
             return "目标工作区目录已存在，请更换名称"
+        case .workplaceNotFound:
+            return "工作区记录已不存在(可能在操作期间被删除),更改未保存"
         }
     }
 }
@@ -48,6 +51,10 @@ final class WorkplaceStore: ObservableObject {
     @Published private(set) var workplaces: [Workplace]
     @Published private(set) var syncStates: [RepositorySyncState]
     private let fileStore: JSONFileStore
+
+    /// 跨 Store 原子提交(RemoveRepository/updateRootPath)的运行时前提校验入口:
+    /// 正确性依赖两个 Store 共用同一数据目录,注入分叉时在提交前拦截而非静默错写。
+    var rootDirectoryForCrossStoreCheck: URL { fileStore.rootDirectory }
     private var debouncedSyncStatesWriteTask: Task<Void, Never>?
     private let syncStatesDebounceInterval: Duration
 
@@ -128,8 +135,9 @@ final class WorkplaceStore: ObservableObject {
         }
         guard correctedCount > 0 else { return }
         workplaceStoreLog.notice("event=has_local_directory_reconciled corrected=\(correctedCount)")
-        // 走增量合并而非整体替换:并发的其它写入不会被这份快照覆盖。
-        try? updateSyncStates(updated)
+        // 内存按 key 增量合并,并发的其它行不会被这份快照覆盖;
+        // 注意落盘本身仍是整体替换(防抖写盘写全量 sync-states.json),由 flush 兜底。
+        updateSyncStates(updated)
     }
 
     nonisolated static func normalizedPath(_ path: String) -> String {
@@ -178,9 +186,10 @@ final class WorkplaceStore: ObservableObject {
     }
 
     /// 防抖持久化:内存立即生效,写盘延后合并。
-    /// 注意:此路径**不抛错**——上层 replaceSyncStates/updateSyncState(s)/setSyncStatus
-    /// 虽声明 throws,防抖分支实际不会失败;唯一的失败点是延后的写盘,
-    /// 已由 `flushSyncStates` 记录 `flush_sync_states_failed` 日志兜底,不存在静默丢失。
+    /// 注意:此路径**不抛错**——内存赋值与延后写盘都不会失败;唯一的失败点是
+    /// 延后的写盘,已由 `flushSyncStates` 记录 `flush_sync_states_failed` 日志兜底,
+    /// 不存在静默丢失。因此 replaceSyncStates/updateSyncState(s)/setSyncStatus 均
+    /// 不再声明 throws(签名诚实)。
     private func persistSyncStates(_ newSyncStates: [RepositorySyncState]) {
         syncStates = newSyncStates
         scheduleDebouncedSyncStatesPersist()
@@ -209,6 +218,19 @@ final class WorkplaceStore: ObservableObject {
             try fileStore.save(syncStates, as: "sync-states.json")
         } catch {
             workplaceStoreLog.error("event=flush_sync_states_failed reason=\(error.localizedDescription)")
+            scheduleFlushRetry()
+        }
+    }
+
+    /// 写盘失败(磁盘满/权限异常)后 5s 重试一次:不重试则内存与文件无限期背离,
+    /// 崩溃即丢这段时间的全部状态变更。仍失败则放弃(下个变更事件会再次触发写)。
+    private func scheduleFlushRetry() {
+        guard debouncedSyncStatesWriteTask == nil else { return }
+        debouncedSyncStatesWriteTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled else { return }
+            self?.debouncedSyncStatesWriteTask = nil
+            self?.flushSyncStates()
         }
     }
 
@@ -255,7 +277,10 @@ final class WorkplaceStore: ObservableObject {
         _ workplaceID: UUID,
         update: (inout Workplace) -> Bool
     ) throws {
-        guard let index = workplaces.firstIndex(where: { $0.id == workplaceID }) else { return }
+        // 记录找不到不能静默 return:调用方(置顶/归档等)需要知道更改没生效。
+        guard let index = workplaces.firstIndex(where: { $0.id == workplaceID }) else {
+            throw WorkplaceStoreError.workplaceNotFound
+        }
 
         var updatedWorkplaces = workplaces
         let changed = update(&updatedWorkplaces[index])
@@ -328,7 +353,10 @@ final class WorkplaceStore: ObservableObject {
         selectedRepositoryIDs: [UUID],
         repositories: [RepositoryConfig]
     ) throws {
-        guard let index = workplaces.firstIndex(where: { $0.id == workplaceID }) else { return }
+        // 记录找不到不能静默 return:勾选的仓库集合没生效必须让调用方知道。
+        guard let index = workplaces.firstIndex(where: { $0.id == workplaceID }) else {
+            throw WorkplaceStoreError.workplaceNotFound
+        }
         let selectedSet = Set(selectedRepositoryIDs)
         let workplacePath = workplaces[index].path
 
@@ -515,14 +543,18 @@ final class WorkplaceStore: ObservableObject {
         }
     }
 
-    func replaceSyncStates(_ newStates: [RepositorySyncState], for workplaceID: UUID) throws {
+    func replaceSyncStates(_ newStates: [RepositorySyncState], for workplaceID: UUID) {
         var updatedSyncStates = syncStates.filter { $0.workplaceID != workplaceID }
         updatedSyncStates.append(contentsOf: newStates)
         persistSyncStates(updatedSyncStates)
     }
 
     func applyWorkplaceEdit(_ workplace: Workplace, syncStates newStates: [RepositorySyncState]) throws {
-        guard let index = workplaces.firstIndex(where: { $0.id == workplace.id }) else { return }
+        // 记录找不到不能静默 return:编辑流程(改名/移动/克隆/切分支)已经在磁盘上
+        // 做完实际工作,若此处吞掉,所有成果与记录脱节且用户看到"保存成功"。
+        guard let index = workplaces.firstIndex(where: { $0.id == workplace.id }) else {
+            throw WorkplaceStoreError.workplaceNotFound
+        }
 
         var updatedWorkplaces = workplaces
         var sanitizedWorkplace = workplace
@@ -538,17 +570,31 @@ final class WorkplaceStore: ObservableObject {
         try persist(workplaces: updatedWorkplaces, syncStates: updatedSyncStates)
     }
 
-    func updateSyncState(_ state: RepositorySyncState) throws {
-        guard let index = syncStates.firstIndex(where: {
-            $0.workplaceID == state.workplaceID && $0.repositoryID == state.repositoryID
-        }) else { return }
-
+    /// 单行更新:行仍在则覆盖;行在 await 窗口内被去重/prune 掉但工作区仍在且仓库
+    /// 仍被选中,则补录(与 `updateSyncStates` 的补录语义一致),否则克隆/pull 的
+    /// 结果会永不落库。工作区记录已不存在时不补录(孤儿行没有任何 UI 入口),
+    /// 只留痕——本方法与批量版本一样不抛错(持久化走防抖写盘,不失败)。
+    func updateSyncState(_ state: RepositorySyncState) {
         var updatedSyncStates = syncStates
-        updatedSyncStates[index] = state
+        if let index = updatedSyncStates.firstIndex(where: {
+            $0.workplaceID == state.workplaceID && $0.repositoryID == state.repositoryID
+        }) {
+            updatedSyncStates[index] = state
+            persistSyncStates(updatedSyncStates)
+            return
+        }
+        guard let workplace = workplaces.first(where: { $0.id == state.workplaceID }),
+              workplace.selectedRepositoryIDs.contains(state.repositoryID) else {
+            workplaceStoreLog.error(
+                "event=update_sync_state_dropped reason=workplace_missing workplace_id=\(state.workplaceID) repository_id=\(state.repositoryID)"
+            )
+            return
+        }
+        updatedSyncStates.append(state)
         persistSyncStates(updatedSyncStates)
     }
 
-    func updateSyncStates(_ states: [RepositorySyncState]) throws {
+    func updateSyncStates(_ states: [RepositorySyncState]) {
         guard states.isEmpty == false else { return }
         var indexLookup: [String: Int] = [:]
         var updatedSyncStates = syncStates
@@ -575,7 +621,7 @@ final class WorkplaceStore: ObservableObject {
         persistSyncStates(updatedSyncStates)
     }
 
-    func setSyncStatus(_ status: SyncStatus, for workplaceID: UUID, repositoryIDs: Set<UUID>) throws {
+    func setSyncStatus(_ status: SyncStatus, for workplaceID: UUID, repositoryIDs: Set<UUID>) {
         var changed = false
         var updatedSyncStates = syncStates
         for index in updatedSyncStates.indices where
@@ -592,39 +638,57 @@ final class WorkplaceStore: ObservableObject {
     }
 
     /// 清理"失败但本地目录仍在"的展示态(实际状态已在外部被修复,如在命令行处理完冲突)。
-    func clearFailedStatusesWhereDirectoryExists(workplaceID: UUID) throws {
-        let failedButAlive = syncStates.filter { state in
-            state.workplaceID == workplaceID
-                && state.status == .failed
-                && FileManager.default.fileExists(atPath: state.localPath)
+    ///
+    /// 存在性探测可能落在网盘/外置盘上,单次 `fileExists` 就能阻塞数秒到数分钟,
+    /// 必须移出主线程(同 `reconcileHasLocalDirectoryFlags`)。探测结果按稳定 id
+    /// 回填到 await 之后的当前最新状态,不按 await 前的行号对位——探测挂起期间
+    /// 并发写入可能增删行。
+    /// 保持同步签名(调用方 RootSplitView 的回调是同步闭包):内部起 Task 承载
+    /// 探测与回填,本方法立即返回,不在主线程等待任何磁盘 I/O。
+    func clearFailedStatusesWhereDirectoryExists(workplaceID: UUID) {
+        let candidates = syncStates.filter { state in
+            state.workplaceID == workplaceID && state.status == .failed
         }
-        guard failedButAlive.isEmpty == false else { return }
-        let cleared = failedButAlive.map { state -> RepositorySyncState in
-            var updated = state
-            updated.status = .success
-            updated.lastError = nil
-            return updated
+        guard candidates.isEmpty == false else { return }
+        let candidateIDs = candidates.map(\.id)
+        let paths = candidates.map(\.localPath)
+        Task { [weak self] in
+            let existsFlags = await Task.detached(priority: .utility) {
+                paths.map { FileManager.default.fileExists(atPath: $0) }
+            }.value
+            guard let self else { return }
+            let aliveIDs = Set(
+                zip(candidateIDs, existsFlags)
+                    .filter { $0.1 }
+                    .map { $0.0 }
+            )
+            let cleared = self.syncStates
+                .filter { state in
+                    state.workplaceID == workplaceID
+                        && state.status == .failed
+                        && aliveIDs.contains(state.id)
+                }
+                .map { state -> RepositorySyncState in
+                    var updated = state
+                    updated.status = .success
+                    updated.lastError = nil
+                    return updated
+                }
+            guard cleared.isEmpty == false else { return }
+            self.updateSyncStates(cleared)
         }
-        try updateSyncStates(cleared)
     }
 
     func updateBranch(for workplaceID: UUID, branch: String?) throws {
-        guard let index = workplaces.firstIndex(where: { $0.id == workplaceID }) else { return }
+        // 记录找不到不能静默 return:分支更改没生效必须让调用方知道。
+        guard let index = workplaces.firstIndex(where: { $0.id == workplaceID }) else {
+            throw WorkplaceStoreError.workplaceNotFound
+        }
 
         var updatedWorkplaces = workplaces
         updatedWorkplaces[index].branch = branch
         updatedWorkplaces[index].updatedAt = .now
         try persistWorkplaces(updatedWorkplaces)
-    }
-
-    /// 删除仓库在所有工作区的关联;选中列表因此变空的工作区保留记录,
-    /// 由详情页"暂无仓库"空态引导用户补充仓库,不做静默删除。
-    func removeRepositoryAssociations(repositoryID: UUID) throws {
-        guard let plan = stateAfterRemovingRepositoryAssociations(repositoryID: repositoryID) else { return }
-        try persist(
-            workplaces: plan.workplaces,
-            syncStates: plan.syncStates
-        )
     }
 
     /// 计算"删除某仓库所有工作区关联"后的目标状态(不写盘);无变化时返回 nil。
@@ -660,22 +724,6 @@ final class WorkplaceStore: ObservableObject {
         let updatedWorkplaces = workplaces.filter { $0.id != workplaceID }
         let updatedSyncStates = syncStates.filter { $0.workplaceID != workplaceID }
         try persist(workplaces: updatedWorkplaces, syncStates: updatedSyncStates)
-    }
-
-    /// 工作区根目录变更时,把不在新根下的工作区路径整体搬入新根。
-    ///
-    /// 只改记录、**不移动磁盘文件**——目录要不要搬由用户决定,但记录必须跟着走:
-    /// 否则 `diskRefreshResult` 会认为这些工作区"目录已不存在"而把整库清掉。
-    /// 迁移后目录尚未搬过去的工作区会显示为"本地目录缺失",用户可自行处理。
-    ///
-    /// 已位于新根下的工作区保持原样:嵌套选择新根(如 /A → /A/B)时避免
-    /// /A/B/x 被二次嵌套成 /A/B/B/x;换到父级目录扩大根范围时则全部原地不动。
-    /// 返回实际改写路径的工作区条数,供 UI 提示"几个工作区需要手动搬目录"。
-    @discardableResult
-    func rebaseWorkplacePaths(fromRoot oldRoot: String, toRoot newRoot: String) throws -> Int {
-        guard let plan = rebasePlan(fromRoot: oldRoot, toRoot: newRoot) else { return 0 }
-        try persist(workplaces: plan.workplaces, syncStates: plan.syncStates)
-        return plan.rebasedCount
     }
 
     /// 计算换根后的目标状态与迁移条数(不写盘);无需迁移时返回 nil。
@@ -730,15 +778,6 @@ final class WorkplaceStore: ObservableObject {
         return String(normalizedPath.dropFirst(root.count + 1))
     }
 
-    func refreshFromDisk(rootPath: String) {
-        let result = Self.diskRefreshResult(
-            workplaces: workplaces,
-            syncStates: syncStates,
-            rootPath: rootPath
-        )
-        applyDiskRefreshResult(result)
-    }
-
     func applyDiskRefreshResult(_ result: WorkplaceDiskRefreshResult) {
         guard result.changed else { return }
         do {
@@ -751,10 +790,18 @@ final class WorkplaceStore: ObservableObject {
         }
     }
 
+    /// 用磁盘事实校正 workplaces/syncStates 的展示态(纯函数,便于测试)。
+    ///
+    /// - Parameter lockedPathKeys: `RepositoryOperationLock.inFlightPathKeys()` 的快照
+    ///   (canonical key)。命中豁免的路径**不做任何破坏性改写**:创建/改名/克隆/删除等
+    ///   长操作期间,"记录存在、目录暂缺"是正常中间态(记录先落库、目录后创建,或整树
+    ///   移动中),按这一刻的陈旧磁盘视图删除记录会造成不可逆的数据脱节——刷新结果
+    ///   等值重试机制也救不回来。
     nonisolated static func diskRefreshResult(
         workplaces: [Workplace],
         syncStates: [RepositorySyncState],
-        rootPath: String
+        rootPath: String,
+        lockedPathKeys: Set<String> = []
     ) -> WorkplaceDiskRefreshResult {
         let trimmedRoot = rootPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedRoot.isEmpty else {
@@ -801,7 +848,15 @@ final class WorkplaceStore: ObservableObject {
         var changed = false
 
         // Remove workplaces whose folders no longer exist
-        let missing = refreshedWorkplaces.filter { !diskPaths.contains(Self.normalizedPath($0.path)) }
+        // (持锁/有瞬态进行中状态的长操作豁免:见函数注释)
+        let missing = refreshedWorkplaces.filter { workplace in
+            if diskPaths.contains(Self.normalizedPath(workplace.path)) { return false }
+            return !Self.isWorkplaceOperationInFlight(
+                workplace,
+                syncStates: refreshedSyncStates,
+                lockedPathKeys: lockedPathKeys
+            )
+        }
         // Safety: when *every* workplace is missing at once, that is far more likely a
         // configuration change (root path switched) or an unavailable volume than N deliberate
         // deletions. Skip the cleanup so one refresh can never wipe the whole library.
@@ -844,7 +899,18 @@ final class WorkplaceStore: ObservableObject {
             {
                 let exists = fm.fileExists(atPath: refreshedSyncStates[stateIndex].localPath)
                 if !exists {
-                    let normalizedState = normalizedMissingRepositoryState(refreshedSyncStates[stateIndex])
+                    // 瞬态进行中状态(.cloning/.pulling/.switching/.removing)只可能由
+                    // 本进程内活跃操作写入:此刻目录"缺失"多半是操作还没落位(或正在
+                    // 整树移动),不是用户删了仓库——按陈旧磁盘视图改写会把进行中的行
+                    // 打成"本地仓库缺失"的假失败。持锁路径同理豁免(见函数注释)。
+                    let state = refreshedSyncStates[stateIndex]
+                    if Self.isTransientSyncStatus(state.status)
+                        || lockedPathKeys.contains(LocalPathSafety.canonicalLockKey(for: state.localPath))
+                        || lockedPathKeys.contains(LocalPathSafety.canonicalLockKey(for: workplace.path))
+                    {
+                        continue
+                    }
+                    let normalizedState = Self.normalizedMissingRepositoryState(state)
                     if normalizedState != refreshedSyncStates[stateIndex] {
                         refreshedSyncStates[stateIndex] = normalizedState
                         changed = true
@@ -866,7 +932,11 @@ final class WorkplaceStore: ObservableObject {
     func renameWorkplace(id: UUID, newName: String) throws {
         let trimmedName = try Self.validatedWorkplaceName(newName)
 
-        guard let index = workplaces.firstIndex(where: { $0.id == id }) else { return }
+        // 记录找不到不能静默 return:改名没生效必须让调用方知道
+        // (FS 层错误仍走下面各自的 throw,不在此列)。
+        guard let index = workplaces.firstIndex(where: { $0.id == id }) else {
+            throw WorkplaceStoreError.workplaceNotFound
+        }
         let oldPath = workplaces[index].path
         let parentPath = (oldPath as NSString).deletingLastPathComponent
         let newPath = try Self.workplacePath(
@@ -930,6 +1000,41 @@ final class WorkplaceStore: ObservableObject {
             workplaces: workplaces,
             syncStates: syncStates
         )
+    }
+
+    /// 该同步状态是否属于"本进程内正在进行的长操作"(瞬态)。
+    /// 瞬态只由活跃操作写入,重启解码时已归位为 .idle(见 RepositorySyncState.init(from:)),
+    /// 因此瞬态可以安全地当作"进行中"信号使用。
+    nonisolated private static func isTransientSyncStatus(_ status: SyncStatus) -> Bool {
+        switch status {
+        case .cloning, .pulling, .switching, .removing:
+            return true
+        case .idle, .success, .failed:
+            return false
+        }
+    }
+
+    /// 工作区级豁免:目录本身持锁,或其任一仓库路径持锁/处于瞬态(说明创建、改名、
+    /// 补克隆等长操作正在进行),本次磁盘刷新就不得因"目录暂缺"删除该工作区记录。
+    ///
+    /// 锁快照为空**不能**否定豁免:瞬态只由本进程内活跃操作写入(重启解码已归位
+    /// .idle),长操作在两次持锁段之间(如整树移动完成与下一个仓库级锁之间)存在
+    /// 无锁 await 窗口,此时瞬态行是唯一可靠的"进行中"信号,必须照样豁免。
+    nonisolated private static func isWorkplaceOperationInFlight(
+        _ workplace: Workplace,
+        syncStates: [RepositorySyncState],
+        lockedPathKeys: Set<String>
+    ) -> Bool {
+        if lockedPathKeys.contains(LocalPathSafety.canonicalLockKey(for: workplace.path)) {
+            return true
+        }
+        for state in syncStates where state.workplaceID == workplace.id {
+            if isTransientSyncStatus(state.status) { return true }
+            if lockedPathKeys.contains(LocalPathSafety.canonicalLockKey(for: state.localPath)) {
+                return true
+            }
+        }
+        return false
     }
 
     nonisolated private static func normalizedMissingRepositoryState(

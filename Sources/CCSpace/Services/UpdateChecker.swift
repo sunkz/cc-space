@@ -83,9 +83,38 @@ final class UpdateChecker: ObservableObject {
             lastErrorMessage = nil
             updateCheckerLog.notice("event=update_check status=success version=\(version)")
         } catch {
-            latestVersion = nil
-            lastErrorMessage = "检查更新失败：\(error.localizedDescription)"
+            // 失败时**保留**上次已知的 latestVersion:一次网络抖动就让"有更新"
+            // 徽标闪烁消失会误导用户(刚才还有新版本,现在又显示无)。
+            // 错误信息照记,版本只在成功拿到结果时更新。
+            lastErrorMessage = Self.userFacingFailureMessage(for: error)
             updateCheckerLog.error("event=update_check status=failed reason=\(error.localizedDescription)")
+        }
+    }
+
+    /// 把检查更新失败映射为用户可读中文:NSURLError 的 localizedDescription 是英文,
+    /// 直接透出体验差;网络类错误一律给映射文案或通用兜底,不掺英文原文。
+    private static func userFacingFailureMessage(for error: Error) -> String {
+        let nsError = error as NSError
+        guard nsError.domain == NSURLErrorDomain else {
+            // 非网络错误(如响应解码失败)保留原格式,便于定位问题。
+            return "检查更新失败：\(error.localizedDescription)"
+        }
+        switch nsError.code {
+        case NSURLErrorTimedOut:
+            return "检查更新失败：连接超时，请检查网络后重试"
+        case NSURLErrorNotConnectedToInternet:
+            return "检查更新失败：没有网络连接，请检查网络后重试"
+        case NSURLErrorCannotFindHost:
+            return "检查更新失败：无法解析更新服务器地址"
+        case NSURLErrorCannotConnectToHost:
+            return "检查更新失败：无法连接更新服务器"
+        case NSURLErrorSecureConnectionFailed,
+             NSURLErrorServerCertificateHasBadDate,
+             NSURLErrorServerCertificateHasUnknownRoot,
+             NSURLErrorServerCertificateUntrusted:
+            return "检查更新失败：安全连接失败，请检查系统时间与网络环境"
+        default:
+            return "检查更新失败，请稍后重试"
         }
     }
 
@@ -94,7 +123,8 @@ final class UpdateChecker: ObservableObject {
     }
 
     private nonisolated static func normalizeVersionTag(_ tag: String) -> String {
-        if tag.hasPrefix("v") {
+        // 兼容大小写两种 "v" 前缀:"V1.2.3" 不剥前缀会落进 .numeric 兜底比较,结果不可靠。
+        if tag.hasPrefix("v") || tag.hasPrefix("V") {
             return String(tag.dropFirst())
         }
         return tag

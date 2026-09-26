@@ -125,7 +125,7 @@ final class WorkplaceEditServiceTests: XCTestCase {
         existingState.status = .success
         existingState.hasLocalDirectory = true
         existingState.lastSyncedAt = .now
-        try workplaceStore.updateSyncState(existingState)
+        workplaceStore.updateSyncState(existingState)
 
         let gitService = WorkplaceEditGitServiceSpy()
         let service = WorkplaceEditService(
@@ -213,7 +213,7 @@ final class WorkplaceEditServiceTests: XCTestCase {
         apiState.status = .success
         apiState.hasLocalDirectory = true
         apiState.localPath = apiPath
-        try workplaceStore.updateSyncState(apiState)
+        workplaceStore.updateSyncState(apiState)
 
         let gitService = WorkplaceEditGitServiceSpy()
         let service = WorkplaceEditService(
@@ -368,7 +368,7 @@ final class WorkplaceEditServiceTests: XCTestCase {
         existingState.status = .success
         existingState.hasLocalDirectory = true
         existingState.localPath = apiPath
-        try workplaceStore.updateSyncState(existingState)
+        workplaceStore.updateSyncState(existingState)
 
         let gitService = WorkplaceEditGitServiceSpy()
         await gitService.setCurrentBranch("release", for: apiPath)
@@ -423,7 +423,7 @@ final class WorkplaceEditServiceTests: XCTestCase {
         existingState.hasLocalDirectory = true
         existingState.localPath = apiPath
         existingState.lastError = "stale error"
-        try workplaceStore.updateSyncState(existingState)
+        workplaceStore.updateSyncState(existingState)
 
         let gitService = WorkplaceEditGitServiceSpy()
         await gitService.setCurrentBranch("main", for: apiPath)
@@ -486,7 +486,7 @@ final class WorkplaceEditServiceTests: XCTestCase {
         existingState.status = .success
         existingState.hasLocalDirectory = true
         existingState.localPath = apiPath
-        try workplaceStore.updateSyncState(existingState)
+        workplaceStore.updateSyncState(existingState)
 
         let gitService = WorkplaceEditGitServiceSpy()
         await gitService.setCurrentBranch("main", for: apiPath)
@@ -614,7 +614,7 @@ final class WorkplaceEditServiceTests: XCTestCase {
         existingState.status = .success
         existingState.hasLocalDirectory = true
         existingState.localPath = apiPath
-        try workplaceStore.updateSyncState(existingState)
+        workplaceStore.updateSyncState(existingState)
 
         let gitService = WorkplaceEditGitServiceSpy()
         await gitService.setCurrentBranch("main", for: apiPath)
@@ -749,7 +749,7 @@ final class WorkplaceEditServiceTests: XCTestCase {
         state.status = .success
         state.hasLocalDirectory = true
         state.localPath = outsidePath
-        try workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncState(state)
 
         let gitService = WorkplaceEditGitServiceSpy()
         let service = WorkplaceEditService(

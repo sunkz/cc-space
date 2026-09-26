@@ -56,7 +56,41 @@ struct JSONFileStore: Sendable {
             let modifiedAt = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
                 ?? .distantPast
             guard modifiedAt < cutoff else { continue }
+            // 崩溃残留的暂存目录里可能装着 backup/(旧版数据副本):
+            // 先把备份改名逃到 `.ccspace-json-rollback-backup-` 前缀下(不受本清理管辖),
+            // 再删暂存目录——否则会把"被覆写前的唯一副本"连同残留一起销毁。
+            let backupDirectory = url.appendingPathComponent("backup", isDirectory: true)
+            if let backups = try? fileManager.contentsOfDirectory(
+                at: backupDirectory,
+                includingPropertiesForKeys: nil
+            ), backups.isEmpty == false {
+                let recoveryDirectory = rootDirectory.appendingPathComponent(
+                    "\(rollbackBackupDirectoryPrefix)\(UUID().uuidString)",
+                    isDirectory: true
+                )
+                try? fileManager.moveItem(at: backupDirectory, to: recoveryDirectory)
+            }
             try? fileManager.removeItem(at: url)
+        }
+    }
+
+    /// 同卷 `rename(2)` 原子覆盖:目标文件在任一时刻都是完整的旧内容或完整的新内容,
+    /// **不存在** `removeItem + moveItem` 那种"旧文件已删、新文件未就位"的崩溃窗口。
+    /// 不用 `FileManager.moveItem`(目标已存在时报错),也不用 `replaceItemAt`
+    /// (backupItemName 传 nil 会把旧文件移进废纸篓,含 API Key 的 settings.json 会滞留系统回收目录)。
+    /// 暂存目录就建在 `rootDirectory` 之下,与目标必然同卷,rename 保证原子且即时可见。
+    static func atomicReplace(stagedURL: URL, destinationURL: URL) throws {
+        let result: Int32 = stagedURL.withUnsafeFileSystemRepresentation { srcPtr in
+            destinationURL.withUnsafeFileSystemRepresentation { dstPtr in
+                guard let srcPtr, let dstPtr else {
+                    errno = EINVAL
+                    return Int32(-1)
+                }
+                return rename(srcPtr, dstPtr)
+            }
+        }
+        guard result == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
     }
 
@@ -83,6 +117,9 @@ struct JSONFileStore: Sendable {
 
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
+        // 固定 POSIX locale:用户区域为非公历或区域设置变化时,格式化结果可能含非数字
+        // 字符,损坏副本文件名会不稳定甚至无法按时间排序。
+        formatter.locale = Locale(identifier: "en_US_POSIX")
         // 时间戳后追加短 UUID:同一秒内两次损坏会产生同名目标,
         // move 与 copy 会双双失败,两份内容都保全不下来。
         let stamp = "\(formatter.string(from: Date()))-\((UUID().uuidString as NSString).substring(to: 8))"
@@ -173,7 +210,7 @@ struct JSONFileStore: Sendable {
                 let stagedURL = stagingDirectory.appendingPathComponent(document.fileName)
                 try document.data.write(to: stagedURL, options: .atomic)
                 // 数据文件含 AI API Key(settings.json)等敏感配置,收紧为仅当前用户可读写;
-                // 后续 moveItem/replaceItemAt 会保留此权限带到目标文件。
+                // 后续 rename 是把该 inode 直接换到目标位置,权限随文件带过去。
                 try FileManager.default.setAttributes(
                     [.posixPermissions: 0o600],
                     ofItemAtPath: stagedURL.path
@@ -187,12 +224,9 @@ struct JSONFileStore: Sendable {
                     if FileManager.default.fileExists(atPath: destinationURL.path) {
                         let backupURL = backupDirectory.appendingPathComponent(document.fileName)
                         try FileManager.default.copyItem(at: destinationURL, to: backupURL)
-                        // 不用 replaceItemAt:backupItemName 传 nil 时系统会把被替换的旧文件
-                        // (含 AI API Key 的 settings.json)移入废纸篓;传非 nil 时实测返回的
-                        // URL 是目标文件本身而非备份,语义不可靠。回滚副本已自建(backupURL),
-                        // 直接 remove+move(同卷 rename,窗口极小),等价且不留废纸篓副本。
-                        try FileManager.default.removeItem(at: destinationURL)
-                        try FileManager.default.moveItem(at: stagedURL, to: destinationURL)
+                        // 回滚副本已自建(backupURL),替换本身用 rename(2) 原子覆盖:
+                        // 不留废纸篓副本,且崩溃时目标文件要么是旧内容要么是新内容,不会消失。
+                        try Self.atomicReplace(stagedURL: stagedURL, destinationURL: destinationURL)
                     } else {
                         try FileManager.default.moveItem(at: stagedURL, to: destinationURL)
                         newlyCreatedURLs.append(destinationURL)
@@ -203,20 +237,17 @@ struct JSONFileStore: Sendable {
                     try? FileManager.default.removeItem(at: url)
                 }
                 // 回滚覆盖"凡备份存在者",而非仅成功完成的文档:
-                // 中途失败的当前文档 removeItem 已删掉目标、moveItem 却没换上,
-                // 若只回滚 movedDocuments 会留下"文件被删但无人恢复"的丢失窗口。
+                // 多文档事务里任何一个 rename 成功都意味着该文件已是新内容,
+                // 但整批必须视为失败,凡有备份者都要换回旧内容。
                 // 未轮到的文档没有备份,fileExists 守卫自然跳过。
                 for document in documents.reversed() {
                     let backupURL = backupDirectory.appendingPathComponent(document.fileName)
                     let destinationURL = rootDirectory.appendingPathComponent(document.fileName)
                     guard FileManager.default.fileExists(atPath: backupURL.path) else { continue }
                     do {
-                        // 同主路径:remove+move 回滚,不经废纸篓。
-                        // moveItem **不能**用 try? 吞错:目标文件已被 removeItem 删掉,
-                        // 若 moveItem 失败却被当作成功、随即删除暂存目录,这份唯一备份
-                        // 会被一起删掉,变成不可恢复的数据丢失。
-                        try? FileManager.default.removeItem(at: destinationURL)
-                        try FileManager.default.moveItem(at: backupURL, to: destinationURL)
+                        // 同主路径:rename(2) 原子换回旧内容,不经废纸篓,也不留中间窗口。
+                        // 不能整体 try?:换回失败必须进 rollbackFailed 分支保住备份。
+                        try Self.atomicReplace(stagedURL: backupURL, destinationURL: destinationURL)
                     } catch let rollbackError {
                         jsonFileStoreLog.error("event=rollback_restore_failed file=\(document.fileName, privacy: .public) reason=\(rollbackError.localizedDescription)")
                         rollbackFailed = true

@@ -6,14 +6,30 @@ struct RepositorySettingsSection: View {
     @ObservedObject var repositoryStore: RepositoryStore
     @ObservedObject var workplaceStore: WorkplaceStore
     let gitService: GitServicing
+    /// 新增/编辑弹层共用的只读信息查询:提升为存储属性,避免在 sheet 内容闭包里
+    /// 每次 body 求值都重建一份(此前在两处 sheet 闭包内各内联构造)。
+    private let infoService: RepositoryInfoService
     @State private var searchText: String = ""
     @State private var feedback: CCSpaceFeedback?
     @State private var deletePresentationState: RepositoryDeletePresentationState?
     @State private var showAddSheet = false
     @State private var editingSheetRepository: RepositoryConfig?
-    /// "新增后直接编辑"的待弹层仓库:等 add sheet 的 onDismiss(完全收起)后再弹编辑 sheet,
+    /// "新增后直接编辑"的待弹层仓库 ID:等 add sheet 的 onDismiss(完全收起)后再弹编辑 sheet,
     /// 避免两个 sheet 同帧在位导致第二个被系统静默丢弃。
-    @State private var pendingEditAfterAdd: RepositoryConfig?
+    /// 只存 ID:呈现时按 ID 从 store 取**实时**记录——快照在两段 sheet 之间可能已被
+    /// 磁盘刷新/探测回写改写(与 RootSplitView 的 editingWorkplace 同款模式)。
+    @State private var pendingEditAfterAddID: UUID?
+
+    init(
+        repositoryStore: RepositoryStore,
+        workplaceStore: WorkplaceStore,
+        gitService: GitServicing
+    ) {
+        self.repositoryStore = repositoryStore
+        self.workplaceStore = workplaceStore
+        self.gitService = gitService
+        infoService = RepositoryInfoService(gitService: gitService)
+    }
 
     private var repositories: [RepositoryConfig] {
         repositoryStore.repositories.sorted {
@@ -78,8 +94,8 @@ struct RepositorySettingsSection: View {
         return VStack(alignment: .leading, spacing: 12) {
             headerSection(repositoryCount: repositories.count)
 
-            if let feedback {
-                CCSpaceFeedbackBanner(feedback: feedback)
+            if let shownFeedback = feedback {
+                CCSpaceFeedbackBanner(feedback: shownFeedback, onClose: { self.feedback = nil })
                     .ccspaceAutoDismissFeedback($feedback)
             }
 
@@ -147,16 +163,17 @@ struct RepositorySettingsSection: View {
         .sheet(
             isPresented: $showAddSheet,
             onDismiss: {
-                guard let pending = pendingEditAfterAdd else { return }
-                pendingEditAfterAdd = nil
-                editingSheetRepository = pending
+                guard let pendingID = pendingEditAfterAddID else { return }
+                pendingEditAfterAddID = nil
+                // 按 ID 取实时值;记录此刻必然还在(刚新增完成),取不到则放弃二次弹层。
+                editingSheetRepository = repositoryStore.repositories.first(where: { $0.id == pendingID })
             }
         ) {
             AddRepositorySheetView(
                 repositoryStore: repositoryStore,
-                infoService: RepositoryInfoService(gitService: gitService)
+                infoService: infoService
             ) { newRepo in
-                pendingEditAfterAdd = newRepo
+                pendingEditAfterAddID = newRepo.id
                 feedback = RepositoryConfigFeedbackFactory.addSuccess(repositoryName: newRepo.repoName)
             }
         }
@@ -164,7 +181,7 @@ struct RepositorySettingsSection: View {
             EditRepositorySheetView(
                 repositoryStore: repositoryStore,
                 repository: repo,
-                infoService: RepositoryInfoService(gitService: gitService),
+                infoService: infoService,
                 onSaved: {
                     if let updated = repositoryStore.repositories.first(where: { $0.id == repo.id }) {
                         feedback = RepositoryConfigFeedbackFactory.updateSuccess(repositoryName: updated.repoName)
@@ -273,13 +290,23 @@ struct RepositorySettingsSection: View {
 
                 Spacer(minLength: 8)
 
-                HStack(spacing: 6) {
+                // 三个操作按钮收紧密度(2pt)+ 放大一档(28pt 框):
+                // 与仓库行的行内按钮簇同款"贴排"口径。
+                HStack(spacing: 2) {
+                    Button {
+                        openRepositoryWeb(repository)
+                    } label: {
+                        Image(systemName: "globe")
+                    }
+                    .ccspaceIconActionButton(large: true)
+                    .ccspaceQuickHelp("在浏览器打开仓库", providesLabel: true)
+
                     Button {
                         editingSheetRepository = repository
                     } label: {
                         Image(systemName: "square.and.pencil")
                     }
-                    .ccspaceIconActionButton()
+                    .ccspaceIconActionButton(large: true)
                     .ccspaceQuickHelp("编辑仓库地址", providesLabel: true)
 
                     Button(role: .destructive) {
@@ -287,7 +314,7 @@ struct RepositorySettingsSection: View {
                     } label: {
                         Image(systemName: "trash")
                     }
-                    .ccspaceIconActionButton()
+                    .ccspaceIconActionButton(large: true)
                     .ccspaceQuickHelp("删除仓库", providesLabel: true)
                 }
             }
@@ -317,6 +344,19 @@ struct RepositorySettingsSection: View {
             repository: repository,
             workplaces: workplaceStore.workplaces
         )
+    }
+
+    /// 在浏览器打开仓库主页:按配置的远端地址生成链接,失败弹本区反馈。
+    private func openRepositoryWeb(_ repository: RepositoryConfig) {
+        do {
+            let url = try GitURLParser.repositoryWebURL(from: repository.gitURL)
+            try WorkplaceSystemActions.openInBrowser(url)
+        } catch {
+            feedback = CCSpaceFeedbackFactory.actionError(
+                action: "打开仓库主页",
+                error: error
+            )
+        }
     }
 
     private func confirmDeleteRepository() {

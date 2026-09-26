@@ -64,13 +64,32 @@ struct CCSpaceFeedback: Equatable {
 
 struct CCSpaceFeedbackBanner: View {
     let feedback: CCSpaceFeedback
+    /// 提供时在右上角展示关闭按钮。error 样式不参与自动消失(见
+    /// CCSpaceFeedbackAutoDismissModifier),没有手动入口用户就只能等视图重建,
+    /// 长驻错误横幅必须可关闭。
+    var onClose: (() -> Void)? = nil
     @State private var isDetailsExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Label(feedback.message, systemImage: feedback.systemImage)
-                .font(.callout)
-                .foregroundStyle(feedback.style.foregroundColor)
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Label(feedback.message, systemImage: feedback.systemImage)
+                    .font(.callout)
+                    .foregroundStyle(feedback.style.foregroundColor)
+
+                Spacer(minLength: 4)
+
+                if let onClose {
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("关闭提示")
+                    .accessibilityLabel("关闭提示")
+                }
+            }
 
             if let details = feedback.details {
                 if isDetailsExpanded {

@@ -11,12 +11,12 @@ CCSpace 是一个 **macOS 原生应用**（Swift 6.0 / SwiftUI，最低支持 ma
 ```bash
 ./run.sh            # 构建并启动 app（默认行为）
 ./run.sh build      # 仅构建 debug 产物
-./run.sh test       # 运行单元测试（swift test）
+./run.sh test       # 运行单元测试（推荐：内部与 CI 一致直接驱动 xctest）
 ./run.sh lint       # 校验 shell 脚本语法 + 以 warnings-as-errors 编译
 ./run.sh clean      # 清理 .build/ 与 dist/
 
 swift build         # 直接用 SwiftPM 构建（CI 中最常用的快速编译验证）
-swift test          # 直接运行测试
+swift test          # ⚠️ 勿用：部分工具链会确定性死锁（2026-09），测试一律走 ./run.sh test
 ```
 
 - **提交前务必** `./run.sh lint`（warnings 会被当作错误）。
@@ -47,6 +47,7 @@ swift test          # 直接运行测试
 - 数据持久化统一走 `JSONFileStore`（`Services/JSONFileStore.swift`），不要在 Service 里手写 `JSONEncoder` 落盘。
 
 ### 测试
+- 运行测试用 `./run.sh test`（run.sh 与 CI 均直接驱动 `xcrun xctest`，以绕开 2026-09 起 swift-package 测试执行器的确定性死锁）；**不要**直接 `swift test`。
 - 测试在 `Tests/CCSpaceTests/`，命名 `<Subject>Tests.swift`；新增公开类型或纯函数逻辑通常都应有对应测试。
 - 共享夹具/工具在 `Tests/CCSpaceTests/TestSupport/`。
 - UI 行为（SwiftUI）通常通过抽取纯 `PresentationState`/`Support` 结构体来测试，而不是驱动 View。

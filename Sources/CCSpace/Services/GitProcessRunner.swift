@@ -9,11 +9,14 @@ struct GitProcessResult {
 
 enum GitProcessExecutionError: LocalizedError, Equatable {
     case timedOut(command: String, timeout: TimeInterval)
+    case outputLimitExceeded(command: String)
 
     var errorDescription: String? {
         switch self {
         case .timedOut(let command, let timeout):
             return "操作超时（\(Int(timeout))s），仓库可能过大或网络连接过慢：\(command)"
+        case .outputLimitExceeded(let command):
+            return "Git 命令输出超过上限（64 MB），已终止：\(command)"
         }
     }
 }
@@ -51,6 +54,17 @@ struct GitProcessRunner {
         // 也规避 onCancel 先于 body 执行的时序。
         try Task.checkCancellation()
 
+        // 最后一道进程入口防线:含 NUL 字节的参数在 Swift 桥接 C 字符串构造 argv 时
+        // 会 fatalError 直接崩掉整个 App(手工编辑的 JSON 配置可以注入这种字符串)。
+        // 正常路径应在更上游拒绝,这里兜底而不是让进程崩给用户看。
+        if arguments.contains(where: { $0.utf8.contains(0) }) {
+            throw NSError(
+                domain: "GitProcessRunner",
+                code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "命令参数包含非法控制字符，已拒绝执行"]
+            )
+        }
+
         let process = Process()
         process.executableURL = gitURL
         process.arguments = arguments
@@ -59,6 +73,10 @@ struct GitProcessRunner {
         var environment = ProcessInfo.processInfo.environment
         environment["GIT_TERMINAL_PROMPT"] = "0"
         environment["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes"
+        // 固定 git 输出语言为英文:全项目的错误分类(pull 策略回退、分支缺失判定、
+        // stash 恢复决策、localizeMessage 之外的子串匹配)都依赖英文文案子串。
+        // 不设防时用户 shell 里一个 LANG=zh_CN 就能让整套分类逻辑静默失效。
+        environment["LC_ALL"] = "C"
         // 安全兜底:只放行白名单传输协议。git 对用户直接发起的命令默认允许 ext::
         // 等可执行任意命令的传输形式,用户配置的远端 URL 会原样进入 argv;
         // Service 层入口另有 URL 校验(GitURLParser.validateRemoteURL),这里双保险。
@@ -88,8 +106,24 @@ struct GitProcessRunner {
             try await withCheckedThrowingContinuation { continuation in
                 continuationBox.store(continuation)
 
-                let stdoutBox = SendableDataBox()
-                let stderrBox = SendableDataBox()
+                // 输出超限处理:与超时路径同构——恰好一次认领续体、终止进程
+                // (SIGTERM + 5s SIGKILL 升级)、借排水兜底摘读回调并平衡 group,
+                // 最后以超限错误失败本次运行。孙进程持有管道导致 EOF 不来时,
+                // 清理由兑底定时器兜住;续体已恢复,兜底路径里的 resume 幂等。
+                let handleOutputOverflow: @Sendable () -> Void = { [continuationClaim, processBox, drainSchedulerBox, continuationBox, commandDescription] in
+                    guard continuationClaim.claim() else { return }
+                    Self.objCBridgedTerminate(processBox.process)
+                    Self.scheduleSIGKILLEscalation(processBox: processBox)
+                    drainSchedulerBox.scheduler?(false, {})
+                    continuationBox.resume(
+                        throwing: GitProcessExecutionError.outputLimitExceeded(
+                            command: commandDescription
+                        )
+                    )
+                }
+
+                let stdoutBox = SendableDataBox(onOverflow: handleOutputOverflow)
+                let stderrBox = SendableDataBox(onOverflow: handleOutputOverflow)
                 let readGroup = DispatchGroup()
                 // 每管道恰好一次的 group leave 终结器:EOF 与"摘除回调但 EOF 永不到来"
                 // 的兜底路径(排水超时/启动失败)共用,保证 readGroup 恒平衡——
@@ -142,7 +176,7 @@ struct GitProcessRunner {
                         if stdoutPipe != nil { stdoutRead.finalize() }
                         if stderrPipe != nil { stderrRead.finalize() }
                         if isTimeoutPath {
-                            if processBox.process.isRunning {
+                            if Self.objCBridgedIsRunning(processBox.process) {
                                 // SIGTERM 被忽略:升级为 SIGKILL,避免残留 git 进程
                                 // 长期持有工作区(如 index.lock)。
                                 kill(processBox.process.processIdentifier, SIGKILL)
@@ -155,7 +189,7 @@ struct GitProcessRunner {
                             )
                             return
                         }
-                        guard processBox.process.isRunning == false else {
+                        guard Self.objCBridgedIsRunning(processBox.process) == false else {
                             // 进程未退出时读 terminationStatus 属未定义行为,按超时处理。
                             continuationBox.resume(
                                 throwing: GitProcessExecutionError.timedOut(
@@ -185,9 +219,11 @@ struct GitProcessRunner {
                 drainSchedulerBox.scheduler = scheduleDrainFallback
 
                 nonisolated(unsafe) let timeoutWork = DispatchWorkItem { [processBox, continuationClaim] in
-                    guard processBox.process.isRunning else { return }
+                    // isRunning 复查必须先于认领:进程已退出时让 terminationHandler
+                    // 正常持有续体恢复权,认领顺序不可对调。
+                    guard Self.objCBridgedIsRunning(processBox.process) else { return }
                     guard continuationClaim.claim() else { return }
-                    processBox.process.terminate()
+                    Self.objCBridgedTerminate(processBox.process)
                     scheduleDrainFallback(true) {
                         continuationBox.resume(
                             throwing: GitProcessExecutionError.timedOut(
@@ -233,7 +269,10 @@ struct GitProcessRunner {
                         throw swiftError
                     }
                     if !launched || !process.isRunning {
-                        let message = launchException?.reason ?? "进程启动失败"
+                        // 异常消息同时携带 name 与 reason:只有 reason 时无法定位
+                        // 异常类别(如 NSInvalidArgumentException 与自定义域难以区分)。
+                        let message = launchException.map { "\($0.name): \($0.reason ?? "")" }
+                            ?? "进程启动失败"
                         throw NSError(
                             domain: "GitProcessRunner",
                             code: 2,
@@ -246,7 +285,11 @@ struct GitProcessRunner {
                     // 启动成功后再判一次,发现取消立即终止,只浪费一次 fork 而非整条命令。
                     if Task.isCancelled {
                         process.terminationHandler = nil
-                        process.terminate()
+                        Self.objCBridgedTerminate(process)
+                        // 与 onCancel 的 SIGKILL 升级对称:此刻进程已 isRunning,
+                        // 但 onCancel 判定发生在启动前,覆盖不到这个窗口;
+                        // SIGTERM 被吞时 5s 后补刀,避免取消的 git 长期锁住工作区。
+                        Self.scheduleSIGKILLEscalation(processBox: processBox)
                         throw CancellationError()
                     }
                 } catch {
@@ -268,8 +311,12 @@ struct GitProcessRunner {
                 DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timeoutWork)
             }
         } onCancel: {
-            if processBox.process.isRunning {
-                processBox.process.terminate()
+            if Self.objCBridgedIsRunning(processBox.process) {
+                Self.objCBridgedTerminate(processBox.process)
+                // SIGTERM 可能被挂起的 git(等锁、D 状态 IO)吞掉:不升级 SIGKILL
+                // 就等于被取消的操作长期锁住工作区(index.lock 一直存在)。
+                // 与超时路径的 SIGKILL 升级对称;isRunning 复查避免向已回收的 pid 补刀。
+                Self.scheduleSIGKILLEscalation(processBox: processBox)
             }
             // 不 closeFile:读端由 readabilityHandler 在 EOF 时自摘除
             // (terminate 后 git 退出、写端关闭),强制 close 与回调执行竞态属未定义行为。
@@ -298,14 +345,65 @@ struct GitProcessRunner {
     }
 
     private static func redactedArgument(_ argument: String) -> String {
-        guard var components = URLComponents(string: argument),
-              components.user != nil || components.password != nil else {
+        guard var components = URLComponents(string: argument) else {
             return argument
         }
 
-        components.user = "redacted"
-        components.password = nil
+        var redactedQuery = false
+        if var queryItems = components.queryItems, queryItems.isEmpty == false {
+            // 凭据类查询参数(private_token / access_token / token 等)一并打码:
+            // 托管平台常以 ?private_token=... 传递令牌,诊断文案同样不能泄漏。
+            queryItems = queryItems.map { item in
+                guard let value = item.value,
+                      value.isEmpty == false,
+                      item.name.lowercased().contains("token") else {
+                    return item
+                }
+                redactedQuery = true
+                return URLQueryItem(name: item.name, value: "redacted")
+            }
+            if redactedQuery {
+                components.queryItems = queryItems
+            }
+        }
+
+        let hasEmbeddedCredentials = components.user != nil || components.password != nil
+        guard hasEmbeddedCredentials || redactedQuery else {
+            return argument
+        }
+
+        if hasEmbeddedCredentials {
+            components.user = "redacted"
+            components.password = nil
+        }
         return components.string ?? "<redacted-url>"
+    }
+
+    /// Process 在已退出/从未启动状态下调用 terminate/isRunning 时,Foundation 可能抛
+    /// ObjC 异常(isRunning 检查与 terminate 执行横跨线程,竞态窗口无法根除),
+    /// 未捕获的 NSException 会直接崩掉 App。所有终止/探活调用一律经 ObjC 桥接吞异常:
+    /// 对死进程的终止本就是幂等空操作,吞掉即可。
+    private static func objCBridgedIsRunning(_ process: Process) -> Bool {
+        var isRunning = false
+        var exception: NSException?
+        _ = ObjCExceptionCatchTryRun({ isRunning = process.isRunning }, &exception)
+        return isRunning
+    }
+
+    private static func objCBridgedTerminate(_ process: Process) {
+        var exception: NSException?
+        _ = ObjCExceptionCatchTryRun({ process.terminate() }, &exception)
+    }
+
+    /// SIGTERM 可能被挂起的 git(等锁、D 状态 IO)吞掉:5s 后仍存活则升级 SIGKILL,
+    /// 避免残留 git 进程长期持有工作区(如 index.lock)。isRunning 复查经 ObjC 桥接,
+    /// 避免向已回收的 pid 操作时 Foundation 抛异常崩 App。
+    private static func scheduleSIGKILLEscalation(processBox: SendableProcessBox) {
+        DispatchQueue.global().asyncAfter(deadline: .now() + 5) { [processBox] in
+            if Self.objCBridgedIsRunning(processBox.process) {
+                kill(processBox.process.processIdentifier, SIGKILL)
+            }
+        }
     }
 }
 
@@ -317,17 +415,55 @@ private final class SendableProcessBox: @unchecked Sendable {
     }
 }
 
+/// 增量读取缓冲:单流硬上限 64 MB。超限时停止追加(截断)并恰好一次触发溢出回调,
+/// 由调用方终止进程并失败本次运行——否则超大 `git diff` 会在超时兜底生效前
+/// 先把内存耗尽。
 private final class SendableDataBox: @unchecked Sendable {
+    static let maxBytes = 64 * 1024 * 1024
+
     private let lock = NSLock()
     private var _data = Data()
+    private var _truncated = false
+    private var _overflowNotified = false
+    private let onOverflow: @Sendable () -> Void
+
+    init(onOverflow: @escaping @Sendable () -> Void) {
+        self.onOverflow = onOverflow
+    }
 
     var data: Data {
         get { lock.lock(); defer { lock.unlock() }; return _data }
         set { lock.lock(); defer { lock.unlock() }; _data = newValue }
     }
 
+    /// 超限截断后为真;此后 append 为空操作。
+    var truncated: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return _truncated
+    }
+
     func append(_ chunk: Data) {
         lock.lock()
+        guard _truncated == false else {
+            lock.unlock()
+            return
+        }
+        let remaining = Self.maxBytes - _data.count
+        if chunk.count > remaining {
+            // 追加到恰好触及上限后截断;溢出回调恰好一次(两个流共用同一处理闭包)。
+            if remaining > 0 {
+                _data.append(chunk.prefix(remaining))
+            }
+            _truncated = true
+            let shouldNotify = _overflowNotified == false
+            _overflowNotified = true
+            lock.unlock()
+            if shouldNotify {
+                onOverflow()
+            }
+            return
+        }
         _data.append(chunk)
         lock.unlock()
     }
@@ -360,8 +496,24 @@ private struct ReadFinalizer: Sendable {
 
 /// 排水兑底调度器的转发盒:onCancel 在 continuation 闭包体外,无法直接捕获
 /// 体内定义的 scheduleDrainFallback,经此类中转(body 存入、onCancel 读取)。
+/// 存取两侧跑在不同线程(body 线程写、onCancel 线程读),必须锁保护——
+/// `@unchecked Sendable` 只是消音,裸 Optional 属性的并发读写在严格并发下是 data race。
 private final class DrainSchedulerBox: @unchecked Sendable {
-    var scheduler: ((Bool, @escaping @Sendable () -> Void) -> Void)?
+    private let lock = NSLock()
+    private var _scheduler: ((Bool, @escaping @Sendable () -> Void) -> Void)?
+
+    var scheduler: ((Bool, @escaping @Sendable () -> Void) -> Void)? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return _scheduler
+        }
+        set {
+            lock.lock()
+            _scheduler = newValue
+            lock.unlock()
+        }
+    }
 }
 
 private final class ContinuationClaimBox: @unchecked Sendable {

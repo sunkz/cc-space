@@ -32,8 +32,8 @@ struct EditRepositorySheetView: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    if let feedback {
-                        CCSpaceFeedbackBanner(feedback: feedback)
+                    if let shownFeedback = feedback {
+                        CCSpaceFeedbackBanner(feedback: shownFeedback, onClose: { self.feedback = nil })
                     }
 
                     VStack(alignment: .leading, spacing: 8) {
@@ -102,6 +102,8 @@ struct EditRepositorySheetView: View {
             .padding(.vertical, 10)
         }
         .frame(width: 500, height: 490)
+        // 与主窗口一致:成功/信息类提示自动消失,错误类保留且可手动关闭。
+        .ccspaceAutoDismissFeedback($feedback)
         .onAppear {
             editingGitURL = repository.gitURL
             effectiveDefaultBranch = repository.defaultBranch

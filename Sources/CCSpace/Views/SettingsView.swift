@@ -38,10 +38,18 @@ struct SettingsView: View {
         ScrollViewReader { scrollProxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    if selectedTab == .general {
+                    // 两个页签常驻视图树,用透明度切换:if/else 会随切页销毁离场页签,
+                    // AI 表单里粘贴到一半的 Key 等未保存输入会被静默丢弃。
+                    // 隐藏侧禁用命中测试并对辅助功能隐藏,交互与 if/else 等价。
+                    ZStack(alignment: .topLeading) {
                         generalTabContent
-                    } else {
+                            .opacity(selectedTab == .general ? 1 : 0)
+                            .allowsHitTesting(selectedTab == .general)
+                            .accessibilityHidden(selectedTab != .general)
                         AISettingsSection(settingsStore: settingsStore, aiService: aiService)
+                            .opacity(selectedTab == .ai ? 1 : 0)
+                            .allowsHitTesting(selectedTab == .ai)
+                            .accessibilityHidden(selectedTab != .ai)
                     }
 
                     if selectedTab == .general, repositoryStore.repositories.count > 8 {
@@ -179,8 +187,8 @@ struct SettingsView: View {
                 borderOpacity: savedPath.isEmpty ? 0.08 : 0.04
             )
 
-            if let saveFeedback {
-                CCSpaceFeedbackBanner(feedback: saveFeedback)
+            if let shownFeedback = saveFeedback {
+                CCSpaceFeedbackBanner(feedback: shownFeedback, onClose: { saveFeedback = nil })
                     .ccspaceAutoDismissFeedback($saveFeedback)
             }
         }
@@ -202,8 +210,13 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
             Spacer()
             Button("重新开始引导") {
-                try? settingsStore.updateHasCompletedOnboarding(false)
-                showOnboarding = true
+                // 不吞错:写盘失败下次启动也不会重放引导,用户以为"点了没反应"。
+                do {
+                    try settingsStore.updateHasCompletedOnboarding(false)
+                    showOnboarding = true
+                } catch {
+                    saveFeedback = CCSpaceFeedbackFactory.actionError(action: "重置引导状态", error: error)
+                }
             }
             .ccspaceSecondaryActionButton()
         }

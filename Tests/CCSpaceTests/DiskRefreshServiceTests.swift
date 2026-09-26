@@ -248,7 +248,7 @@ final class DiskRefreshServiceTests: XCTestCase {
         )
         initialState.status = .success
         initialState.lastSyncedAt = .now
-        try workplaceStore.updateSyncState(initialState)
+        workplaceStore.updateSyncState(initialState)
 
         let gate = RefreshGate()
         let calculationStarted = expectation(description: "refresh calculation started")
@@ -280,7 +280,7 @@ final class DiskRefreshServiceTests: XCTestCase {
         updatedState.status = .failed
         updatedState.lastError = "manual failure"
         updatedState.lastSyncedAt = nil
-        try workplaceStore.updateSyncState(updatedState)
+        workplaceStore.updateSyncState(updatedState)
 
         await gate.release()
         await refreshTask.value
@@ -349,7 +349,7 @@ final class DiskRefreshServiceTests: XCTestCase {
                         guard var state = workplaceStore.syncStates
                             .first(where: { $0.repositoryID == presentRepo.id }) else { return }
                         state.hasLocalDirectory = true
-                        try? workplaceStore.updateSyncState(state)
+                        workplaceStore.updateSyncState(state)
                     }
                 }
                 // 从当前库状态计算结果(第 1 次调用后库已被改动)。

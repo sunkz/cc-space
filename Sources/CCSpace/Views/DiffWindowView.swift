@@ -26,6 +26,8 @@ struct DiffWindowPayload: Codable, Hashable {
 struct DiffWindowView: View {
     let payload: DiffWindowPayload
     let gitService: GitServicing
+    /// 破坏性写(丢弃/提交)的唯一入口:协调器内部持 per-path 锁与后台 pull/push 互斥。
+    let syncCoordinator: SyncCoordinator
     let aiCommitService: AICommitMessageServicing
 
     @State private var entries: [GitDiffEntry] = []
@@ -91,13 +93,9 @@ struct DiffWindowView: View {
         }
     }
 
-    private var canCommitChanges: Bool {
-        canDiscardChanges
-    }
-
     /// 有可提交内容且加载无异常时才展示提交栏;加载中/出错/空 diff 均隐藏。
     private var showsCommitBar: Bool {
-        canCommitChanges && isLoading == false && errorMessage == nil && entries.isEmpty == false
+        canDiscardChanges && isLoading == false && errorMessage == nil && entries.isEmpty == false
     }
 
     private var trimmedCommitMessage: String {
@@ -144,6 +142,9 @@ struct DiffWindowView: View {
             generateMessageErrorMessage = nil
             commitMessage = ""
             didCommit = false
+            // 复用窗口换新 payload:作废"首载已完成"标记,防止加载期间一次
+            // 聚焦事件抢跑 load(isRefresh: true) 与 onChange 自己发起的 load() 并发。
+            hasLoadedInitialData = false
             load()
         }
         .onWindowBecomeKey {
@@ -233,40 +234,55 @@ struct DiffWindowView: View {
             guard FileManager.default.fileExists(atPath: localPath) else {
                 // payload 已更换(代际过期)时不得把旧仓库的错误写进新仓库视图。
                 guard !Task.isCancelled, generation == payloadGeneration else { return }
-                await MainActor.run {
-                    withAnimation(.easeOut(duration: 0.18)) {
-                        errorMessage = "本地目录不存在：\(localPath)"
-                        isLoading = false
-                    }
+                withAnimation(.easeOut(duration: 0.18)) {
+                    errorMessage = "本地目录不存在：\(localPath)"
+                    isLoading = false
                 }
                 return
             }
-            let loaded: [GitDiffEntry]
-            switch source {
-            case .workingDirectory:
-                loaded = await service.diffWorkingDirectory(in: localPath)
-            case .commit(let hash):
-                loaded = await service.diffCommit(hash: hash, in: localPath)
-            case .compare(let base, let head):
+            // 分支对比来源未检出分支(detached HEAD)是硬失败:给专属文案而非通用报错。
+            let resolvedCompareHead: String?
+            if case .compare(_, let head) = source {
                 guard let head, head.isEmpty == false else {
                     guard !Task.isCancelled, generation == payloadGeneration else { return }
-                    await MainActor.run {
-                        withAnimation(.easeOut(duration: 0.18)) {
-                            errorMessage = "当前仓库未检出分支，无法进行分支对比"
-                            isLoading = false
-                        }
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        errorMessage = "当前仓库未检出分支，无法进行分支对比"
+                        isLoading = false
                     }
                     return
                 }
-                loaded = await service.diffBranches(base: base, head: head, in: localPath)
+                resolvedCompareHead = head
+            } else {
+                resolvedCompareHead = nil
+            }
+            let loaded: [GitDiffEntry]
+            do {
+                switch source {
+                case .workingDirectory:
+                    loaded = try await service.diffWorkingDirectory(in: localPath)
+                case .commit(let hash):
+                    loaded = try await service.diffCommit(hash: hash, in: localPath)
+                case .compare(let base, _):
+                    // resolvedCompareHead 已在上方解包;?? 仅满足类型检查,不会为空。
+                    loaded = try await service.diffBranches(base: base, head: resolvedCompareHead ?? "", in: localPath)
+                }
+            } catch is CancellationError {
+                // 取消不当作失败:payload 更换/窗口关闭时静默停止,不污染新仓库的错误态。
+                return
+            } catch {
+                // payload 已更换时不得把旧仓库的错误写进新仓库视图。
+                guard !Task.isCancelled, generation == payloadGeneration else { return }
+                withAnimation(.easeOut(duration: 0.18)) {
+                    errorMessage = RepositoryWindowContext.localizedDiffFailureMessage(error)
+                    isLoading = false
+                }
+                return
             }
             guard !Task.isCancelled, generation == payloadGeneration else { return }
-            await MainActor.run {
-                withAnimation(.easeOut(duration: 0.18)) {
-                    entries = loaded
-                    isLoading = false
-                    hasLoadedInitialData = true
-                }
+            withAnimation(.easeOut(duration: 0.18)) {
+                entries = loaded
+                isLoading = false
+                hasLoadedInitialData = true
             }
         }
     }
@@ -275,7 +291,7 @@ struct DiffWindowView: View {
     private func discard(_ entry: GitDiffEntry) {
         guard isDiscarding == false else { return }
         isDiscarding = true
-        let service = gitService
+        let coordinator = syncCoordinator
         let directory = payload.localPath
         let filePath = entry.filePath
         let generation = payloadGeneration
@@ -284,7 +300,7 @@ struct DiffWindowView: View {
             // 也能把 isDiscarding 归位,避免永久卡在进行中。
             defer { isDiscarding = false }
             do {
-                try await service.discardChanges(filePath: filePath, in: directory)
+                try await coordinator.discardFileChanges(filePath: filePath, in: directory)
                 guard !Task.isCancelled, generation == payloadGeneration else { return }
                 didCommit = false
                 load(isRefresh: true)
@@ -300,7 +316,7 @@ struct DiffWindowView: View {
     private func commit() {
         guard isCommitting == false, trimmedCommitMessage.isEmpty == false else { return }
         isCommitting = true
-        let service = gitService
+        let coordinator = syncCoordinator
         let directory = payload.localPath
         let message = trimmedCommitMessage
         let generation = payloadGeneration
@@ -309,7 +325,7 @@ struct DiffWindowView: View {
             // 也能把 isCommitting 归位,避免永久卡在进行中。
             defer { isCommitting = false }
             do {
-                try await service.commitAllChanges(message: message, in: directory)
+                try await coordinator.commitAllChanges(message: message, in: directory)
                 // payload 已更换时不得把"提交成功"/清空输入框带到新仓库窗口。
                 guard !Task.isCancelled, generation == payloadGeneration else { return }
                 commitMessage = ""

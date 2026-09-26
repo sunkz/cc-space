@@ -455,12 +455,12 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         apiState.hasLocalDirectory = true
         apiState.lastError = nil
         apiState.lastSyncedAt = Date(timeIntervalSince1970: 100)
-        try workplaceStore.updateSyncState(apiState)
+        workplaceStore.updateSyncState(apiState)
 
         var webState = try XCTUnwrap(syncState(for: webRepository.id, workplaceID: workplace.id, in: workplaceStore))
         webState.status = .failed
         webState.lastError = "clone failed"
-        try workplaceStore.updateSyncState(webState)
+        workplaceStore.updateSyncState(webState)
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         let service = WorkplaceRuntimeService(
@@ -517,7 +517,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = "checkout failed"
-        try workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncState(state)
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         let service = WorkplaceRuntimeService(
@@ -567,13 +567,13 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         apiState.status = .success
         apiState.hasLocalDirectory = true
         apiState.lastSyncedAt = baselineDate
-        try workplaceStore.updateSyncState(apiState)
+        workplaceStore.updateSyncState(apiState)
 
         var webState = try XCTUnwrap(syncState(for: webRepository.id, workplaceID: workplace.id, in: workplaceStore))
         webState.status = .success
         webState.hasLocalDirectory = true
         webState.lastSyncedAt = nil
-        try workplaceStore.updateSyncState(webState)
+        workplaceStore.updateSyncState(webState)
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         let service = WorkplaceRuntimeService(
@@ -639,7 +639,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         apiState.hasLocalDirectory = true
         apiState.localPath = apiPath
         apiState.lastSyncedAt = baselineDate
-        try workplaceStore.updateSyncState(apiState)
+        workplaceStore.updateSyncState(apiState)
 
         var webState = try XCTUnwrap(syncState(for: webRepository.id, workplaceID: workplace.id, in: workplaceStore))
         webState.status = .failed
@@ -647,7 +647,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         webState.localPath = webPath
         webState.lastError = "stale push error"
         webState.lastSyncedAt = baselineDate
-        try workplaceStore.updateSyncState(webState)
+        workplaceStore.updateSyncState(webState)
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setBranchStatus(makeBranchStatus(hasUnpushedCommits: true), for: apiPath)
@@ -706,7 +706,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = nil
-        try workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncState(state)
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setUnreadableBranchStatus(for: localPath)
@@ -755,7 +755,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = "old error"
-        try workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncState(state)
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setBranchStatus(makeBranchStatus(hasUnpushedCommits: true), for: localPath)
@@ -811,7 +811,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
             state.hasLocalDirectory = true
             state.localPath = localPath
             state.lastError = "stale error"
-            try workplaceStore.updateSyncState(state)
+            workplaceStore.updateSyncState(state)
         }
 
         let gitService = ConcurrentPushGitServiceSpy()
@@ -866,7 +866,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.localPath = localPath
         state.lastError = "push failed"
         state.lastSyncedAt = Date(timeIntervalSince1970: 123)
-        try workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncState(state)
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setBranchStatus(makeBranchStatus(), for: localPath)
@@ -916,7 +916,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = "old error"
-        try workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncState(state)
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setBranchStatus(makeBranchStatus(hasUnpushedCommits: true), for: localPath)
@@ -1031,7 +1031,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         )
         originalState.status = .failed
         originalState.lastError = "existing error"
-        try workplaceStore.updateSyncState(originalState)
+        workplaceStore.updateSyncState(originalState)
 
         let service = WorkplaceRuntimeService(
             workplaceStore: workplaceStore,
@@ -1125,7 +1125,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = "old error"
-        try workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncState(state)
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         let service = WorkplaceRuntimeService(
@@ -1173,7 +1173,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.status = .success
         state.hasLocalDirectory = true
         state.localPath = localPath
-        try workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncState(state)
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setCheckoutError(WorkplaceRuntimeStubError(message: "checkout failed"))
@@ -1219,7 +1219,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.status = .success
         state.hasLocalDirectory = true
         state.localPath = localPath
-        try workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncState(state)
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setCurrentBranch("main", for: localPath)
@@ -1278,7 +1278,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.status = .success
         state.hasLocalDirectory = true
         state.localPath = localPath
-        try workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncState(state)
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setCurrentBranch("main", for: localPath)
@@ -1334,7 +1334,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = "old error"
-        try workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncState(state)
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setCurrentBranch("release", for: localPath)
@@ -1396,7 +1396,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
             state.hasLocalDirectory = true
             state.localPath = URL(fileURLWithPath: workplace.path).appendingPathComponent(repository.repoName).path
             state.lastError = "old error"
-            try workplaceStore.updateSyncState(state)
+            workplaceStore.updateSyncState(state)
         }
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
@@ -1456,7 +1456,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
             state.status = .success
             state.hasLocalDirectory = true
             state.localPath = localPaths[index]
-            try workplaceStore.updateSyncState(state)
+            workplaceStore.updateSyncState(state)
         }
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
@@ -1522,7 +1522,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = "old error"
-        try workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncState(state)
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         let service = WorkplaceRuntimeService(
@@ -1573,7 +1573,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.status = .success
         state.hasLocalDirectory = true
         state.localPath = localPath
-        try workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncState(state)
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setCurrentBranch("feature/api", for: localPath)
@@ -1617,7 +1617,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.status = .success
         state.hasLocalDirectory = true
         state.localPath = localPath
-        try workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncState(state)
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setCurrentBranch("feature/api", for: localPath)
@@ -1659,7 +1659,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.status = .success
         state.hasLocalDirectory = true
         state.localPath = localPath
-        try workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncState(state)
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setDefaultBranchResult(nil)
@@ -1714,7 +1714,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
             state.hasLocalDirectory = true
             state.localPath = localPaths[index]
             state.lastError = "old error"
-            try workplaceStore.updateSyncState(state)
+            workplaceStore.updateSyncState(state)
         }
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
@@ -1770,7 +1770,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = "old error"
-        try workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncState(state)
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setCurrentBranch("main", for: localPath)
@@ -1818,7 +1818,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.status = .success
         state.hasLocalDirectory = true
         state.localPath = localPath
-        try workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncState(state)
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setCurrentBranch("feature/test", for: localPath)
@@ -1877,7 +1877,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.status = .success
         state.hasLocalDirectory = true
         state.localPath = localPath
-        try workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncState(state)
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setCurrentBranch("feature/api", for: localPath)
@@ -1935,7 +1935,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
             state.status = .success
             state.hasLocalDirectory = true
             state.localPath = localPaths[index]
-            try workplaceStore.updateSyncState(state)
+            workplaceStore.updateSyncState(state)
         }
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
@@ -2016,7 +2016,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.status = .failed
         state.hasLocalDirectory = true
         state.localPath = corruptedPath
-        try workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncState(state)
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         let service = WorkplaceRuntimeService(
@@ -2111,7 +2111,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.status = .success
         state.hasLocalDirectory = true
         state.localPath = localPath
-        try workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncState(state)
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         if uncommittedChanges {
@@ -2476,7 +2476,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
             state.status = .success
             state.hasLocalDirectory = true
             state.localPath = localPath
-            try workplaceStore.updateSyncState(state)
+            workplaceStore.updateSyncState(state)
         }
 
         let gitService = WorkplaceRuntimeGitServiceSpy()

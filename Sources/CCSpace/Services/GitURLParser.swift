@@ -23,6 +23,14 @@ enum GitURLParser {
             guard allowedSchemes.contains(scheme) else {
                 throw gitURLParserError("仓库地址不合法：不支持的协议 \(scheme)")
             }
+            // 明文凭据防线:`https://user:pass@host/repo` 会原样进入 git argv,
+            // ps 与错误日志可见。用户名单独出现(token 当用户名)仍放行;
+            // 同时带用户名和密码则拒绝,引导走凭据管理或 SSH。
+            if let components = URLComponents(string: trimmed),
+               components.user != nil,
+               components.password != nil {
+                throw gitURLParserError("远端地址中包含明文账号密码，请改用 SSH 地址或凭据管理（osxkeychain）后再试")
+            }
             return
         }
         // 无 "://" 时拒绝一切 "xxx::" 传输形式(ext::/fd:: 等);
@@ -38,6 +46,21 @@ enum GitURLParser {
         }
 
         return try repositoryNameFromLegacyTail(gitURL)
+    }
+
+    /// 仓库 Web 主页链接(`https://host[:port]/owner/repo`),供"在浏览器打开仓库"使用。
+    /// 与 MR 链接同一解析口径:支持 http(s)/ssh/git 与 scp 风格地址,`.git` 后缀剥离。
+    static func repositoryWebURL(from remoteURL: String) throws -> URL {
+        let location = try repositoryWebLocation(from: remoteURL)
+        var components = URLComponents()
+        components.scheme = location.scheme
+        components.host = location.host
+        components.port = location.port
+        components.path = "/\(location.repositoryPath)"
+        guard let url = components.url else {
+            throw gitURLParserError("无法生成仓库链接")
+        }
+        return url
     }
 
     static func mergeRequestURL(
@@ -89,7 +112,7 @@ enum GitURLParser {
 }
 
 private extension GitURLParser {
-    enum HostingProvider {
+    enum HostingProvider: Equatable {
         case github
         case gitlab
         case gitee
@@ -114,7 +137,10 @@ private extension GitURLParser {
                 scheme: normalizedWebScheme(from: components.scheme),
                 host: host,
                 port: normalizedWebPort(from: components),
-                repositoryPath: repositoryPath,
+                // URLComponents.path 保留百分号编码,`my%20repo` 会以编码形态
+                // 泄漏进仓库名与 Web 链接(再被二次编码成 %2520);
+                // 出口处统一解码,解码失败(字面 % 的非法序列)原样返回。
+                repositoryPath: percentDecoded(repositoryPath),
                 provider: hostingProvider(for: host)
             )
         }
@@ -124,7 +150,7 @@ private extension GitURLParser {
                 scheme: "https",
                 host: scpLocation.host,
                 port: nil,
-                repositoryPath: scpLocation.repositoryPath,
+                repositoryPath: percentDecoded(scpLocation.repositoryPath),
                 provider: hostingProvider(for: scpLocation.host)
             )
         }
@@ -166,7 +192,7 @@ private extension GitURLParser {
             throw gitURLParserError("无法解析仓库名称")
         }
 
-        let repositoryName = tail.hasSuffix(".git") ? String(tail.dropLast(4)) : String(tail)
+        let repositoryName = percentDecoded(tail.hasSuffix(".git") ? String(tail.dropLast(4)) : String(tail))
         guard repositoryName.isEmpty == false else {
             throw gitURLParserError("仓库名称不能为空")
         }
@@ -195,25 +221,40 @@ private extension GitURLParser {
     static func hostingProvider(for host: String) -> HostingProvider {
         let normalizedHost = host.lowercased()
 
-        if normalizedHost.contains("github") {
+        // 精确后缀匹配:子串匹配(`contains("github")`)会把 gitlab-cache.example.net、
+        // my-giteo-mirror 这类自建域名误分类,生成打不开的 MR 链接。
+        func matches(_ domain: String) -> Bool {
+            normalizedHost == domain || normalizedHost.hasSuffix("." + domain)
+        }
+        // 自建实例的 label 启发:主机名**首段**恰好是 gitlab/gitea 等(如 gitlab.acme.com)。
+        func firstLabel(_ label: String) -> Bool {
+            normalizedHost.split(separator: ".", omittingEmptySubsequences: true).first.map(String.init) == label
+        }
+
+        if matches("github.com") || matches("ssh.github.com") || firstLabel("github") {
             return .github
         }
-        if normalizedHost.contains("gitlab") {
-            return .gitlab
-        }
-        if normalizedHost.contains("gitee") {
+        if matches("gitee.com") || firstLabel("gitee") {
             return .gitee
         }
-        if normalizedHost.contains("bitbucket") {
+        if matches("bitbucket.org") || matches("bitbucket.io") || firstLabel("bitbucket") {
             return .unsupported("Bitbucket")
         }
-        if normalizedHost.contains("gitea") || normalizedHost.contains("gogs") {
-            return .unsupported("Gitea")
-        }
-        if normalizedHost.contains("dev.azure") || normalizedHost.contains("visualstudio") {
+        if matches("dev.azure.com") || matches("visualstudio.com") || firstLabel("dev.azure") || firstLabel("visualstudio") {
             return .unsupported("Azure DevOps")
         }
-        // Default to GitLab MR format for self-hosted instances (most common)
+        if matches("gitlab.com") || matches("gitlab.net") || firstLabel("gitlab") {
+            return .gitlab
+        }
+        if firstLabel("gitea") || firstLabel("gogs") || matches("gitea.com") {
+            return .unsupported("Gitea")
+        }
+        // P2-30 取舍说明:未知 host 维持 GitLab MR 格式兜底而非返回 .unsupported——
+        // 枚举虽有 unsupported(String) 可用,但现有 MergeRequestServiceTests 以
+        // 未知 host(code.example.com)锁定兜底行为,且自建 GitLab 场景兜底命中率
+        // 不低;改为显式报错需要连同上游测试与产品预期一起调整,此处不强行切换。
+        // 已知代价:非 GitLab 的未知平台会生成打不开的死 MR 链接
+        // (仓库主页链接不受影响)。
         return .gitlab
     }
 
@@ -235,6 +276,11 @@ private extension GitURLParser {
         default:
             return nil
         }
+    }
+
+    /// 百分号解码,失败(含字面 % 的非法序列)原样返回。
+    static func percentDecoded(_ value: String) -> String {
+        value.removingPercentEncoding ?? value
     }
 
     static func gitURLParserError(_ message: String) -> NSError {

@@ -33,6 +33,8 @@ enum WorkplaceEditServiceError: LocalizedError {
     /// 回滚时把仓库切回原分支失败。原始错误多为 git 英文原文/系统描述,
     /// 统一包一层中文再上抛,日志与调用方拿到的都是可读文案。
     case branchRollbackFailed(branch: String, reason: String)
+    /// 改名被嵌套工作区挡住:整棵树会被移走,子工作区的路径不会随之重映射。
+    case nestedWorkplaceBlocksRename(nestedName: String)
 
     var errorDescription: String? {
         switch self {
@@ -40,6 +42,8 @@ enum WorkplaceEditServiceError: LocalizedError {
             return "还原仓库目录失败（\(reason)）。文件仍保留在暂存目录中，可手动取回：\(path)"
         case let .branchRollbackFailed(branch, reason):
             return "回滚分支切换失败（\(reason)）。仓库可能仍停在编辑过程中的分支：\(branch)"
+        case let .nestedWorkplaceBlocksRename(nestedName):
+            return "该工作区目录内还有子工作区「\(nestedName)」。改名会整体移动目录，子工作区记录的本地路径不会自动跟随，会导致其状态丢失；请先修改或删除子工作区后再改名"
         }
     }
 }
@@ -91,11 +95,28 @@ struct WorkplaceEditService {
         }) else {
             throw WorkplaceStoreError.duplicatePath
         }
+        // 存在性探测挪到主线程之外:目标路径可能在网盘/外置盘上,单次 stat 也能
+        // 阻塞主线程数秒(口径同 WorkplaceStore.reconcileHasLocalDirectoryFlags)。
+        let targetExistsOnDisk: Bool = await Task.detached(priority: .userInitiated) {
+            FileManager.default.fileExists(atPath: newPath)
+        }.value
         guard normalizedNewPath == WorkplaceStore.normalizedPath(oldPath) ||
-                FileManager.default.fileExists(atPath: newPath) == false else {
+                targetExistsOnDisk == false else {
             throw WorkplaceStoreError.pathAlreadyExistsOnDisk
         }
         try ensureManagedSyncStates(originalStates, within: oldPath)
+
+        // 改名会把整棵 oldPath 移走:若树内还住着**其它工作区**(项目显式支持嵌套工作区,
+        // A 内可有 A/B),子工作区记录的 localPath 不会随移动重映射,移动后它们指向已不存在
+        // 的旧路径,重启时磁盘刷新会按"目录缺失"把子工作区整条记录删掉(不可恢复)。
+        // 在触碰磁盘之前先 fail-closed,让用户先处理子工作区。
+        let renamed = newPath != oldPath
+        if renamed, let nested = workplaceStore.workplaces.first(where: { candidate in
+            candidate.id != workplaceID
+                && LocalPathSafety.isWithinDirectory(candidate.path, rootPath: oldPath)
+        }) {
+            throw WorkplaceEditServiceError.nestedWorkplaceBlocksRename(nestedName: nested.name)
+        }
 
         // ── 磁盘刷新豁免(瞬态标记,必须先于任何磁盘改动)─────────────────────
         // 从此刻起直到 applyWorkplaceEdit 落库,记录仍指向 oldPath,而磁盘上的目录
@@ -109,7 +130,6 @@ struct WorkplaceEditService {
         workplaceStore.setSyncStatus(.removing, for: workplaceID, repositoryIDs: removedRepositoryIDs)
         workplaceStore.setSyncStatus(.switching, for: workplaceID, repositoryIDs: nextSelectedIDs)
 
-        let renamed = newPath != oldPath
         let removalStagingRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("cc-space-edit-\(UUID().uuidString)", isDirectory: true)
         var stagedRemovals: [(originalPath: String, stagedPath: String)] = []
@@ -126,6 +146,8 @@ struct WorkplaceEditService {
                 // 目录移动同样要与仓库级写操作互斥:锁 key 精确匹配,须把
                 // 旧/新目录本身与两侧全部仓库路径一起罩住。跨卷移动会退化为
                 // "复制整树+删除原树",与并发 git 写入交错会拷出不一致的仓库副本。
+                // 与 deleteWorkplace 同一口径:还要罩住**树内其它工作区**的状态行路径
+                // (嵌套场景已在前面拦截,这里按磁盘现状兜底,漏锁的代价是仓库被写坏)。
                 var renameLockPaths = [oldPath, newPath]
                 renameLockPaths.append(contentsOf: originalStates.map(\.localPath))
                 renameLockPaths.append(
@@ -137,6 +159,11 @@ struct WorkplaceEditService {
                         ).localPath
                     }
                 )
+                renameLockPaths.append(contentsOf: workplaceStore.syncStates.compactMap { candidate in
+                    LocalPathSafety.isWithinDirectory(candidate.localPath, rootPath: oldPath)
+                        ? candidate.localPath
+                        : nil
+                })
                 // 整棵工作区目录的移动在跨卷时会退化为"复制+删除",可能耗时很久,
                 // 移出主线程执行,避免冻结 UI。
                 try await RepositoryOperationLock.shared.withLockPaths(renameLockPaths) {
@@ -611,8 +638,16 @@ struct WorkplaceEditService {
         _ fileSystem: any FileSystemServicing,
         at path: String
     ) async {
-        try? await Task.detached(priority: .userInitiated) {
-            try fileSystem.removeItemIfExists(at: path)
+        // 尽力而为,但失败必须留痕:这里删的可能是整棵仓库树,静默失败会把一份
+        // 完整副本留在临时目录里无人知晓(同文件 restoreStagedItems 已是这个口径)。
+        await Task.detached(priority: .userInitiated) {
+            do {
+                try fileSystem.removeItemIfExists(at: path)
+            } catch {
+                editServiceLog.error(
+                    "event=staging_cleanup_failed path=\(path, privacy: .public) reason=\(error.localizedDescription, privacy: .public)"
+                )
+            }
         }.value
     }
 
@@ -660,8 +695,16 @@ struct WorkplaceEditService {
     ) -> String {
         let normalizedPath = WorkplaceStore.normalizedPath(path)
         let normalizedOldPrefix = WorkplaceStore.normalizedPath(oldPrefix)
-        guard normalizedPath.hasPrefix(normalizedOldPrefix) else { return path }
-        let suffix = normalizedPath.dropFirst(normalizedOldPrefix.count)
+        // 前缀必须落在**目录边界**上:`/root/ws2/repo` 对 `/root/ws` 同样 hasPrefix,
+        // 但那是兄弟目录,按前缀替换会产出错误的重映射。
+        let suffix: String
+        if normalizedPath == normalizedOldPrefix {
+            suffix = ""
+        } else if normalizedPath.hasPrefix(normalizedOldPrefix + "/") {
+            suffix = String(normalizedPath.dropFirst(normalizedOldPrefix.count))
+        } else {
+            return path
+        }
         return newPrefix + suffix
     }
 }

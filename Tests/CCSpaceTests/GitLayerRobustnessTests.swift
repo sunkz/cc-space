@@ -182,6 +182,26 @@ final class GitLayerRobustnessTests: XCTestCase {
 
     // MARK: - 第六轮评审回归(删除分支守卫 / 空 host 拒绝)
 
+    // MARK: - 第七轮评审回归(diffCommit 守卫 / ASCII 十六进制口径)
+
+    func test_diffCommitRejectsOptionLikeHashBeforeSpawningGit() async throws {
+        // hash 进 revs 位置且后无 `--`:以 `-` 开头会被 git 当选项(如 --output= 写文件)。
+        // 守卫口径必须与 commitDetail/blobContent 一致,在派发进程前拒掉。
+        let service = GitService()
+        let entries = try await service.diffCommit(hash: "--output=/tmp/pwned", in: "/nonexistent-dir")
+        XCTAssertEqual(entries, [])
+    }
+
+    func test_isHexObjectIDRejectsNonASCIIHexDigitsAndOutOfRange() {
+        XCTAssertTrue(GitService.isHexObjectID("abc1234"))
+        XCTAssertTrue(GitService.isHexObjectID(String(repeating: "a", count: 40)))
+        // `Character.isHexDigit` 按 Unicode 取值会放行阿拉伯-印度数字,必须拒掉。
+        XCTAssertFalse(GitService.isHexObjectID("٦٦٦٦٦٦٦"))
+        XCTAssertFalse(GitService.isHexObjectID("abc"))
+        XCTAssertFalse(GitService.isHexObjectID(String(repeating: "a", count: 41)))
+        XCTAssertTrue(GitService.isHexObjectID(String(repeating: "a", count: 64), maxLength: 64))
+    }
+
     func test_deleteLocalBranchRejectsUnsafeRefBeforeSpawningGit() async throws {
         // 坏 ref 名(含空格)应在进程派发前被守卫拦下,得到统一的中文提示,
         // 而不是 git 底层英文错误——与建分支/切分支口径对齐的回归锁。

@@ -80,7 +80,8 @@ final class FileSystemServiceTests: XCTestCase {
         let directory = root.appendingPathComponent("workspace", isDirectory: true)
         try service.createDirectory(at: directory.path)
         XCTAssertTrue(service.directoryExists(at: directory.path))
-        XCTAssertTrue(service.directoryExists(at: "  \(directory.path)\n"))
+        // 只去**前导**空白(粘贴杂质);尾部空白是合法目录名的一部分,不得裁掉。
+        XCTAssertTrue(service.directoryExists(at: "  \(directory.path)"))
 
         let file = root.appendingPathComponent("note.txt")
         let wroteFile = FileManager.default.createFile(atPath: file.path, contents: Data("x".utf8))
@@ -90,6 +91,21 @@ final class FileSystemServiceTests: XCTestCase {
         XCTAssertFalse(service.directoryExists(at: ""))
         XCTAssertFalse(service.directoryExists(at: "   \n"))
         XCTAssertFalse(service.directoryExists(at: root.appendingPathComponent("ghost").path))
+    }
+
+    /// 尾空格目录名的探测口径:必须与 LocalPathSafety.normalizedPath 一致。
+    /// 此前这里做整串 trim,`"mydir "` 被探测成 `"mydir"`(不存在),磁盘刷新据此
+    /// 把行判 missing 并删除记录——归一化口径不一致直接造成数据丢失。
+    func test_directoryExists_detectsDirectoryWithTrailingSpaceInName() throws {
+        let root = try makeFileSystemTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = FileSystemService()
+
+        let spaced = root.appendingPathComponent("mydir ", isDirectory: true)
+        try FileManager.default.createDirectory(at: spaced, withIntermediateDirectories: true)
+
+        XCTAssertTrue(service.directoryExists(at: spaced.path), "尾空格目录必须被识别为存在")
+        XCTAssertFalse(service.directoryExists(at: root.appendingPathComponent("mydir").path))
     }
 }
 

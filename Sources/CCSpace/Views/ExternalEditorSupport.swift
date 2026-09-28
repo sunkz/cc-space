@@ -285,8 +285,11 @@ extension WorkplaceSystemActions {
     }
 
     static func openInEditor(_ editor: ExternalEditor, at path: String) throws {
-        let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmedPath.isEmpty == false else {
+        // 归一化口径统一走 LocalPathSafety.normalizedPath:整串 trim 会把合法地以空格
+        // 结尾的目录改写成一个不同的路径(与 discardChanges 的"不 trim"同一口径),
+        // 表现为"目录不存在"或打开到另一个目录。
+        let normalizedPath = LocalPathSafety.normalizedPath(path)
+        guard normalizedPath.isEmpty == false else {
             throw NSError(
                 domain: "WorkplaceSystemActions",
                 code: 3,
@@ -294,7 +297,6 @@ extension WorkplaceSystemActions {
             )
         }
 
-        let normalizedPath = URL(fileURLWithPath: trimmedPath).standardizedFileURL.path
         guard FileManager.default.fileExists(atPath: normalizedPath) else {
             throw NSError(
                 domain: "WorkplaceSystemActions",

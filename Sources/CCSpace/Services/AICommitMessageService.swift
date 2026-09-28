@@ -18,6 +18,10 @@ enum AICommitMessageError: LocalizedError {
     case connectionFailed
     case http(status: Int, detail: String?)
     case emptyResponse
+    /// 2xx 响应体无法解析为 OpenAI 兼容 JSON 结构(多为网关返回 HTML 错误页)。
+    case invalidResponseFormat
+    /// 响应体超过大小上限,已中止读取(见 `AIResponseLoadingSessionDelegate.maxResponseBytes`)。
+    case responseTooLarge
     case invalidModelList
 
     var errorDescription: String? {
@@ -49,6 +53,11 @@ enum AICommitMessageError: LocalizedError {
             }
         case .emptyResponse:
             return "AI 未返回有效的提交信息，请重试"
+        case .invalidResponseFormat:
+            return "AI 服务返回的响应无法解析，请确认服务地址为 OpenAI 兼容接口"
+        case .responseTooLarge:
+            let limitMB = AIResponseLoadingSessionDelegate.maxResponseBytes / (1024 * 1024)
+            return "AI 服务返回的数据超出 \(limitMB)MB 上限，已中止读取，请确认 Base URL 指向 OpenAI 兼容接口"
         case .invalidModelList:
             return "未能解析服务返回的模型列表"
         }
@@ -294,7 +303,14 @@ enum AICommitResponseParser {
 
     /// 提取提交信息:剥离模型可能附带的代码围栏/引号,取首个非空行。
     static func parseCommitMessage(from data: Data) throws -> String {
-        let response = try JSONDecoder().decode(ChatCompletionResponse.self, from: data)
+        let response: ChatCompletionResponse
+        do {
+            response = try JSONDecoder().decode(ChatCompletionResponse.self, from: data)
+        } catch {
+            // 200 + HTML 错误页等形状异常的响应:原始 DecodingError 是英文的,
+            // 会经 errorDescription 直出 UI,折叠为中文错误。
+            throw AICommitMessageError.invalidResponseFormat
+        }
         let raw = response.choices?.first?.message?.content ?? ""
         let message = sanitize(raw)
         guard message.isEmpty == false else {
@@ -397,52 +413,29 @@ private struct ChatCompletionBody: Encodable {
 struct AICommitMessageService: AICommitMessageServicing, AIServiceInfoServicing {
     typealias DataLoader = @Sendable (URLRequest) async throws -> (Data, URLResponse)
 
-    /// 拒绝自动跟随重定向的共享会话。URLSession 默认对 3xx(含跨主机)自动跟随,
-    /// 而 `Authorization: Bearer <key>` 会原样转发到重定向目标——baseURL 虽是用户输入,
-    /// 但服务端(或被劫持的网关)一句话就能把用户的 API Key 送到第三个主机。
-    /// 拒绝后 3xx 响应原样返回,ensureOK 转成可见错误。
-    private static let noRedirectSession: URLSession = {
+    /// 带响应体大小上限且拒绝自动重定向的共享会话(委托见 `AIResponseLoadingSessionDelegate`)。
+    private static let limitedResponsePair: (URLSession, AIResponseLoadingSessionDelegate) = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        return URLSession(
+        let delegate = AIResponseLoadingSessionDelegate()
+        let session = URLSession(
             configuration: configuration,
-            delegate: RedirectRejectingDelegate.shared,
+            delegate: delegate,
             delegateQueue: nil
         )
+        return (session, delegate)
     }()
 
-    /// 默认加载器:比 `URLSession.shared.data(for:)` 多两层防护——
-    /// 1. 拒绝重定向(见 noRedirectSession);
-    /// 2. Task 取消直达底层 URLSessionTask:此前只在响应返回后检查
-    ///    `Task.isCancelled`,用户取消生成后请求仍占用连接最长 60s。
+    /// 默认加载器,三重防护:
+    /// 1. 响应体按 task 增量缓冲,累计超过上限立即取消任务——completion-handler 模式
+    ///    会把整个响应无界缓冲进 Data,baseURL 被填成超大响应端点时可致内存尖峰;
+    /// 2. 拒绝重定向——URLSession 默认对 3xx(含跨主机)自动跟随,而
+    ///    `Authorization: Bearer <key>` 会原样转发到重定向目标,3xx 原样返回给 ensureOK 转成可见错误;
+    /// 3. Task 取消直达底层 URLSessionTask:此前只在响应返回后检查 `Task.isCancelled`,
+    ///    用户取消生成后请求仍占用连接最长 60s。
     static func defaultDataLoader(request: URLRequest) async throws -> (Data, URLResponse) {
-        let session = noRedirectSession
-        let taskBox = URLSessionTaskBox()
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation {
-                (continuation: CheckedContinuation<(Data, URLResponse), any Error>) in
-                let task = session.dataTask(with: request) { data, response, error in
-                    if let error {
-                        let nsError = error as NSError
-                        if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled {
-                            continuation.resume(throwing: CancellationError())
-                        } else {
-                            continuation.resume(throwing: error)
-                        }
-                        return
-                    }
-                    guard let data, let response else {
-                        continuation.resume(throwing: AICommitMessageError.connectionFailed)
-                        return
-                    }
-                    continuation.resume(returning: (data, response))
-                }
-                taskBox.set(task)
-                task.resume()
-            }
-        } onCancel: {
-            taskBox.cancel()
-        }
+        let (session, delegate) = limitedResponsePair
+        return try await delegate.load(request: request, in: session)
     }
 
     private let settingsReader: @Sendable () -> AppSettings?
@@ -578,19 +571,135 @@ struct AICommitMessageService: AICommitMessageServicing, AIServiceInfoServicing 
     }
 
     /// 尽力从 OpenAI 兼容错误体中提取 `error.message` 便于定位问题。
+    /// `message` 是服务侧自由文本,可能极长(HTML 透传/回显请求体等),
+    /// 截断后再拼进用户可见文案。绝不记录/拼接 Key 内容,只取服务回显文本。
     private static func errorMessage(in data: Data) -> String? {
         guard let body = try? JSONDecoder().decode(ErrorBody.self, from: data),
               let message = body.error?.message?.trimmingCharacters(in: .whitespacesAndNewlines),
               message.isEmpty == false else {
             return nil
         }
-        return message
+        let limit = 200
+        guard message.count > limit else { return message }
+        return String(message.prefix(limit)) + "…（已截断）"
     }
 }
 
-/// 拒绝 HTTP 自动重定向的 URLSessionTask delegate(见 noRedirectSession 注释)。
-private final class RedirectRejectingDelegate: NSObject, URLSessionTaskDelegate, Sendable {
-    static let shared = RedirectRejectingDelegate()
+/// 响应体有界读取 + 拒绝 HTTP 自动重定向的 URLSessionDataDelegate。
+///
+/// 会话不再使用 completion-handler 模式(它会把整个响应无界缓冲进内存),
+/// 改由委托按 task 增量累积字节:累计超过 `maxResponseBytes` 即取消任务并以
+/// `responseTooLarge` 失败,Content-Length 声明超限时直接提前取消。
+/// 同时保留拒绝重定向的语义:`willPerformHTTPRedirection` 传 nil,3xx 原样返回。
+/// internal:测试注入自建会话验证上限行为。
+final class AIResponseLoadingSessionDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    /// 响应体累计上限:OpenAI 兼容的提交信息/模型列表/错误体都在 KB 量级,2MB 已是极宽裕。
+    static let maxResponseBytes = 2 * 1024 * 1024
+
+    private final class PendingLoad {
+        let continuation: CheckedContinuation<(Data, URLResponse), any Error>
+        var buffer = Data()
+
+        init(continuation: CheckedContinuation<(Data, URLResponse), any Error>) {
+            self.continuation = continuation
+        }
+    }
+
+    private let lock = NSLock()
+    /// 登记表即"未终结请求"的唯一事实源:移除条目即终结,resume 只会发生一次。
+    private var pendingLoads: [Int: PendingLoad] = [:]
+
+    func load(request: URLRequest, in session: URLSession) async throws -> (Data, URLResponse) {
+        let task = session.dataTask(with: request)
+        let identifier = task.taskIdentifier
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(Data, URLResponse), any Error>) in
+                lock.lock()
+                pendingLoads[identifier] = PendingLoad(continuation: continuation)
+                lock.unlock()
+                task.resume()
+            }
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    private func takePending(for task: URLSessionTask) -> PendingLoad? {
+        lock.lock()
+        defer { lock.unlock() }
+        return pendingLoads.removeValue(forKey: task.taskIdentifier)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        lock.lock()
+        let isPending = pendingLoads[dataTask.taskIdentifier] != nil
+        lock.unlock()
+        guard isPending else {
+            completionHandler(.cancel)
+            return
+        }
+        if let httpResponse = response as? HTTPURLResponse,
+           let lengthValue = httpResponse.value(forHTTPHeaderField: "Content-Length"),
+           let declaredLength = Int(lengthValue),
+           declaredLength > Self.maxResponseBytes {
+            if let pending = takePending(for: dataTask) {
+                pending.continuation.resume(throwing: AICommitMessageError.responseTooLarge)
+            }
+            completionHandler(.cancel)
+            return
+        }
+        completionHandler(.allow)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive data: Data
+    ) {
+        lock.lock()
+        guard let pending = pendingLoads[dataTask.taskIdentifier] else {
+            lock.unlock()
+            return
+        }
+        pending.buffer.append(data)
+        let overflow = pending.buffer.count > Self.maxResponseBytes
+        if overflow {
+            pendingLoads.removeValue(forKey: dataTask.taskIdentifier)
+        }
+        lock.unlock()
+        if overflow {
+            // 先 resume 再 cancel:连接释放由 URLSession 收尾,错误已在委托侧定界。
+            pending.continuation.resume(throwing: AICommitMessageError.responseTooLarge)
+            dataTask.cancel()
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: (any Error)?
+    ) {
+        guard let pending = takePending(for: task) else { return }
+        if let error {
+            let nsError = error as NSError
+            if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled {
+                pending.continuation.resume(throwing: CancellationError())
+            } else {
+                pending.continuation.resume(throwing: error)
+            }
+            return
+        }
+        guard let response = task.response else {
+            pending.continuation.resume(throwing: AICommitMessageError.connectionFailed)
+            return
+        }
+        pending.continuation.resume(returning: (pending.buffer, response))
+    }
 
     func urlSession(
         _ session: URLSession,
@@ -599,31 +708,7 @@ private final class RedirectRejectingDelegate: NSObject, URLSessionTaskDelegate,
         newRequest request: URLRequest,
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
-        // 传 nil = 不跟随:响应以 3xx 原样回到 completionHandler。
+        // 传 nil = 不跟随:响应以 3xx 原样回到 completion,ensureOK 转成可见错误。
         completionHandler(nil)
-    }
-}
-
-/// 供 withTaskCancellationHandler 触达底层 URLSessionTask 的中转盒
-/// (task 在 continuation 闭包内创建,onCancel 闭包在其外,需跨闭包共享)。
-private final class URLSessionTaskBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var task: URLSessionTask?
-    private var cancelRequested = false
-
-    func set(_ newTask: URLSessionTask) {
-        lock.lock()
-        task = newTask
-        let early = cancelRequested
-        lock.unlock()
-        if early { newTask.cancel() }
-    }
-
-    func cancel() {
-        lock.lock()
-        cancelRequested = true
-        let pending = task
-        lock.unlock()
-        pending?.cancel()
     }
 }

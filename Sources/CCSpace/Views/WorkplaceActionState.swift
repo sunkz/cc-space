@@ -18,7 +18,8 @@ struct WorkplaceActionState {
     init(
         workplace: Workplace,
         repositories: [RepositoryConfig],
-        syncStates: [RepositorySyncState]
+        syncStates: [RepositorySyncState],
+        probedWorkplaceDirectoryExists: Bool = false
     ) {
         self.workplace = workplace
 
@@ -52,11 +53,12 @@ struct WorkplaceActionState {
         canSyncAllRepositories = hasPullableRepositories && !isBusy
         // 有同步态行时用"任一仓库目录在盘"推断工作区目录存在(仓库目录必然
         // 在工作区目录下),避免此前每次 body 求值走一次主线程 fileExists;
-        // 没有任何仓库行的工作区无从推断,回退一次 stat(仅空工作区的冷路径)。
+        // 没有任何仓库行的工作区无从推断,改用视图侧后台探测的缓存结果——
+        // 本 init 在 body 求值链上,这里绝不能做同步磁盘 IO(网盘/外置盘可卡主线程数秒)。
         if hasAnySyncStateRow {
             canOpenDirectory = hasLocal
         } else {
-            canOpenDirectory = FileManager.default.fileExists(atPath: workplace.path)
+            canOpenDirectory = probedWorkplaceDirectoryExists
         }
     }
 }

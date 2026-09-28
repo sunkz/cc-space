@@ -128,6 +128,11 @@ enum LocalPathSafety {
               normalizedRootPath.isEmpty == false else {
             return false
         }
+        // 悬空符号链接(链接在、目标不在)必须直接判越界:resolvingSymlinksInPath
+        // 解析不了它(实测原样返回),它会被当成"不存在的尾部"词法拼回、按"根内"放行;
+        // 待外部进程把目标落地,克隆/删除就物理落在根外。锁不排斥外部进程,
+        // 锁内复检也拦不住这一形态——唯一稳妥处置是 fail-closed。
+        guard hasDanglingSymlink(in: normalizedChildPath) == false else { return false }
         // 纵深防御:纯词法前缀比较挡不住"中间符号链接"逃逸——
         // 工作区根内若有指向根外的 symlink 目录,其下的"受管路径"词法上合法、物理上在根外。
         // 因此对参与比较的两端先解析符号链接,再比较。
@@ -136,13 +141,54 @@ enum LocalPathSafety {
         return isPathPrefix(resolvedRoot, of: resolvedChild)
     }
 
-    /// 前缀比较:macOS 默认卷大小写不敏感,仅大小写不同的两个路径指向同一目录,
-    /// 严格区分大小写会把合法受管路径误判为越界(fail-closed 用错了方向)。
+    /// 前缀比较:默认**严格区分大小写**。
+    ///
+    /// macOS 默认卷大小写不敏感,仅大小写不同的两个路径指向同一目录,严格比较会把
+    /// 合法受管路径误判为越界;但无条件放宽在**大小写敏感卷**上是 fail-open:
+    /// 受管根 `/A/ws` 会把物理上无关的兄弟目录 `/a/ws/x` 判为"在根内",
+    /// 删除/pull 于是直接作用在未受管目录上。因此先严格比较,只有确认所在卷
+    /// 不支持大小写敏感文件名(或无法判定)时才放宽。
     private static func isPathPrefix(_ prefix: String, of path: String) -> Bool {
+        if path == prefix { return true }
+        if path.hasPrefix(prefix + "/") { return true }
+        return hasCaseInsensitivePathPrefix(prefix, path) && volumeMayBeCaseInsensitive(atPath: prefix)
+    }
+
+    /// 路径的任一**已存在**组件是否为悬空符号链接(链接本身在、其目标 stat 不到)。
+    ///
+    /// 判定必须用 lstat:`fileExists` 跟随链接,悬空链接反而报"不存在",于是被
+    /// `resolvedRealPath` 当成缺失尾部原样词法拼回,containment 因此误判"根内"。
+    static func hasDanglingSymlink(in path: String) -> Bool {
+        var prefix = "/"
+        let components = URL(fileURLWithPath: path).pathComponents.filter { $0 != "/" }
+        for component in components {
+            prefix = URL(fileURLWithPath: prefix).appendingPathComponent(component).path
+            var entryInfo = stat()
+            guard lstat(prefix, &entryInfo) == 0 else {
+                // 该级不存在:其后各级也必然不存在,不存在的东西不构成悬空链接。
+                return false
+            }
+            guard (entryInfo.st_mode & S_IFMT) == S_IFLNK else { continue }
+            var targetInfo = stat()
+            if stat(prefix, &targetInfo) != 0 { return true }
+        }
+        return false
+    }
+
+    private static func hasCaseInsensitivePathPrefix(_ prefix: String, _ path: String) -> Bool {
         let loweredPath = path.lowercased()
         let loweredPrefix = prefix.lowercased()
-        if loweredPath == loweredPrefix { return true }
-        return loweredPath.hasPrefix(loweredPrefix + "/")
+        return loweredPath == loweredPrefix || loweredPath.hasPrefix(loweredPrefix + "/")
+    }
+
+    /// 该路径所在卷是否**可能**大小写不敏感(即不支持大小写敏感文件名)。
+    /// 无法判定时按"可能"处理:卷属性查询失败属环境异常,沿用既有放宽行为,
+    /// 避免把默认卷(占绝大多数)上的合法受管路径误判越界。
+    private static func volumeMayBeCaseInsensitive(atPath path: String) -> Bool {
+        let values = try? URL(fileURLWithPath: path)
+            .resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey])
+        guard let supportsCaseSensitive = values?.volumeSupportsCaseSensitiveNames else { return true }
+        return supportsCaseSensitive == false
     }
 
     /// 解析路径的真实位置:URL.resolvingSymlinksInPath 只在**整条路径都存在**时

@@ -26,9 +26,9 @@ enum GitURLParser {
             // 明文凭据防线:`https://user:pass@host/repo` 会原样进入 git argv,
             // ps 与错误日志可见。用户名单独出现(token 当用户名)仍放行;
             // 同时带用户名和密码则拒绝,引导走凭据管理或 SSH。
-            if let components = URLComponents(string: trimmed),
-               components.user != nil,
-               components.password != nil {
+            // 词法检测而非 URLComponents:畸形 URL(含空格等非法字符)会让解析返回 nil,
+            // 依赖解析的防线整段被跳过,`https://user:pa ss@host/r` 就带着凭据进了 argv。
+            guard Self.containsPlainCredentials(trimmed) == false else {
                 throw gitURLParserError("远端地址中包含明文账号密码，请改用 SSH 地址或凭据管理（osxkeychain）后再试")
             }
             return
@@ -38,6 +38,23 @@ enum GitURLParser {
         guard trimmed.contains("::") == false else {
             throw gitURLParserError("仓库地址不合法：不支持的协议形式")
         }
+    }
+
+    /// 检测 `scheme://user:password@...` 形式的明文凭据(密码必须非空)。
+    ///
+    /// 纯词法:自 `://` 起取 authority(到首个 `/` 为止,无 `/` 则到串尾),
+    /// 其中最后一个 `@` 之前是 userinfo;userinfo 含非空 `:` 段即判定为账号+密码形式。
+    /// 只有用户名(token 即用户名)的形式按既有口径放行。
+    static func containsPlainCredentials(_ url: String) -> Bool {
+        guard let schemeRange = url.range(of: "://") else { return false }
+        let afterScheme = url[schemeRange.upperBound...]
+        let authorityEnd = afterScheme.firstIndex(of: "/") ?? afterScheme.endIndex
+        guard let at = afterScheme[afterScheme.startIndex..<authorityEnd].lastIndex(of: "@") else {
+            return false
+        }
+        let userinfo = afterScheme[afterScheme.startIndex..<at]
+        guard let colon = userinfo.firstIndex(of: ":") else { return false }
+        return userinfo[userinfo.index(after: colon)...].isEmpty == false
     }
 
     static func repositoryName(from gitURL: String) throws -> String {

@@ -262,6 +262,11 @@ struct GitProcessRunner {
                             )
                         )
                     }
+                    // 主动摘除:handler 闭包捕获 stdoutBox/scheduleDrainFallback,后者又经
+                    // processBox 回指 Process,构成反向引用环。取消/异常路径都会置 nil,
+                    // 正常退出路径此前依赖"Foundation 回收后自行释放"这一未验证前提;
+                    // 每次 git 调用泄漏 Process + Pipe + 最大 64MB 缓冲会被 5s 周期刷新放大。
+                    completedProcess.terminationHandler = nil
                 }
 
                 do {

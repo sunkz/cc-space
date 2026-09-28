@@ -189,4 +189,49 @@ final class LocalPathSafetyTests: XCTestCase {
         XCTAssertNoThrow(try LocalPathSafety.validateManagedPath("/tmp/root/ios-dev", within: "/tmp/root"))
         XCTAssertThrowsError(try LocalPathSafety.validateManagedPath("/tmp/elsewhere", within: "/tmp/root"))
     }
+
+    // MARK: - 悬空符号链接(第七轮评审 P2)
+
+    /// 链接在、目标不在:`resolvingSymlinksInPath` 解析不了它(实测原样返回),
+    /// 会被当成"不存在的尾部"词法拼回并按"根内"放行;目标一旦被外部进程落地,
+    /// 克隆/删除就物理落在根外。必须 fail-closed。
+    func test_isWithinDirectoryRejectsDanglingSymlinkComponent() throws {
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("LocalPathSafety-\(UUID().uuidString)", isDirectory: true)
+        let workspaceRoot = tempRoot.appendingPathComponent("ws", isDirectory: true)
+        try fileManager.createDirectory(at: workspaceRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempRoot) }
+
+        let dangling = workspaceRoot.appendingPathComponent("repo", isDirectory: true)
+        try fileManager.createSymbolicLink(
+            at: dangling,
+            withDestinationURL: tempRoot.appendingPathComponent("not-yet-created", isDirectory: true)
+        )
+
+        XCTAssertTrue(LocalPathSafety.hasDanglingSymlink(in: dangling.path))
+        XCTAssertFalse(LocalPathSafety.isWithinDirectory(dangling.path, rootPath: workspaceRoot.path))
+        XCTAssertFalse(LocalPathSafety.isWithinDirectory(
+            dangling.path + "/inner/file.txt",
+            rootPath: workspaceRoot.path
+        ))
+        XCTAssertThrowsError(try LocalPathSafety.validateManagedPath(dangling.path, within: workspaceRoot.path))
+    }
+
+    /// 链接指向**已存在**的根内目录:不算悬空,containment 照旧放行(不误伤正常用法)。
+    func test_isWithinDirectoryAcceptsSymlinkPointingInsideRoot() throws {
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("LocalPathSafety-\(UUID().uuidString)", isDirectory: true)
+        let workspaceRoot = tempRoot.appendingPathComponent("ws", isDirectory: true)
+        let inside = workspaceRoot.appendingPathComponent("real", isDirectory: true)
+        try fileManager.createDirectory(at: inside, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempRoot) }
+
+        let link = workspaceRoot.appendingPathComponent("alias", isDirectory: true)
+        try fileManager.createSymbolicLink(at: link, withDestinationURL: inside)
+
+        XCTAssertFalse(LocalPathSafety.hasDanglingSymlink(in: link.path))
+        XCTAssertTrue(LocalPathSafety.isWithinDirectory(link.path, rootPath: workspaceRoot.path))
+    }
 }

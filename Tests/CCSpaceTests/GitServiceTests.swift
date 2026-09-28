@@ -732,6 +732,11 @@ final class GitServiceTests: XCTestCase {
             GitServiceError.redactCredentials(in: "https://example.com/a@b/c.txt"),
             "https://example.com/a@b/c.txt"
         )
+        // 密码段含空格(未转义的粘贴密钥):空格不是截断点,整段必须打码
+        XCTAssertEqual(
+            GitServiceError.redactCredentials(in: "fatal: https://user:pa ss@git.example.com/o/r.git"),
+            "fatal: https://redacted@git.example.com/o/r.git"
+        )
         // 多处出现全部脱敏
         let twice = GitServiceError.redactCredentials(in: "a https://tok@x.com/y and https://u:p@z.com/w b")
         XCTAssertFalse(twice.contains("tok"))
@@ -888,8 +893,35 @@ final class GitServiceTests: XCTestCase {
         XCTAssertEqual(try workingTreeStatus(in: repository), "")
     }
 
-    func test_discardChangesRestoresDeletedTrackedFile() async throws {
+    /// pathspec 必须按字面量解释:文件名里的 `[ ]` 在 git 默认 wildmatch 下是字符类,
+    /// `test[1].txt` 会同时命中 `test1.txt`,丢弃操作落到另一个文件上(数据破坏)。
+    func test_discardChangesWithGlobMetacharactersAffectsOnlyTargetFile() async throws {
         let repository = try makeRepositoryWithCommittedFile(named: "a.txt", content: "hello")
+        // 在同一仓库里补上配对的两个文件并提交,让通配命中有可作用的对象。
+        let literal = repository.appendingPathComponent("test[1].txt")
+        let wildcard = repository.appendingPathComponent("test1.txt")
+        try Data("bracket".utf8).write(to: literal)
+        try Data("plain".utf8).write(to: wildcard)
+        _ = try shell(["git", "-C", repository.path, "add", "--", "test[1].txt", "test1.txt"])
+        _ = try shell(["git", "-C", repository.path, "commit", "-qm", "add glob-ish files"])
+        try Data("changed-bracket".utf8).write(to: literal)
+        try Data("changed-plain".utf8).write(to: wildcard)
+
+        let service = makeIsolatedService()
+        try await service.discardChanges(filePath: "test[1].txt", in: repository.path)
+
+        XCTAssertEqual(try String(contentsOf: literal, encoding: .utf8), "bracket")
+        // 关键断言:同名"通配目标"文件的改动必须原样保留。
+        XCTAssertEqual(try String(contentsOf: wildcard, encoding: .utf8), "changed-plain")
+    }
+
+    /// `:(literal)` 字面量口径的纯函数断言(展示路径与命令参数分离)。
+    func test_literalPathspecPrefixesMagicPrefix() {
+        XCTAssertEqual(GitService.literalPathspec("test[1].txt"), ":(literal)test[1].txt")
+        XCTAssertEqual(GitService.literalPathspec("a*b?c"), ":(literal)a*b?c")
+    }
+
+    func test_discardChangesRestoresDeletedTrackedFile() async throws {        let repository = try makeRepositoryWithCommittedFile(named: "a.txt", content: "hello")
         try FileManager.default.removeItem(at: repository.appendingPathComponent("a.txt"))
 
         let service = makeIsolatedService()

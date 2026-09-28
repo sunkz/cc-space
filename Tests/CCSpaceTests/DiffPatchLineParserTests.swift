@@ -76,6 +76,53 @@ final class DiffPatchLineParserTests: XCTestCase {
         XCTAssertNil(lines.last?.newLineNumber)
     }
 
+    func test_skipsRenameAndModeMetadataLines() {
+        // 首个 hunk 之前的模式变更/相似度/重命名声明同样属于 diff 头区:
+        // 漏掉任一类都会让它以 0/0 行号混进内容行,渲染出 "ld mode 100644" 这种残行。
+        let patch = """
+        diff --git a/old.txt b/new.txt
+        old mode 100644
+        new mode 100755
+        similarity index 95%
+        rename from old.txt
+        rename to new.txt
+        index 1111111..2222222 100644
+        --- a/old.txt
+        +++ b/new.txt
+        @@ -1,1 +1,1 @@
+        -a
+        +b
+        """
+        let lines = DiffPatchLineParser.parse(patch)
+        XCTAssertEqual(lines.map(\.kind), [.hunkHeader(context: nil), .removed, .added])
+        XCTAssertEqual(lines[1].oldLineNumber, 1)
+        XCTAssertEqual(lines[2].newLineNumber, 1)
+    }
+
+    func test_skipsNewAndDeletedFileModeMetadataLines() {
+        let newFile = DiffPatchLineParser.parse("""
+        diff --git a/n.txt b/n.txt
+        new file mode 100644
+        index 0000000..e69de29
+        --- /dev/null
+        +++ b/n.txt
+        @@ -0,0 +1,1 @@
+        +hello
+        """)
+        XCTAssertEqual(newFile.map(\.kind), [.hunkHeader(context: nil), .added])
+
+        let deletedFile = DiffPatchLineParser.parse("""
+        diff --git a/d.txt b/d.txt
+        deleted file mode 100644
+        index 587be6b..0000000
+        --- a/d.txt
+        +++ /dev/null
+        @@ -1 +0,0 @@
+        -x
+        """)
+        XCTAssertEqual(deletedFile.map(\.kind), [.hunkHeader(context: nil), .removed])
+    }
+
     func test_emptyPatchProducesNoLines() {
         XCTAssertEqual(DiffPatchLineParser.parse(""), [])
     }

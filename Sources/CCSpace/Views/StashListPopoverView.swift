@@ -9,7 +9,10 @@ struct StashListPopoverView: View {
     var error: String? = nil
     var actionsDisabled: Bool = false
     var onRetry: (() -> Void)? = nil
-    let onPop: (Int) -> Void
+    /// 回调带整条 entry 而不是 index:index 是弹窗打开那一刻快照里的栈位置,
+    /// 期间用户在 IDE/终端 push/drop 会让同一位置指向另一条 stash,恢复/删除
+    /// 必须能自证身份(见 WorkplaceRuntimeService 的对账)。
+    let onPop: (GitStashEntry) -> Void
     let onRequestDrop: (GitStashEntry) -> Void
 
     var body: some View {
@@ -102,7 +105,7 @@ struct StashListPopoverView: View {
                     StashRowView(
                         entry: entry,
                         actionsDisabled: actionsDisabled,
-                        onPop: { onPop(entry.index) },
+                        onPop: { onPop(entry) },
                         onRequestDrop: { onRequestDrop(entry) }
                     )
                     if index < entries.count - 1 {

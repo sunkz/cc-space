@@ -7,12 +7,17 @@ protocol FileSystemServicing: Sendable {
 
 extension FileSystemServicing {
     func directoryExists(at path: String) -> Bool {
+        // 归一化口径与 LocalPathSafety.normalizedPath 一致:整串 trim 会把合法地以空格
+        // 结尾的目录("mydir ")判成"不存在",磁盘刷新据此删掉记录(数据丢失)。
+        // trim 结果只用于空判定,探测用原样(去前导空白后)的路径。
         let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmedPath.isEmpty == false else { return false }
+        let probePath = LocalPathSafety.normalizedPath(path)
+        guard probePath.isEmpty == false else { return false }
 
         var isDirectory = ObjCBool(false)
         return FileManager.default.fileExists(
-            atPath: trimmedPath,
+            atPath: probePath,
             isDirectory: &isDirectory
         ) && isDirectory.boolValue
     }

@@ -150,9 +150,25 @@ private func normalizedBranches(
 
 enum WorkplaceSystemActions {
     static func openTerminal(_ terminal: ExternalEditor, at path: String) throws {
+        // 与 openInEditor 同一口径:归一化 + 存在性校验,否则空串/失效路径会让 Terminal
+        // 静默打开默认目录,用户以为打开了工作区。
+        let normalizedPath = LocalPathSafety.normalizedPath(path)
+        guard normalizedPath.isEmpty == false,
+              FileManager.default.fileExists(atPath: normalizedPath) else {
+            throw NSError(
+                domain: "WorkplaceSystemActions",
+                code: 5,
+                userInfo: [NSLocalizedDescriptionKey: "目录不存在，无法打开终端"]
+            )
+        }
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        process.arguments = ["-a", terminal.applicationURL.path, path]
+        process.arguments = ["-a", terminal.applicationURL.path, normalizedPath]
+        // /usr/bin/open 的告警/错误不面向用户:不接管就会继承父进程 fd(打包成 app 时
+        // 指向不可写位置),口径与 openInEditor 一致。
+        process.standardError = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
         try process.run()
     }
 

@@ -75,7 +75,13 @@ struct WorkplaceRuntimeService {
             }) {
                 row.status = .failed
                 row.lastError = UserFacingError.message(for: error)
-                row.hasLocalDirectory = FileManager.default.fileExists(atPath: localPath)
+                // 存在性探测可能落在网盘/外置盘上,单次 fileExists 就能阻塞主线程
+                // 数秒到数分钟(口径同 WorkplaceStore.clearFailedStatusesWhereDirectoryExists)。
+                let localPathForProbe = localPath
+                let directoryExists = await Task.detached(priority: .userInitiated) {
+                    FileManager.default.fileExists(atPath: localPathForProbe)
+                }.value
+                row.hasLocalDirectory = directoryExists
                 workplaceStore.updateSyncStates([row])
             }
             throw error
@@ -115,6 +121,11 @@ struct WorkplaceRuntimeService {
 
                 try await gitService.push(in: state.localPath)
                 return .pushed(Self.succeededState(from: state, touchLastSyncedAt: true))
+            } catch is CancellationError {
+                // git 进程执行到一半被取消不是业务失败:落 .failed("操作已取消")
+                // 会把一次正常的用户取消持久化成红色错误(口径同 onLockCancelled
+                // 与 pull 路径的"取消不落假失败")。
+                return .cancelled(state)
             } catch {
                 return .failed(
                     Self.failedState(
@@ -428,9 +439,26 @@ struct WorkplaceRuntimeService {
         }
     }
 
+    /// 按位置操作 stash 前的对账:弹窗里的 index 来自**打开那一刻**的列表快照,期间用户
+    /// 在 IDE/终端执行 `git stash push/drop` 会让同一位置指向另一条 stash——drop 命中
+    /// 错条不可恢复。已持有仓库锁,重读列表并比对消息与时间,任一不符即拒操作、要用户刷新。
+    nonisolated private static func ensureStashEntryMatches(
+        _ entry: GitStashEntry,
+        gitService: any GitServicing,
+        directory: String
+    ) async throws {
+        let entries = await gitService.stashList(in: directory)
+        guard let current = entries.first(where: { $0.index == entry.index }) else {
+            throw WorkplaceRuntimeServiceError.stashListChanged
+        }
+        guard current.message == entry.message, current.date == entry.date else {
+            throw WorkplaceRuntimeServiceError.stashListChanged
+        }
+    }
+
     /// 恢复指定位置的 Stash 并从列表移除;冲突时 Stash 会被 git 保留。
     func popStash(
-        at index: Int,
+        entry: GitStashEntry,
         for state: RepositorySyncState,
         in workplace: Workplace
     ) async throws {
@@ -439,7 +467,12 @@ struct WorkplaceRuntimeService {
         let gitService = syncCoordinator.gitService
         do {
             try await RepositoryOperationLock.shared.withLock(path: state.localPath) {
-                try await gitService.popStash(at: index, in: state.localPath)
+                try await Self.ensureStashEntryMatches(
+                    entry,
+                    gitService: gitService,
+                    directory: state.localPath
+                )
+                try await gitService.popStash(at: entry.index, in: state.localPath)
             }
             var updatedState = state
             updatedState.status = .success
@@ -461,7 +494,7 @@ struct WorkplaceRuntimeService {
 
     /// 删除指定位置的 Stash,不可恢复。
     func dropStash(
-        at index: Int,
+        entry: GitStashEntry,
         for state: RepositorySyncState,
         in workplace: Workplace
     ) async throws {
@@ -470,7 +503,12 @@ struct WorkplaceRuntimeService {
         let gitService = syncCoordinator.gitService
         do {
             try await RepositoryOperationLock.shared.withLock(path: state.localPath) {
-                try await gitService.dropStash(at: index, in: state.localPath)
+                try await Self.ensureStashEntryMatches(
+                    entry,
+                    gitService: gitService,
+                    directory: state.localPath
+                )
+                try await gitService.dropStash(at: entry.index, in: state.localPath)
             }
             var updatedState = state
             updatedState.status = .success
@@ -607,6 +645,9 @@ struct WorkplaceRuntimeService {
                     _ = try await gitService.mergeDefaultBranchIntoCurrent(in: state.localPath)
                 }
                 return .merged(Self.succeededState(from: state))
+            } catch is CancellationError {
+                // 取消不是失败(口径同 onLockCancelled):不能把用户取消持久化成红色错误。
+                return .cancelled(state)
             } catch {
                 return .failed(
                     Self.failedState(
@@ -699,36 +740,71 @@ struct WorkplaceRuntimeService {
                 // 必须把目录自身与树内每条仓库 localPath 一起加锁。
                 let fileSystemService = syncCoordinator.fileSystemService
                 let workplacePath = workplace.path
+                let ownStatePaths = originalStates.map(\.localPath)
+                let rootPath = workplaceRootPath
                 // 树内锁路径取"所有 localPath 落在被删目录之下"的同步状态行,
                 // 而不是只取本工作区的行:项目显式支持嵌套工作区(A 内可有 A/B),
                 // 递归删除同样会打进子工作区仓库的 pull/push,这些行也必须罩住。
-                let containedStatePaths = workplaceStore.syncStates.compactMap { candidate -> String? in
-                    LocalPathSafety.isWithinDirectory(candidate.localPath, rootPath: workplacePath)
-                        ? candidate.localPath
-                        : nil
-                }
-                let lockedPaths = [workplacePath]
-                    + originalStates.map(\.localPath)
-                    + containedStatePaths
-                let rootPath = workplaceRootPath
-                try await RepositoryOperationLock.shared.withLockPaths(lockedPaths) {
-                    // 等锁可达数分钟,期间路径可能被替换(symlink 换向、根目录变更):
-                    // :681 的 containment 校验发生在等锁之前,按 LocalPathSafety 的
-                    // TOCTOU 契约,破坏性删除必须在锁内、紧邻执行前复检。
-                    try LocalPathSafety.validateManagedPath(
-                        workplacePath,
-                        within: rootPath
-                    )
-                    // 整棵工作区目录树的递归删除可能耗时数分钟,移出主线程执行。
-                    try await Self.removeItemOffMainThread(
-                        fileSystemService,
-                        at: workplacePath
-                    )
+                //
+                // 快照不能只取一次:等锁可达数分钟,期间会有新行落进树内(嵌套工作区
+                // 编辑新增仓库时,其克隆锁不含被删工作区根),rmTree 就会与克隆写同一
+                // 目录。因此每次拿到锁后、动手删除前重取一次,漏了就放弃本轮、带并集重试。
+                for attempt in 1...Self.deletionLockRecheckAttempts {
+                    let containedStatePaths = workplaceStore.syncStates.compactMap { candidate -> String? in
+                        LocalPathSafety.isWithinDirectory(candidate.localPath, rootPath: workplacePath)
+                            ? candidate.localPath
+                            : nil
+                    }
+                    let lockedPaths = [workplacePath] + ownStatePaths + containedStatePaths
+                    let missedPaths: [String] = try await RepositoryOperationLock.shared
+                        .withLockPaths(lockedPaths) { () -> [String] in
+                            // 等锁期间路径可能被替换(symlink 换向、根目录变更):
+                            // :681 的 containment 校验发生在等锁之前,按 LocalPathSafety 的
+                            // TOCTOU 契约,破坏性删除必须在锁内、紧邻执行前复检。
+                            try LocalPathSafety.validateManagedPath(
+                                workplacePath,
+                                within: rootPath
+                            )
+                            let heldKeys = Set(lockedPaths.map { LocalPathSafety.canonicalLockKey(for: $0) })
+                            let lateArrivals = await MainActor.run { () -> [String] in
+                                workplaceStore.syncStates.compactMap { candidate -> String? in
+                                    guard LocalPathSafety.isWithinDirectory(
+                                        candidate.localPath,
+                                        rootPath: workplacePath
+                                    ), heldKeys.contains(LocalPathSafety.canonicalLockKey(for: candidate.localPath)) == false
+                                    else { return nil }
+                                    return candidate.localPath
+                                }
+                            }
+                            guard lateArrivals.isEmpty else { return lateArrivals }
+                            // 整棵工作区目录树的递归删除可能耗时数分钟,移出主线程执行。
+                            try await Self.removeItemOffMainThread(
+                                fileSystemService,
+                                at: workplacePath
+                            )
+                            return []
+                        }
+                    guard missedPaths.isEmpty else {
+                        guard attempt < Self.deletionLockRecheckAttempts else {
+                            throw WorkplaceDeletionError.treeChangingDuringRemoval(
+                                path: workplacePath,
+                                paths: missedPaths
+                            )
+                        }
+                        continue
+                    }
+                    break
                 }
             } catch {
+                // 磁盘可能是**半删**状态(递归删除中途 EACCES 等):原样恢复"目录健在"的
+                // 旧行会让 UI 呈假健康,要等下一轮逐仓库探测才纠偏。先按实探测再回滚。
+                let restoredStates = await Self.probeStatesForRollback(
+                    originalStates,
+                    failureReason: UserFacingError.message(for: error)
+                )
                 // 状态回滚走防抖写盘,不会失败;若未来引入可失败路径,此处必须留痕,
                 // 否则状态会长期停在 .removing,UI 上表现为"一直进行中"。
-                workplaceStore.replaceSyncStates(originalStates, for: workplace.id)
+                workplaceStore.replaceSyncStates(restoredStates, for: workplace.id)
                 let deleteError = WorkplaceDeletionError.fromRemovalError(
                     error,
                     path: workplace.path
@@ -868,6 +944,35 @@ struct WorkplaceRuntimeService {
         workplaceStore.updateSyncStates(updates)
     }
 
+    /// 删除工作区时"锁内重收集树内路径"的最大轮次:每轮都要重新等锁,
+    /// 轮次必须有上限,否则磁盘持续变化时删除会无限期挂住。
+    static let deletionLockRecheckAttempts = 3
+
+    /// 删除失败回滚时按磁盘实况刷新状态行:目录已不存在的行标失败并带上中断原因,
+    /// 其余行只更新 hasLocalDirectory。探测放后台——路径可能在网盘/外置盘上,
+    /// 单次 stat 也能阻塞主线程数秒。
+    /// 局限:目录"存在但内容被删了一半"无法靠一次 stat 分辨,这类行只更新存在标志。
+    private static func probeStatesForRollback(
+        _ states: [RepositorySyncState],
+        failureReason: String
+    ) async -> [RepositorySyncState] {
+        guard states.isEmpty == false else { return states }
+        let paths = states.map(\.localPath)
+        let existsFlags = await Task.detached(priority: .userInitiated) {
+            paths.map { FileManager.default.fileExists(atPath: $0) }
+        }.value
+        return states.enumerated().map { offset, state in
+            var restored = state
+            let exists = existsFlags[offset]
+            restored.hasLocalDirectory = exists
+            if exists == false {
+                restored.status = .failed
+                restored.lastError = failureReason
+            }
+            return restored
+        }
+    }
+
     /// 递归删除目录(大仓库可能耗时数分钟),放到主线程之外执行,避免冻结 UI。
     nonisolated private static func removeItemOffMainThread(
         _ fileSystem: any FileSystemServicing,
@@ -921,6 +1026,10 @@ struct WorkplaceRuntimeService {
                         try await gitService.checkoutBranch(branch, in: state.localPath)
                     }
                     return .success(Self.succeededState(from: state))
+                } catch is CancellationError {
+                    // 取消不是失败(口径同 onLockCancelled):checkout 做到一半被取消
+                    // 不能把行持久化成红色"操作已取消"。
+                    return .cancelled(state)
                 } catch {
                     return .failed(
                         Self.failedState(

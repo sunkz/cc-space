@@ -251,6 +251,9 @@ struct BranchCompareWindowView: View {
     }
 
     private func reloadDiff() {
+        // 换分支/互换方向与重新加载期间,上一次比较的分歧数一律作废:
+        // 留着会把旧数字和新分支名拼在一起,加载失败时更是挂着上次的结果不走。
+        divergence = nil
         guard let base = baseRef, let head = headRef else {
             // 分支上下文还没就绪(空仓库等):保持加载态,context 解析后会再次触发。
             // 早退同样作废在途 diff 写回,窄窗口内旧任务的迟到落笔被代际拦下。
@@ -272,8 +275,10 @@ struct BranchCompareWindowView: View {
                 hasLoadedInitialData = true
             case .failure(let message):
                 // 查询失败与「两侧内容完全一致」是两回事:展示错误态而非空态。
+                // 首载流程失败也算结束,否则聚焦自动刷新从此停摆。
                 errorMessage = message
                 isLoading = false
+                hasLoadedInitialData = true
             case .cancelled:
                 break
             }

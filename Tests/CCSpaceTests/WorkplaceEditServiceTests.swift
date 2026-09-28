@@ -684,6 +684,64 @@ final class WorkplaceEditServiceTests: XCTestCase {
         }
     }
 
+    /// 改名会整体移动目录,嵌套在树内的子工作区记录的本地路径不会随之重映射,
+    /// 移动后它们指向旧路径、重启磁盘刷新会整条删掉子工作区记录(不可恢复)。
+    /// 必须在触碰磁盘前 fail-closed。
+    func test_saveWorkplaceEditRejectsRenameWhenNestedWorkplaceExists() async throws {
+        let stores = try makeServiceStores()
+        let repositoryStore = stores.repositoryStore
+        let workplaceStore = stores.workplaceStore
+        let workspaceRoot = stores.workspaceRoot
+
+        try repositoryStore.addRepository(gitURL: "git@github.com:org/api.git")
+        let repository = try XCTUnwrap(repositoryStore.repositories.first)
+        let parent = try workplaceStore.createWorkplace(
+            name: "ios-dev",
+            rootPath: workspaceRoot.path,
+            selectedRepositories: [repository]
+        )
+        _ = try workplaceStore.createWorkplace(
+            name: "sub",
+            rootPath: parent.path,
+            selectedRepositories: [repository]
+        )
+        try FileManager.default.createDirectory(atPath: parent.path, withIntermediateDirectories: true)
+
+        let gitService = WorkplaceEditGitServiceSpy()
+        let service = WorkplaceEditService(
+            workplaceStore: workplaceStore,
+            repositoryStore: repositoryStore,
+            syncCoordinator: SyncCoordinator(gitService: gitService),
+            gitService: gitService
+        )
+
+        do {
+            try await service.saveWorkplaceEdit(
+                workplaceID: parent.id,
+                name: "ios-dev-renamed",
+                selectedRepositoryIDs: parent.selectedRepositoryIDs,
+                branch: parent.branch
+            )
+            XCTFail("存在嵌套工作区时改名应被拦截")
+        } catch {
+            guard case .nestedWorkplaceBlocksRename(let nestedName)? = error as? WorkplaceEditServiceError else {
+                XCTFail("应抛 nestedWorkplaceBlocksRename，实际为 \(error)")
+                return
+            }
+            XCTAssertEqual(nestedName, "sub")
+        }
+        // 拦截发生在任何磁盘改动之前:原目录仍在,新路径从未被创建。
+        XCTAssertTrue(FileManager.default.fileExists(atPath: parent.path))
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: URL(fileURLWithPath: workspaceRoot.path)
+                    .appendingPathComponent("ios-dev-renamed", isDirectory: true).path
+            )
+        )
+        let stillThere = try XCTUnwrap(workplaceStore.workplaces.first { $0.id == parent.id })
+        XCTAssertEqual(stillThere.path, parent.path)
+    }
+
     func test_saveWorkplaceEditRejectsInvalidName() async throws {
         let stores = try makeServiceStores()
         let repositoryStore = stores.repositoryStore

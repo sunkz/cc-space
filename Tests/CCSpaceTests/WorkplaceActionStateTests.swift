@@ -152,6 +152,37 @@ final class WorkplaceActionStateTests: XCTestCase {
         XCTAssertFalse(actionState.canSyncAllRepositories)
     }
 
+    func test_canOpenDirectoryUsesInjectedProbeWhenNoSyncStateRows() {
+        // init 在 body 求值链上,空工作区不得同步 stat 磁盘:
+        // 目录存在性完全由视图侧后台探测结果注入,此处不触盘。
+        let workplace = makeWorkplace(
+            path: "/tmp/ccspace-nonexistent-\(UUID().uuidString)",
+            selectedRepositoryIDs: []
+        )
+
+        let unprobed = WorkplaceActionState(
+            workplace: workplace,
+            repositories: [],
+            syncStates: []
+        )
+        let probedPresent = WorkplaceActionState(
+            workplace: workplace,
+            repositories: [],
+            syncStates: [],
+            probedWorkplaceDirectoryExists: true
+        )
+        let probedAbsent = WorkplaceActionState(
+            workplace: workplace,
+            repositories: [],
+            syncStates: [],
+            probedWorkplaceDirectoryExists: false
+        )
+
+        XCTAssertFalse(unprobed.canOpenDirectory)
+        XCTAssertTrue(probedPresent.canOpenDirectory)
+        XCTAssertFalse(probedAbsent.canOpenDirectory)
+    }
+
     func test_failedRepositoriesIsEmptyWhenNoSyncStatesMatchWorkplace() {
         let repository = makeRepository(repoName: "failed")
         let workplace = makeWorkplace(

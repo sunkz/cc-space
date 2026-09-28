@@ -79,7 +79,13 @@ struct SyncCoordinator: Sendable {
         progressHandler: WorkplaceOperationProgressHandler? = nil,
         onCloneStarted: (@Sendable (String) async -> Void)? = nil
     ) async throws -> [RepositorySyncState] {
-        try fileSystemService.createDirectory(at: workplace.path)
+        // 建目录可能落在网盘/外置盘上,不能在主线程同步做磁盘 IO(口径同
+        // WorkplaceRuntimeService.removeItemOffMainThread)。
+        let fileSystemService = self.fileSystemService
+        let workplacePathForCreate = workplace.path
+        try await Task.detached(priority: .userInitiated) {
+            try fileSystemService.createDirectory(at: workplacePathForCreate)
+        }.value
 
         let gitService = gitService
         let workplaceID = workplace.id
@@ -210,7 +216,25 @@ struct SyncCoordinator: Sendable {
             return pullingState
         }
         // 防抖持久化不抛错（见 WorkplaceStore.persistSyncStates），直接落库。
-        workplaceStore.updateSyncStates(preparation.failed + pullingStates)
+        //
+        // 预标必须**字段级**:preparation/pullingStates 取自 preparePullStates 之前的快照,
+        // 而 prepare 内部各仓库并发 branchStatus 探测要挂起一段时间,用 updateSyncStates
+        // 整行写会把窗口内磁盘刷新写入的 hasLocalDirectory/lastError 等字段退回旧值
+        // (lost update)。收口侧早已改成字段增量合并,预标侧同口径。
+        let premarkSource = preparation.failed + pullingStates
+        let premarkStates = premarkSource.map { incoming -> RepositorySyncState in
+            guard let current = workplaceStore.syncStates.first(where: { existing in
+                existing.workplaceID == incoming.workplaceID && existing.repositoryID == incoming.repositoryID
+            }) else {
+                // 行在 await 期间被 prune/去重:没有可叠的底,按原行补录。
+                return incoming
+            }
+            var merged = current
+            merged.status = incoming.status
+            merged.lastError = incoming.lastError
+            return merged
+        }
+        workplaceStore.updateSyncStates(premarkStates)
 
         let gitService = gitService
         let repoLock = RepositoryOperationLock.shared

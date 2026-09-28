@@ -36,7 +36,8 @@ struct DiffWindowView: View {
     @State private var isLoading = true
     @State private var errorMessage: String?
     @State private var loadTask: Task<Void, Never>?
-    /// 首次加载是否已完成;用于跳过窗口刚打开时的 becomeKey 通知,避免重复加载。
+    /// 首次加载流程是否已结束(无论成败);用于跳过窗口刚打开时的 becomeKey 通知,
+    /// 避免重复加载。只在成功路径置位会让首载瞬时失败后聚焦刷新永久停摆。
     @State private var hasLoadedInitialData = false
     /// 待确认丢弃的文件;非 nil 时展示确认弹窗。
     @State private var pendingDiscardEntry: GitDiffEntry?
@@ -106,6 +107,13 @@ struct DiffWindowView: View {
         canDiscardChanges && isLoading == false && errorMessage == nil && entries.isEmpty == false
     }
 
+    /// 未跟踪文件达到展示上限时的提示;仅工作区来源需要(其余来源没有 untracked 概念)。
+    /// 列表只展示前 N 个未跟踪文件,而提交会覆盖全部改动,不把差别说出来会误导用户。
+    private var untrackedTruncationNotice: String? {
+        guard isWorkingDirectorySource, isLoading == false, errorMessage == nil else { return nil }
+        return DiffWindowUntrackedDisplay.truncationNotice(for: entries)
+    }
+
     private var trimmedCommitMessage: String {
         commitMessage.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -158,6 +166,7 @@ struct DiffWindowView: View {
         .onWindowBecomeKey {
             // 相等 payload 的 openWindow 只会聚焦已开窗口而不会重建内容,聚焦时刷新保证数据最新。
             // 进行中的提交/丢弃会自行 refresh,这里不再抢刷,避免与进行中任务抢刷新导致闪烁/滚动丢失。
+            // 守卫只等"首次加载流程结束",失败同样算结束:否则首载瞬时失败后聚焦刷新就再也进不来。
             guard hasLoadedInitialData else { return }
             guard isCommitting == false, isDiscarding == false, isGeneratingMessage == false else { return }
             load(isRefresh: true)
@@ -227,6 +236,8 @@ struct DiffWindowView: View {
     ///
     /// 首次加载与错误重试(`isRefresh == false`)清空内容展示骨架屏;
     /// 窗口聚焦刷新(`isRefresh == true`)保留旧内容静默换新,避免闪烁与滚动位置丢失。
+    /// 每条终止落笔路径(成功与各条报错)都要置 `hasLoadedInitialData`:
+    /// 首载瞬时失败若不落笔,聚焦自动刷新的守卫会永远过不去,窗口就此不再更新。
     private func load(isRefresh: Bool = false) {
         loadTask?.cancel()
         errorMessage = nil
@@ -248,6 +259,7 @@ struct DiffWindowView: View {
                 withAnimation(.easeOut(duration: 0.18)) {
                     errorMessage = "本地目录不存在：\(localPath)"
                     isLoading = false
+                    hasLoadedInitialData = true
                 }
                 return
             }
@@ -259,6 +271,7 @@ struct DiffWindowView: View {
                     withAnimation(.easeOut(duration: 0.18)) {
                         errorMessage = "当前仓库未检出分支，无法进行分支对比"
                         isLoading = false
+                        hasLoadedInitialData = true
                     }
                     return
                 }
@@ -286,6 +299,7 @@ struct DiffWindowView: View {
                 withAnimation(.easeOut(duration: 0.18)) {
                     errorMessage = RepositoryWindowContext.localizedDiffFailureMessage(error)
                     isLoading = false
+                    hasLoadedInitialData = true
                 }
                 return
             }
@@ -322,8 +336,9 @@ struct DiffWindowView: View {
         }
     }
 
-    /// 提交全部工作区改动(与窗口展示范围一致,含 untracked):成功后清空输入、空态切换为
-    /// "提交成功"并静默刷新,失败弹窗提示且保留已输入的提交信息。
+    /// 提交全部工作区改动(走 `git add --all`,范围等于整个工作区,可能大于列表展示范围——
+    /// 未跟踪文件触顶时列表只展示前若干个,差别说理由提交栏上方的提示给出):
+    /// 成功后清空输入、空态切换为"提交成功"并静默刷新,失败弹窗提示且保留已输入的提交信息。
     private func commit() {
         guard isCommitting == false, trimmedCommitMessage.isEmpty == false else { return }
         isCommitting = true
@@ -415,30 +430,40 @@ struct DiffWindowView: View {
     ///
     /// 用单行 TextField(macOS 上 `axis: .vertical` 的 onSubmit 不触发,回车提交会失效);
     /// 无边框输入用纯文本样式 + 整枚胶囊描边(常态浅灰/聚焦主题色)。
+    /// 未跟踪文件达到展示上限时,胶囊上方加一行说明:提交范围大于列表展示范围。
     @ViewBuilder
     private var commitBar: some View {
         if showsCommitBar {
-            HStack(spacing: 0) {
-                generateButton
-                commitMessageField
-                Button("提交", action: commit)
-                    .buttonStyle(PillCommitButtonStyle())
-                    .keyboardShortcut(.return, modifiers: .command)
-                    .disabled(trimmedCommitMessage.isEmpty || isCommitting)
-            }
-            .padding(4)
-            .background(
-                Color(nsColor: .textBackgroundColor),
-                in: Capsule()
-            )
-            .overlay {
-                // 常态描浅灰边,保证不聚焦也能看出这里是输入区;聚焦时换主题色环。
-                if isCommitInputFocused {
-                    Capsule()
-                        .strokeBorder(Color.accentColor.opacity(0.5), lineWidth: 1.5)
-                } else {
-                    Capsule()
-                        .strokeBorder(Color.primary.opacity(0.18), lineWidth: 1)
+            VStack(spacing: 4) {
+                if let untrackedTruncationNotice {
+                    Label(untrackedTruncationNotice, systemImage: "info.circle")
+                        .labelStyle(.titleAndIcon)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                HStack(spacing: 0) {
+                    generateButton
+                    commitMessageField
+                    Button("提交", action: commit)
+                        .buttonStyle(PillCommitButtonStyle())
+                        .keyboardShortcut(.return, modifiers: .command)
+                        .disabled(trimmedCommitMessage.isEmpty || isCommitting)
+                }
+                .padding(4)
+                .background(
+                    Color(nsColor: .textBackgroundColor),
+                    in: Capsule()
+                )
+                .overlay {
+                    // 常态描浅灰边,保证不聚焦也能看出这里是输入区;聚焦时换主题色环。
+                    if isCommitInputFocused {
+                        Capsule()
+                            .strokeBorder(Color.accentColor.opacity(0.5), lineWidth: 1.5)
+                    } else {
+                        Capsule()
+                            .strokeBorder(Color.primary.opacity(0.18), lineWidth: 1)
+                    }
                 }
             }
             .padding(.horizontal, 12)

@@ -35,8 +35,8 @@ struct WorkplaceRepositoryRowView: View {
     let onDelete: () -> Void
     let onTogglePinned: () -> Void
     let onStash: () -> Void
-    let onPopStash: (Int) -> Void
-    let onDropStash: (Int) -> Void
+    let onPopStash: (GitStashEntry) -> Void
+    let onDropStash: (GitStashEntry) -> Void
     let onAbortInterruptedOperation: () -> Void
     @Environment(\.openWindow) private var openWindow
     @State private var showingDeleteConfirmation = false
@@ -464,8 +464,8 @@ struct WorkplaceRepositoryRowView: View {
                 error: stashError,
                 actionsDisabled: actionsDisabled,
                 onRetry: loadStashList,
-                onPop: { index in
-                    onPopStash(index)
+                onPop: { entry in
+                    onPopStash(entry)
                 },
                 onRequestDrop: { entry in
                     stashDropCandidate = entry
@@ -483,7 +483,7 @@ struct WorkplaceRepositoryRowView: View {
                 let candidate = stashDropCandidate
                 stashDropCandidate = nil
                 if let candidate {
-                    onDropStash(candidate.index)
+                    onDropStash(candidate)
                 }
             }
             Button("取消", role: .cancel) {

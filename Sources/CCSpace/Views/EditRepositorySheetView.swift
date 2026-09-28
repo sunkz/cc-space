@@ -21,6 +21,9 @@ struct EditRepositorySheetView: View {
     @State private var remoteBranchSuggestions: [String] = []
     @State private var isLoadingRemoteBranches = false
     @State private var probeTask: Task<Void, Never>?
+    /// 更换 gitURL 后的防抖重探任务:与 onAppear 的初始探测分开持有,
+    /// 避免新地址探测取消掉仍需写盘的默认分支初始任务。
+    @State private var gitURLProbeTask: Task<Void, Never>?
     @State private var showBranchSuggestions = false
     @FocusState private var isMRBranchInputFocused: Bool
 
@@ -126,7 +129,7 @@ struct EditRepositorySheetView: View {
             // 先取远端分支建议,再探测默认分支,reorder 时才有数据可排。
             probeTask?.cancel()
             probeTask = Task { @MainActor in
-                await loadRemoteBranchSuggestions()
+                await loadRemoteBranchSuggestions(for: repository.gitURL)
                 if repository.defaultBranch == nil {
                     await fetchDefaultBranch()
                 }
@@ -136,7 +139,40 @@ struct EditRepositorySheetView: View {
             // 弹窗关闭后不再写盘、不再向已销毁视图回写状态。
             probeTask?.cancel()
             probeTask = nil
+            gitURLProbeTask?.cancel()
+            gitURLProbeTask = nil
         }
+    }
+
+    /// 改址后旧远端探测结果作废:防抖重探分支建议与默认分支,
+    /// 避免"新 URL + 旧远端查出的 MR 目标分支"一起被保存(同 AddRepositorySheetView 的做法)。
+    private func scheduleRemoteProbe(for rawValue: String) {
+        gitURLProbeTask?.cancel()
+        let url = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 空地址或改回原地址不重探:onAppear 的探测结果仍对应当前保存的地址。
+        guard url.isEmpty == false, url != repository.gitURL else { return }
+        // 旧地址的在途探测(含默认分支回写)一并作废,慢探测迟到不得覆盖新结果。
+        probeTask?.cancel()
+        probeTask = nil
+        gitURLProbeTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(800))
+            guard Task.isCancelled == false else { return }
+            await loadRemoteBranchSuggestions(for: url)
+            guard Task.isCancelled == false else { return }
+            await previewDefaultBranch(for: url)
+        }
+    }
+
+    /// 新地址的默认分支只更新弹层内预览,不写 Store:地址尚未保存,
+    /// 用户取消编辑时 Store 仍是旧地址,写盘会用新地址的分支污染旧配置。
+    @MainActor
+    private func previewDefaultBranch(for gitURL: String) async {
+        guard let branch = await infoService.defaultBranch(for: gitURL)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            branch.isEmpty == false else { return }
+        guard Task.isCancelled == false else { return }
+        effectiveDefaultBranch = branch
+        reorderSuggestions(withDefault: branch)
     }
 
     @MainActor
@@ -174,10 +210,10 @@ struct EditRepositorySheetView: View {
     }
 
     @MainActor
-    private func loadRemoteBranchSuggestions() async {
+    private func loadRemoteBranchSuggestions(for gitURL: String) async {
         isLoadingRemoteBranches = true
         defer { isLoadingRemoteBranches = false }
-        let branches = await infoService.remoteBranches(for: repository.gitURL)
+        let branches = await infoService.remoteBranches(for: gitURL)
         guard Task.isCancelled == false else { return }
         let defaultBranch = effectiveDefaultBranch
         // 归一排序(localizedStandardCompare)放到后台做:分支上千时不卡弹层主线程,
@@ -210,6 +246,13 @@ struct EditRepositorySheetView: View {
                 gitURL: trimmedEditingGitURL,
                 mrTargetBranches: branchesChanged ? editingMRBranches : nil
             )
+            // 换过地址后探测到的默认分支必须随保存落盘:不落盘的话,预览用的
+            // 新地址默认分支与 Store 里旧地址的值会长期不一致(MR 目标分支建议
+            // 与"当前分支是否默认"都按 Store 值判定)。地址未保存时不写(见
+            // previewDefaultBranch 的有意收窄)。
+            if let effectiveDefaultBranch, effectiveDefaultBranch != repository.defaultBranch {
+                try repositoryStore.updateDefaultBranch(id: repository.id, branch: effectiveDefaultBranch)
+            }
             onSaved?()
             dismiss()
         } catch {

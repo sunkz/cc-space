@@ -329,6 +329,40 @@ final class RepositoryStoreTests: XCTestCase {
         XCTAssertTrue(store.repositories.allSatisfy { $0.mrTargetBranches.isEmpty })
     }
 
+    /// 版本校验必须有下界:version 为 0/负数(手工编辑或伪造的备份)不得被当受支持版本导入。
+    func test_importBackupRejectsVersionBelowOne() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let backupURL = root.appendingPathComponent("repositories-backup.json")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        for badVersion in [0, -3] {
+            let json = """
+            {
+                "version": \(badVersion),
+                "exportedAt": "2024-01-01T00:00:00Z",
+                "repositories": [
+                    {
+                        "gitURL": "git@github.com:org/api.git"
+                    }
+                ]
+            }
+            """
+            try Data(json.utf8).write(to: backupURL, options: .atomic)
+            let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
+
+            XCTAssertThrowsError(
+                try store.importBackup(from: backupURL),
+                "version \(badVersion) 应被拒绝"
+            ) { error in
+                XCTAssertEqual(
+                    error as? RepositoryStoreError,
+                    .unsupportedBackupVersion(badVersion)
+                )
+            }
+            XCTAssertTrue(store.repositories.isEmpty, "非法版本不得导入任何仓库")
+        }
+    }
+
     func test_importBackupV2FormatImportsWithMRTargetBranches() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))

@@ -65,7 +65,7 @@ final class DiffSplitRowBuilderTests: XCTestCase {
         XCTAssertNil(pairOf(rows[0]).right)
     }
 
-    func test_noteSpansRowAndSplitsPendingBlock() {
+    func test_noteFollowsPendingChangeBlock() {
         let rows = DiffSplitRowBuilder.rows(from: [
             line(.added, "+a", new: 1),
             line(.note, "\\ No newline at end of file")
@@ -73,5 +73,35 @@ final class DiffSplitRowBuilderTests: XCTestCase {
         XCTAssertEqual(rows.count, 2)
         XCTAssertEqual(rows[1].content, .note(line(.note, "\\ No newline at end of file")))
         XCTAssertEqual(pairOf(rows[0]).right?.text, "+a")
+    }
+
+    func test_noteInsideChangeBlockDoesNotSplitThePair() {
+        // git 对"无尾换行文件改末行"的输出是 `-旧` / `\ No newline` / `+新` / `\ No newline`:
+        // 说明行夹在两侧变更之间,若因此结算会把本应配对的一行拆成左右各半空行。
+        let note = line(.note, "\\ No newline at end of file")
+        let rows = DiffSplitRowBuilder.rows(from: [
+            line(.removed, "-b", old: 1),
+            note,
+            line(.added, "+c", new: 1),
+            note
+        ])
+        XCTAssertEqual(rows.count, 3)
+        XCTAssertEqual(pairOf(rows[0]).left?.text, "-b")
+        XCTAssertEqual(pairOf(rows[0]).right?.text, "+c")
+        XCTAssertEqual(rows[1].content, .note(note))
+        XCTAssertEqual(rows[2].content, .note(note))
+    }
+
+    func test_noteWithoutPendingChangesRendersImmediately() {
+        let note = line(.note, "\\ No newline at end of file")
+        let rows = DiffSplitRowBuilder.rows(from: [
+            line(.context, " x", old: 1, new: 1),
+            note,
+            line(.context, " y", old: 2, new: 2)
+        ])
+        XCTAssertEqual(rows.count, 3)
+        XCTAssertEqual(rows[1].content, .note(note))
+        XCTAssertEqual(pairOf(rows[0]).left?.text, " x")
+        XCTAssertEqual(pairOf(rows[2]).left?.text, " y")
     }
 }

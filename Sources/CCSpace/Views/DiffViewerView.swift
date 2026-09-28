@@ -26,7 +26,7 @@ struct DiffViewerView: View {
     /// (分支比较窗口使用;独立 Diff 窗口不需要,保持单颗胶囊)。
     var toolbarLeadingSeparator = false
 
-    /// 每个文件的展开状态,缺省值为 true(展开)。
+    /// 每个文件的展开状态,以稳定展开键为索引,缺省值为 true(展开)。
     @State private var expandedStates: [String: Bool] = [:]
 
     /// 单栏/双栏对比模式;跨窗口共享并持久化。
@@ -41,8 +41,13 @@ struct DiffViewerView: View {
     /// 列表外边距:顶部收紧,首卡片紧贴标题栏下方。
     private static let listPadding = EdgeInsets(top: 1, leading: 12, bottom: 12, trailing: 12)
 
-    private func isExpanded(_ diff: GitDiffEntry) -> Bool {
-        expandedStates[diff.id] ?? true
+    /// 与 `diffs` 一一对应的稳定展开键(见 `DiffExpansionKeys`)。
+    private var expansionKeys: [String] {
+        DiffExpansionKeys.make(for: diffs)
+    }
+
+    private func isExpanded(key: String) -> Bool {
+        expandedStates[key] ?? true
     }
 
     /// 「展示所有行」的提示文案(描述点击后的效果);无全文取用能力的来源不可展开。
@@ -52,7 +57,7 @@ struct DiffViewerView: View {
     }
 
     private var allExpanded: Bool {
-        diffs.allSatisfy { isExpanded($0) }
+        expansionKeys.allSatisfy { isExpanded(key: $0) }
     }
 
     var body: some View {
@@ -181,20 +186,23 @@ struct DiffViewerView: View {
     }
 
     private var diffList: some View {
-        ScrollView {
+        let keys = expansionKeys
+        return ScrollView {
             LazyVStack(alignment: .leading, spacing: 10) {
                 Color.clear
                     .frame(height: 0)
                     .id(Self.listTopAnchorID)
-                ForEach(diffs) { diff in
+                // 视图身份同样用稳定键:patch 变化不再重建卡片,@State(解析缓存、
+                // 全文展开结果)得以保留,由卡片自己的 onChange 按内容作废旧值。
+                ForEach(Array(zip(diffs, keys)), id: \.1) { diff, key in
                     DiffFileCard(
                         diff: diff,
                         isSplitView: isSplitView,
                         showAllLines: showAllLines,
                         fullFileContent: fullFileContent,
                         isExpanded: Binding(
-                            get: { isExpanded(diff) },
-                            set: { expandedStates[diff.id] = $0 }
+                            get: { expandedStates[key] ?? true },
+                            set: { expandedStates[key] = $0 }
                         ),
                         onDiscard: onDiscardFile.map { action in { action(diff) } }
                     )
@@ -211,8 +219,8 @@ struct DiffViewerView: View {
     /// 因此切换后主动动画回到顶部。
     private func toggleAll(_ expanded: Bool, proxy: ScrollViewProxy) {
         withAnimation(.snappy(duration: 0.25)) {
-            for diff in diffs {
-                expandedStates[diff.id] = expanded
+            for key in expansionKeys {
+                expandedStates[key] = expanded
             }
             proxy.scrollTo(Self.listTopAnchorID, anchor: .top)
         }
@@ -582,25 +590,18 @@ private struct DiffSplitRowView: View {
         }
     }
 
+    /// hunk 头整行横跨两栏;`text` 已含尾部函数上下文,不再另加一份。
     private func hunkHeaderRow(_ line: DiffPatchLine) -> some View {
-        HStack(spacing: 6) {
-            Text(line.text)
-                .lineLimit(1)
-                .truncationMode(.tail)
-            if case .hunkHeader(let context?) = line.kind {
-                Text(context)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .opacity(0.7)
-            }
-        }
-        .font(.system(size: 10, design: .monospaced))
-        .foregroundStyle(.secondary)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.leading, 8)
-        .padding(.trailing, 8)
-        .background(Color.accentColor.opacity(0.07))
-        .textSelection(.enabled)
+        Text(line.text)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .font(.system(size: 10, design: .monospaced))
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 8)
+            .padding(.trailing, 8)
+            .background(Color.accentColor.opacity(0.07))
+            .textSelection(.enabled)
     }
 
     private func noteRow(_ line: DiffPatchLine) -> some View {
@@ -687,27 +688,19 @@ private struct DiffPatchLineView: View {
         }
     }
 
-    /// hunk 头占据整行,行号栏留空保持列对齐。
+    /// hunk 头占据整行,行号栏留空保持列对齐;`text` 已含尾部函数上下文,不再另加一份。
     private var hunkRow: some View {
         HStack(spacing: 0) {
             gutter(nil)
             gutter(nil)
-            HStack(spacing: 6) {
-                Text(line.text)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                if case .hunkHeader(let context?) = line.kind {
-                    Text(context)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .opacity(0.7)
-                }
-            }
-            .font(.system(size: 10, design: .monospaced))
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.trailing, 8)
-            .textSelection(.enabled)
+            Text(line.text)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.trailing, 8)
+                .textSelection(.enabled)
         }
     }
 

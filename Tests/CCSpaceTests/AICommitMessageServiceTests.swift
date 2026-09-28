@@ -6,6 +6,36 @@ private final class RequestRecorder: @unchecked Sendable {
     var request: URLRequest?
 }
 
+/// 按 bodyData 分块流式返回固定响应体的桩协议:验证真实 URLSession 路径上的
+/// 响应体大小上限(不依赖网络)。测试串行执行,静态配置直接赋值即可。
+final class StubBodyURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var bodyData = Data()
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url else { return }
+        let response = HTTPURLResponse(
+            url: url,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: nil
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        let chunkSize = 64 * 1024
+        var offset = 0
+        while offset < Self.bodyData.count {
+            let end = min(offset + chunkSize, Self.bodyData.count)
+            client?.urlProtocol(self, didLoad: Self.bodyData.subdata(in: offset..<end))
+            offset = end
+        }
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
 final class AICommitMessageServiceTests: XCTestCase {
     private let sampleDiffs = [
         GitDiffEntry(
@@ -192,6 +222,108 @@ final class AICommitMessageServiceTests: XCTestCase {
         } catch {
             XCTAssertTrue(error.localizedDescription.contains("请求过于频繁"), "实际文案：\(error.localizedDescription)")
         }
+    }
+
+    /// 网关返回 200 + HTML 错误页:原始英文 DecodingError 不得直出 UI,必须折叠为中文错误。
+    func test_http200WithNonJSONBodyMapsToChineseInvalidResponseFormat() async {
+        let html = "<html><body><h1>502 Bad Gateway</h1></body></html>"
+        let service = makeService(
+            settings: makeSettings(aiSettings: makeAISettings()),
+            responder: { (Data(html.utf8), 200) }
+        )
+
+        do {
+            _ = try await service.generateCommitMessage(
+                diffs: sampleDiffs,
+                recentCommitSubjects: []
+            )
+            XCTFail("Expected invalidResponseFormat error")
+        } catch {
+            guard case AICommitMessageError.invalidResponseFormat = error else {
+                return XCTFail("应为 invalidResponseFormat，实际：\(error)")
+            }
+            XCTAssertTrue(
+                error.localizedDescription.contains("无法解析"),
+                "面向用户文案须为简体中文：\(error.localizedDescription)"
+            )
+        }
+    }
+
+    /// 错误体里的 `error.message` 是服务侧自由文本,可能极长:拼进用户可见文案前必须截断。
+    func test_longErrorDetailIsTruncatedBeforeBeingAppendedToUserCopy() async throws {
+        let longMessage = String(repeating: "x", count: 5_000)
+        let payload: [String: Any] = ["error": ["message": longMessage]]
+        let body = try JSONSerialization.data(withJSONObject: payload)
+        let service = makeService(
+            settings: makeSettings(aiSettings: makeAISettings()),
+            responder: { (body, 500) }
+        )
+
+        do {
+            _ = try await service.generateCommitMessage(
+                diffs: sampleDiffs,
+                recentCommitSubjects: []
+            )
+            XCTFail("Expected http error")
+        } catch {
+            let description = error.localizedDescription
+            XCTAssertTrue(description.contains("已截断"), "实际文案：\(description)")
+            XCTAssertLessThan(description.count, 1_000, "超长 detail 必须截断")
+            XCTAssertFalse(description.contains(String(repeating: "x", count: 300)))
+        }
+    }
+
+    // MARK: - 响应体大小上限(真实 URLSession + 有界读取委托)
+
+    /// 用桩 URLProtocol 流式吐 body,驱动 `AIResponseLoadingSessionDelegate.load`
+    /// 走完整的"增量缓冲、超限即断"路径。
+    private func makeSizedBodyService(body: Data) -> AICommitMessageService {
+        StubBodyURLProtocol.bodyData = body
+        let settings = makeSettings(aiSettings: makeAISettings())
+        let delegate = AIResponseLoadingSessionDelegate()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StubBodyURLProtocol.self]
+        let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+        return AICommitMessageService(
+            settingsReader: { settings },
+            dataLoader: { request in
+                try await delegate.load(request: request, in: session)
+            }
+        )
+    }
+
+    func test_responseSizeCapRejectsOversizedBody() async {
+        let oversized = Data(
+            repeating: 0x41,
+            count: AIResponseLoadingSessionDelegate.maxResponseBytes + 128 * 1024
+        )
+        let service = makeSizedBodyService(body: oversized)
+
+        do {
+            _ = try await service.generateCommitMessage(
+                diffs: sampleDiffs,
+                recentCommitSubjects: []
+            )
+            XCTFail("Expected responseTooLarge error")
+        } catch {
+            guard case AICommitMessageError.responseTooLarge = error else {
+                return XCTFail("应为 responseTooLarge，实际：\(error)")
+            }
+            XCTAssertTrue(
+                error.localizedDescription.contains("上限"),
+                "面向用户文案须为简体中文：\(error.localizedDescription)"
+            )
+        }
+    }
+
+    func test_responseSizeCapAllowsNormalSizedBody() async throws {
+        let service = makeSizedBodyService(body: try makeSuccessData())
+
+        let message = try await service.generateCommitMessage(
+            diffs: sampleDiffs,
+            recentCommitSubjects: []
+        )
+        XCTAssertEqual(message, "feat: 添加 AI 提交信息")
     }
 
     // MARK: - 端点拼装

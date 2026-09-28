@@ -23,10 +23,18 @@ private struct FailableDecodable<Value: Decodable>: Decodable {
 
 struct JSONFileStore: Sendable {
     private static let stagingDirectoryPrefix = ".ccspace-json-write-"
+    /// 多文档事务的"意图清单"前缀:rename 开始前落盘,提交完成后删除;
+    /// 启动清理据此把崩溃中断的多文件提交回滚(全旧)或前滚(全新)。
+    static let transactionManifestPrefix = ".ccspace-json-txn-"
     /// 回滚失败时备份被移出暂存目录后使用的前缀。必须与 `stagingDirectoryPrefix` 不同:
     /// 否则下次启动的 `cleanupStaleStagingDirectories` 会因 mtime 超阈值把装着唯一备份
     /// 的目录直接删掉,"可手工取回"就落空了。
     private static let rollbackBackupDirectoryPrefix = ".ccspace-json-rollback-backup-"
+
+    private struct PendingTransactionManifest: Codable {
+        let stagingDirectoryName: String
+        let fileNames: [String]
+    }
     /// 回滚备份目录的保留份数:超出最近 N 份的旧备份已不再是"唯一可手工取回的副本",
     /// 必须让启动清理回收——否则回滚反复失败时该目录无限累积(降级模式下其中
     /// 含带明文 API Key 的 settings.json 副本)。
@@ -43,24 +51,29 @@ struct JSONFileStore: Sendable {
         self.rootDirectory = rootDirectory
     }
 
-    /// 清理上次崩溃/强退遗留的暂存目录。
+    /// 清理上次崩溃/强退遗留的暂存目录,并收敛被崩溃打断的多文档事务(见
+    /// `recoverInterruptedTransactions`)。
     ///
     /// **必须由 App 启动显式调用一次**,不要放进 init:JSONFileStore 在运行期会被
     /// 反复构造(RootSplitView 每次重建都 new 一个),放进 init 等于每次重建都在
     /// 主线程枚举目录,并可能删掉**正在进行中**的写入暂存目录。
-    /// 另外只清理"足够老"的暂存目录,避免误删并发写入。
+    /// 另外只清理"足够老"的暂存目录/事务清单,避免误伤并发实例的在途写入。
     static func cleanupStaleStagingDirectories(
         in rootDirectory: URL,
-        olderThan interval: TimeInterval = 600
+        olderThan interval: TimeInterval = 600,
+        fileManager: FileManager = .default
     ) {
-        let fileManager = FileManager.default
+        let cutoff = Date().addingTimeInterval(-interval)
+        // 事务清单必须先于暂存目录清理处理:未完成事务的暂存目录里装着回滚所需的
+        // backup/,一旦被当作普通残留删掉,旧值就再也还不回去了。
+        recoverInterruptedTransactions(in: rootDirectory, fileManager: fileManager, cutoff: cutoff)
+
         guard let entries = try? fileManager.contentsOfDirectory(
             at: rootDirectory,
             includingPropertiesForKeys: [.contentModificationDateKey]
         ) else {
             return
         }
-        let cutoff = Date().addingTimeInterval(-interval)
         for url in entries where url.lastPathComponent.hasPrefix(stagingDirectoryPrefix) {
             let modifiedAt = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
                 ?? .distantPast
@@ -77,7 +90,15 @@ struct JSONFileStore: Sendable {
                     "\(rollbackBackupDirectoryPrefix)\(UUID().uuidString)",
                     isDirectory: true
                 )
-                try? fileManager.moveItem(at: backupDirectory, to: recoveryDirectory)
+                do {
+                    try fileManager.moveItem(at: backupDirectory, to: recoveryDirectory)
+                } catch {
+                    // 备份挪不动(多为权限/磁盘异常)时绝不能删暂存目录:
+                    // 那恰好在"唯一副本"最需要保全的时刻把它销毁。
+                    // 保留整个暂存目录,下次启动重试。
+                    jsonFileStoreLog.error("event=staging_backup_rescue_failed staging=\(url.lastPathComponent, privacy: .public) reason=\(error.localizedDescription, privacy: .public)")
+                    continue
+                }
             }
             try? fileManager.removeItem(at: url)
         }
@@ -100,6 +121,93 @@ struct JSONFileStore: Sendable {
                 ?? .distantPast
             guard modifiedAt < backupAgeCutoff else { continue }
             try? fileManager.removeItem(at: stale)
+        }
+    }
+
+    /// 按意图清单收敛被进程崩溃打断的多文档事务:
+    /// - 仍有暂存文件未改名 ⇒ 提交未完成 ⇒ 回滚——已改名的文档用 backup/ 换回旧内容,
+    ///   无备份可删的"新建"文档从目标位置移除,整体回到全旧自洽态;
+    /// - 暂存文件全部消失 ⇒ 提交已完成,只是清单没删掉 ⇒ 前滚——只清残留。
+    /// 与暂存目录清理共用年龄阈值:新清单可能是并发实例的在途写入,不能碰。
+    private static func recoverInterruptedTransactions(
+        in rootDirectory: URL,
+        fileManager: FileManager,
+        cutoff: Date
+    ) {
+        guard let entries = try? fileManager.contentsOfDirectory(
+            at: rootDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey]
+        ) else {
+            return
+        }
+        for url in entries where url.lastPathComponent.hasPrefix(transactionManifestPrefix) {
+            let modifiedAt = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                ?? .distantPast
+            guard modifiedAt < cutoff else { continue }
+            guard let data = try? Data(contentsOf: url),
+                  let manifest = try? JSONDecoder().decode(PendingTransactionManifest.self, from: data) else {
+                try? fileManager.removeItem(at: url)
+                continue
+            }
+            let stagingDirectory = rootDirectory.appendingPathComponent(
+                manifest.stagingDirectoryName,
+                isDirectory: true
+            )
+            guard fileManager.fileExists(atPath: stagingDirectory.path) else {
+                // 暂存目录已被处理(提交成功后的清理只剩清单没删掉),或已被
+                // 普通残留清理回收——两种情况都已无从回滚,清掉清单即可。
+                try? fileManager.removeItem(at: url)
+                continue
+            }
+            let stagedRemaining = manifest.fileNames.filter {
+                fileManager.fileExists(atPath: stagingDirectory.appendingPathComponent($0).path)
+            }
+            if stagedRemaining.isEmpty {
+                try? fileManager.removeItem(at: stagingDirectory)
+                try? fileManager.removeItem(at: url)
+                continue
+            }
+            var restoreFailed = false
+            for fileName in manifest.fileNames {
+                guard fileManager.fileExists(atPath: stagingDirectory.appendingPathComponent(fileName).path) == false else {
+                    continue // 该文档未被提交,目标仍是旧值,不动
+                }
+                let backupURL = stagingDirectory
+                    .appendingPathComponent("backup", isDirectory: true)
+                    .appendingPathComponent(fileName)
+                let destinationURL = rootDirectory.appendingPathComponent(fileName)
+                if fileManager.fileExists(atPath: backupURL.path) {
+                    do {
+                        try atomicReplace(stagedURL: backupURL, destinationURL: destinationURL)
+                    } catch {
+                        jsonFileStoreLog.error("event=interrupted_transaction_restore_failed file=\(fileName, privacy: .public) reason=\(error.localizedDescription, privacy: .public)")
+                        restoreFailed = true
+                    }
+                } else if fileManager.fileExists(atPath: destinationURL.path) {
+                    // 暂存文件已不在且无备份:该文件是本事务新建后搬入的,撤销即删除。
+                    try? fileManager.removeItem(at: destinationURL)
+                }
+            }
+            guard restoreFailed == false else {
+                continue // 保留清单与暂存目录,下次启动重试
+            }
+            try? fileManager.removeItem(at: stagingDirectory)
+            try? fileManager.removeItem(at: url)
+        }
+    }
+
+    /// 把数据页同步到稳定存储:rename 只保证目录项原子性,不保证内容先落盘,
+    /// 系统崩溃/断电后目标文件可能已就位却是空/零页。刻意不用 F_FULLFSYNC——
+    /// 本存储的写盘在调用线程(多为主线程)同步执行,全盘缓存刷写可达秒级;
+    /// fsync 已足以覆盖进程崩溃与绝大多数系统崩溃窗口。
+    static func fsyncFile(atPath path: String) throws {
+        let descriptor = open(path, O_RDONLY)
+        guard descriptor >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer { close(descriptor) }
+        guard fsync(descriptor) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
     }
 
@@ -245,6 +353,7 @@ struct JSONFileStore: Sendable {
 
         // 回滚是否未能全部完成。为 true 时必须保留暂存目录——里面装着唯一一份备份。
         var rollbackFailed = false
+        var manifestURL: URL?
         do {
             for document in documents {
                 let stagedURL = stagingDirectory.appendingPathComponent(document.fileName)
@@ -254,6 +363,16 @@ struct JSONFileStore: Sendable {
                 try FileManager.default.setAttributes(
                     [.posixPermissions: 0o600],
                     ofItemAtPath: stagedURL.path
+                )
+                try Self.fsyncFile(atPath: stagedURL.path)
+            }
+            if documents.count > 1 {
+                // 多文档的"原子提交"对进程崩溃并不成立:逐个 rename 之间崩溃会留下
+                // 部分新部分旧的混合态(如"设置指新根、记录指旧根")。rename 开始前先落
+                // 意图清单,启动清理据此把未完成提交回滚到全旧态(见 recover...)。
+                manifestURL = try writeTransactionManifest(
+                    stagingDirectory: stagingDirectory,
+                    documents: documents
                 )
             }
             var newlyCreatedURLs: [URL] = []
@@ -296,6 +415,11 @@ struct JSONFileStore: Sendable {
                 throw error
             }
         } catch {
+            // 本进程内的事务已中止(回滚已执行或无需执行),清单作废;
+            // 删除失败留到下次启动,恢复逻辑会按"暂存目录已不在/已前滚"安全收敛。
+            if let manifestURL {
+                try? FileManager.default.removeItem(at: manifestURL)
+            }
             // 回滚未完成时保留备份,让里面的唯一副本有机会被手工取回。
             if rollbackFailed {
                 // 备份必须移出 `.ccspace-json-write-` 前缀:留在暂存目录里,
@@ -332,7 +456,29 @@ struct JSONFileStore: Sendable {
             throw error
         }
 
+        // 提交完成,先撤清单再清暂存:两步之间崩溃留下的"已完成事务"残留清单
+        // 会在下次启动被前滚(仅清残留),不影响数据正确性。
+        if let manifestURL {
+            try? FileManager.default.removeItem(at: manifestURL)
+        }
         try? FileManager.default.removeItem(at: stagingDirectory)
+    }
+
+    private func writeTransactionManifest(
+        stagingDirectory: URL,
+        documents: [JSONFileStoreDocument]
+    ) throws -> URL {
+        let manifest = PendingTransactionManifest(
+            stagingDirectoryName: stagingDirectory.lastPathComponent,
+            fileNames: documents.map(\.fileName)
+        )
+        let data = try makeEncoder().encode(manifest)
+        let manifestURL = rootDirectory.appendingPathComponent(
+            "\(Self.transactionManifestPrefix)\(UUID().uuidString).json"
+        )
+        try data.write(to: manifestURL, options: .atomic)
+        try Self.fsyncFile(atPath: manifestURL.path)
+        return manifestURL
     }
 
     /// 逐元素容错地加载数组。

@@ -53,10 +53,39 @@ final class AICommitResponseParserTests: XCTestCase {
         }
     }
 
-    func test_parseInvalidJSONThrows() {
+    func test_parseInvalidJSONThrowsChineseInvalidResponseFormat() {
+        // 网关 200 + HTML/非 JSON 响应:原始英文 DecodingError 不得直出 UI。
         XCTAssertThrowsError(
             try AICommitResponseParser.parseCommitMessage(from: Data("not json".utf8))
-        )
+        ) { error in
+            guard case AICommitMessageError.invalidResponseFormat = error else {
+                return XCTFail("Expected invalidResponseFormat, got \(error)")
+            }
+            XCTAssertTrue(
+                error.localizedDescription.contains("无法解析"),
+                "实际文案：\(error.localizedDescription)"
+            )
+        }
+        XCTAssertThrowsError(
+            try AICommitResponseParser.parseCommitMessage(
+                from: Data("<html><body>502 Bad Gateway</body></html>".utf8)
+            )
+        ) { error in
+            guard case AICommitMessageError.invalidResponseFormat = error else {
+                return XCTFail("Expected invalidResponseFormat, got \(error)")
+            }
+        }
+    }
+
+    func test_parseJSONWithIncompatibleShapeThrowsInvalidResponseFormat() {
+        // 合法 JSON 但字段类型与 OpenAI 兼容结构不符(如 choices 为字符串)。
+        XCTAssertThrowsError(
+            try AICommitResponseParser.parseCommitMessage(from: Data(#"{"choices":"oops"}"#.utf8))
+        ) { error in
+            guard case AICommitMessageError.invalidResponseFormat = error else {
+                return XCTFail("Expected invalidResponseFormat, got \(error)")
+            }
+        }
     }
 
     func test_sanitizeHandlesCurlyQuotesAndLeadingBlankLines() {

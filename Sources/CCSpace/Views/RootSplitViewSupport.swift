@@ -80,6 +80,11 @@ final class WorkplaceDetailActionCoordinator: ObservableObject {
     @Published private(set) var branchRefreshSeed = 0
     private var runningTask: Task<Void, Never>?
 
+    /// 由宿主注入的"当前选中工作区"读取器。动作开始与写回反馈各取一次,
+    /// 两者不一致说明用户已切走——此时不能把 A 的"已同步"弹在 B 的详情页上
+    /// (系统通知与详情区是两条通道,通知照发)。
+    var selectedWorkplaceIDProvider: @MainActor () -> UUID? = { nil }
+
     func invalidateBranches() {
         branchRefreshSeed += 1
     }
@@ -87,6 +92,14 @@ final class WorkplaceDetailActionCoordinator: ObservableObject {
     func cancelRunningAction() {
         runningTask?.cancel()
         runningTask = nil
+    }
+
+    /// 反馈只写给"动作发起时那一个工作区"的详情页:用户已切到别的工作区时
+    /// 不把 A 的"已同步/失败"弹在 B 的页面上(系统通知是另一条通道,照发)。
+    private func publishFeedback(_ feedback: CCSpaceFeedback?, ownerWorkplaceID: UUID?) {
+        guard let feedback else { return }
+        guard selectedWorkplaceIDProvider() == ownerWorkplaceID else { return }
+        self.feedback = feedback
     }
 
     func run(
@@ -115,6 +128,7 @@ final class WorkplaceDetailActionCoordinator: ObservableObject {
 
         isRunningAction = true
         feedback = nil
+        let ownerWorkplaceID = selectedWorkplaceIDProvider()
 
         runningTask = Task { @MainActor [weak self] in
             defer {
@@ -135,15 +149,18 @@ final class WorkplaceDetailActionCoordinator: ObservableObject {
                 // 不弹成功反馈、不发"已完成"通知,避免误导。
                 guard Task.isCancelled == false else { return }
                 let feedback = successFeedback(result)
-                self?.feedback = feedback
+                self?.publishFeedback(feedback, ownerWorkplaceID: ownerWorkplaceID)
                 // 批量操作完成,无论前后台都发送系统通知。
                 NotificationService.shared.notify(actionName: actionName, feedback: feedback)
             } catch is CancellationError {
                 // 用户取消操作，不显示错误
             } catch {
-                self?.feedback = WorkplaceDetailFeedbackFactory.actionError(
-                    action: actionName,
-                    error: error
+                self?.publishFeedback(
+                    WorkplaceDetailFeedbackFactory.actionError(
+                        action: actionName,
+                        error: error
+                    ),
+                    ownerWorkplaceID: ownerWorkplaceID
                 )
                 NotificationService.shared.send(
                     title: "\(actionName)失败",

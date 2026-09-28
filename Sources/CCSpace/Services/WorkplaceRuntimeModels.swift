@@ -82,6 +82,8 @@ enum WorkplaceRuntimeServiceError: LocalizedError {
     case missingDefaultBranch
     case unreadableGitStatus
     case nothingToStash
+    /// 弹窗打开后 stash 栈被外部改动,按 index 操作会命中另一条。
+    case stashListChanged
     case cannotDeleteCurrentBranch
 
     var errorDescription: String? {
@@ -100,6 +102,8 @@ enum WorkplaceRuntimeServiceError: LocalizedError {
             return "无法读取仓库 Git 状态"
         case .nothingToStash:
             return "当前没有可 Stash 的改动"
+        case .stashListChanged:
+            return "Stash 列表已被外部改动（例如在 IDE 或终端里新暂存/删除了条目），位置编号已不对应原来那一条。请关闭弹窗后重新打开列表再操作"
         case .cannotDeleteCurrentBranch:
             return "当前所在分支不能删除，请先切换到其他分支"
         }
@@ -111,6 +115,8 @@ enum WorkplaceDeletionError: LocalizedError, Equatable {
     case directoryBusy(path: String)
     case permissionDenied(path: String)
     case removalFailed(path: String, reason: String)
+    /// 删除期间树内不断出现未罩住锁的新路径(并发编辑在工作区里加仓库)。
+    case treeChangingDuringRemoval(path: String, paths: [String])
 
     var errorDescription: String? {
         switch self {
@@ -136,6 +142,12 @@ enum WorkplaceDeletionError: LocalizedError, Equatable {
             目录：\(path)
             原因：\(reason)
             """
+        case .treeChangingDuringRemoval(let path, let paths):
+            return """
+            该工作区目录内正在并发新增仓库，删除已中止（继续删除会破坏这些仓库的写入）。请稍后重试。
+            目录：\(path)
+            相关路径：\(paths.prefix(3).joined(separator: "、"))
+            """
         }
     }
 
@@ -143,6 +155,11 @@ enum WorkplaceDeletionError: LocalizedError, Equatable {
         _ error: Error,
         path: String
     ) -> WorkplaceDeletionError {
+        // 已经是删除语义的错误(如锁内复检发现树在持续变化)原样透出,
+        // 不能再套成 removalFailed——那会把"已中止、请稍后重试"降级成一句模糊失败。
+        if let deletionError = error as? WorkplaceDeletionError {
+            return deletionError
+        }
         let relevantErrors = [error as NSError] + (error as NSError).underlyingErrors
 
         if relevantErrors.contains(where: { $0.domain == NSPOSIXErrorDomain && $0.code == EBUSY }) {

@@ -65,13 +65,13 @@ final class UpdateChecker: ObservableObject {
             let (data, response) = try await dataLoader(request)
             guard !Task.isCancelled else { return }
             guard let httpResponse = response as? HTTPURLResponse else {
-                latestVersion = nil
+                // 与下方 catch 同一口径:失败不清 latestVersion,避免徽标因一次
+                // 无效响应/限流 403 闪烁消失(见 catch 注释)。
                 lastErrorMessage = "检查更新失败：响应无效"
                 return
             }
 
             guard httpResponse.statusCode == 200 else {
-                latestVersion = nil
                 lastErrorMessage = "检查更新失败：HTTP \(httpResponse.statusCode)"
                 return
             }

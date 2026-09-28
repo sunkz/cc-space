@@ -8,11 +8,14 @@ private let settingsStoreLog = Logger(
 
 enum SettingsStoreError: LocalizedError, Equatable {
     case crossStoreRootMismatch
+    case keychainDeleteFailed(reason: String)
 
     var errorDescription: String? {
         switch self {
         case .crossStoreRootMismatch:
             return "内部状态异常：设置与工作区的数据目录不一致，已取消本次操作"
+        case .keychainDeleteFailed(let reason):
+            return "清除 AI 配置失败：无法删除钥匙串中的旧 API Key（\(reason)），配置已保留，请稍后重试"
         }
     }
 }
@@ -138,8 +141,11 @@ final class SettingsStore: ObservableObject {
     /// 主线程数秒。刻意保持同步语义——换根的跨文件原子提交与防抖重试都依赖
     /// "写盘与状态更新在同一主线程上顺序发生",改成后台队列会牵动失败回滚时序。
     private func persistSettings(_ newSettings: AppSettings) throws {
-        cancelDebouncedSettingsWrite()
+        // 取消防抖任务放在 save 成功之后(与 updateRootPath 同口径):写盘失败时
+        // pending 的防抖写照常到点执行并重试兜底,取消后不补排会造成内存与文件
+        // 背离直到下一次成功写盘。本函数 save 与赋值之间无 await,任务不会中途跑掉。
         try fileStore.save(newSettings, as: "settings.json")
+        cancelDebouncedSettingsWrite()
         settings = newSettings
         flushRetryCount = 0
     }
@@ -353,9 +359,12 @@ final class SettingsStore: ObservableObject {
                 apiKeyStoredInKeychain = true
                 keychainWriteSucceeded = true
             } catch {
-                // 清空路径不因删除失败置降级标志:此刻 aiSettings 已置 nil,
-                // settings.json 不会有任何明文密钥落盘,"明文降级"横幅语义是误导;仅留痕。
+                // 删除失败不能"悄悄清除":旧 Key 仍躺在钥匙串里,照常落盘
+                // aiSettings = nil 会让 storedInKeychain 与真实态背离,且用户随后
+                // 重新配置、Key 留空时会被开头的回读保护把旧 Key 无声复活。
+                // 中止本次清除并抛错(UI 经 errorDescription 可见提示),配置原样保留。
                 settingsStoreLog.error("event=keychain_delete_failed reason=\(error.localizedDescription, privacy: .public)")
+                throw SettingsStoreError.keychainDeleteFailed(reason: error.localizedDescription)
             }
             updatedSettings.aiSettings = nil
         }

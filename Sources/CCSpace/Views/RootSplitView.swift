@@ -222,6 +222,11 @@ struct RootSplitView: View {
             .onAppear {
                 // 镜像先于一切周期任务对齐(onChange 只在**变化**时触发,首帧必须补一次)。
                 mirroredScenePhase = scenePhase
+                // 反馈通道的选中项读取器:动作完成后据此判断用户是否已切走,
+                // 不把 A 工作区的"已同步/失败"弹在 B 的详情页上。
+                detailActionCoordinator.selectedWorkplaceIDProvider = { [appViewModel] in
+                    appViewModel.selectedWorkplaceID
+                }
                 // 路由持久化回调必须先于下面任何会改路由的动作(否则首个回调
                 // 找不到落点)。API Key 迁移不再挂这里:它随 SettingsStore 构造完成
                 // (StateObject 首次求值,早于 AISettingsSection 的 @State 首帧取值),
@@ -754,7 +759,7 @@ struct RootSplitView: View {
                     )
                 }
             },
-            onPopStash: { state, index, repositoryName in
+            onPopStash: { state, entry, repositoryName in
                 detailActionCoordinator.run(
                     actionName: "恢复 Stash",
                     refreshBranches: true,
@@ -766,13 +771,13 @@ struct RootSplitView: View {
                 ) {
                     let current = latestWorkplace(for: workplace.id) ?? workplace
                     try await workplaceRuntimeService.popStash(
-                        at: index,
+                        entry: entry,
                         for: state,
                         in: current
                     )
                 }
             },
-            onDropStash: { state, index, repositoryName in
+            onDropStash: { state, entry, repositoryName in
                 detailActionCoordinator.run(
                     actionName: "删除 Stash",
                     refreshBranches: true,
@@ -784,7 +789,7 @@ struct RootSplitView: View {
                 ) {
                     let current = latestWorkplace(for: workplace.id) ?? workplace
                     try await workplaceRuntimeService.dropStash(
-                        at: index,
+                        entry: entry,
                         for: state,
                         in: current
                     )

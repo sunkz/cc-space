@@ -37,8 +37,8 @@ struct WorkplaceDetailActions {
     let onDeleteRepository: (RepositorySyncState, String) -> Void
     let onTogglePinnedRepository: (RepositorySyncState) -> Void
     let onStashChanges: (RepositorySyncState, String) -> Void
-    let onPopStash: (RepositorySyncState, Int, String) -> Void
-    let onDropStash: (RepositorySyncState, Int, String) -> Void
+    let onPopStash: (RepositorySyncState, GitStashEntry, String) -> Void
+    let onDropStash: (RepositorySyncState, GitStashEntry, String) -> Void
     let onAbortInterruptedOperation: (RepositorySyncState, String) -> Void
     let onMergeDefaultBranchIntoCurrent: () -> Void
     let onSwitchAllRepositoriesToDefaultBranch: () -> Void
@@ -82,6 +82,9 @@ struct WorkplaceDetailView: View {
     /// syncStates 的本地目录镜像:@State 走外部存储,长驻闭包里读到的是当前值,
     /// 不是首帧快照(镜像内容由 WorkplaceDetailLocalDirectoryMirror 求值)。
     @State private var localDirectoryMirror = WorkplaceDetailLocalDirectoryMirror(syncStates: [])
+    /// 工作区目录探测结果:仅在没有任何同步态行时供"打开目录"可用性兜底。
+    /// 后台异步探测写回,不让 fileExists 留在 body 求值链上(网盘/外置盘会卡主线程)。
+    @State private var probedWorkplaceDirectoryExists = false
     /// presentationState.isActionLocked 的镜像:分支加载任务闭包读当前锁状态。
     @State private var mirroredIsActionLocked = false
     /// 行视图共用的仓库信息服务。struct View 无稳定生命周期:SwiftUI 每次父视图
@@ -110,7 +113,8 @@ struct WorkplaceDetailView: View {
         WorkplaceActionState(
             workplace: workplace,
             repositories: repositories,
-            syncStates: syncStates
+            syncStates: syncStates,
+            probedWorkplaceDirectoryExists: probedWorkplaceDirectoryExists
         )
     }
 
@@ -265,6 +269,15 @@ struct WorkplaceDetailView: View {
             // 先同步镜像再启停;此后长驻循环只读镜像,不碰冻结的首帧拷贝。
             mirroredScenePhase = scenePhase
             syncPeriodicStatusRefresh()
+        }
+        // 目录存在性后台探测:结果只写入 @State,body 求值链零磁盘 IO。
+        .task(id: workplace.path) {
+            let path = workplace.path
+            let exists = await Task.detached(priority: .utility) {
+                FileManager.default.fileExists(atPath: path)
+            }.value
+            guard Task.isCancelled == false else { return }
+            probedWorkplaceDirectoryExists = exists
         }
         // 应用重新激活(从其他 App 切回)立即刷新并恢复轮询;退到后台停表。
         .onChange(of: scenePhase) { _, newPhase in
@@ -547,24 +560,31 @@ struct WorkplaceDetailView: View {
 
     /// @MainActor:await 分支加载回来后直写 @State(branchSnapshots),
     /// 需在主执行器落笔;快照加载本体仍在后台执行。
+    /// 返回值表示本轮是否真正完成了加载:被动作锁/非活跃跳过的轮次不得据此
+    /// 展示"已刷新"提示。
     @MainActor
-    private func loadBranches() async {
+    private func loadBranches() async -> Bool {
         // 读 @State 镜像而非视图拷贝上的存储属性:本方法由分支刷新任务的
         // 长驻闭包调用,拷贝里的 syncStates/scenePhase/isActionLocked 是首帧冻结值。
         let localSyncStates = localDirectoryMirror.localDirectoryStates
         guard localSyncStates.isEmpty == false else {
             branchSnapshots = [:]
-            return
+            return true
         }
-        guard mirroredScenePhase == .active else { return }
-        guard mirroredIsActionLocked == false else { return }
+        guard mirroredScenePhase == .active else { return false }
+        guard mirroredIsActionLocked == false else { return false }
 
         let snapshots = await WorkplaceBranchLoader.loadBranchSnapshots(
             for: localSyncStates,
             gitService: gitService
         )
-        guard Task.isCancelled == false else { return }
-        branchSnapshots = snapshots
+        guard Task.isCancelled == false else { return false }
+        branchSnapshots = WorkplaceBranchSnapshotMerge.merge(
+            attemptedKeys: localSyncStates.map { RepositoryBranchCacheKey(state: $0) },
+            fresh: snapshots,
+            previous: branchSnapshots
+        )
+        return true
     }
 
     private func scheduleBranchSnapshotRefresh() {
@@ -574,14 +594,19 @@ struct WorkplaceDetailView: View {
         }
 
         branchRefreshTask = Task { @MainActor in
+            var didLoadSnapshots = false
             repeat {
                 hasQueuedBranchRefresh = false
-                await loadBranches()
+                didLoadSnapshots = await loadBranches() || didLoadSnapshots
             } while hasQueuedBranchRefresh && Task.isCancelled == false
 
-            // 手动刷新的反馈在刷新真正完成后展示,避免"已刷新"先于刷新发生。
-            if let pending = pendingRefreshFeedback, Task.isCancelled == false {
-                feedback = pending
+            // 手动刷新的反馈在刷新真正完成后展示,避免"已刷新"先于刷新发生;
+            // 本轮全部被动作锁/非活跃跳过时不展示,防止误报。任务被取消时保留
+            // 待展示反馈,交给下一次排队加载(如锁释放兜底补刷)消费。
+            if Task.isCancelled == false, let pending = pendingRefreshFeedback {
+                if didLoadSnapshots {
+                    feedback = pending
+                }
                 pendingRefreshFeedback = nil
             }
             branchRefreshTask = nil
@@ -712,11 +737,11 @@ struct WorkplaceDetailView: View {
             onStash: {
                 actions.onStashChanges(state, repositoryName)
             },
-            onPopStash: { index in
-                actions.onPopStash(state, index, repositoryName)
+            onPopStash: { entry in
+                actions.onPopStash(state, entry, repositoryName)
             },
-            onDropStash: { index in
-                actions.onDropStash(state, index, repositoryName)
+            onDropStash: { entry in
+                actions.onDropStash(state, entry, repositoryName)
             },
             onAbortInterruptedOperation: {
                 actions.onAbortInterruptedOperation(state, repositoryName)
@@ -749,6 +774,24 @@ struct WorkplaceDetailView: View {
         }
         actions.onRefreshStatuses()
         manualRefreshSeed += 1
+    }
+}
+
+/// 分支快照按 key 合并:本轮取数失败(快照缺失)的 key 沿用上一轮结果,
+/// 避免 30s 轮询中偶发 git 失败把该行分支信息整体抹掉;未参与本轮取数的 key
+/// (目录消失/仓库移除)不保留,快照字典不随历史无限膨胀。
+enum WorkplaceBranchSnapshotMerge {
+    static func merge(
+        attemptedKeys: [RepositoryBranchCacheKey],
+        fresh: [RepositoryBranchCacheKey: RepositoryBranchSnapshot],
+        previous: [RepositoryBranchCacheKey: RepositoryBranchSnapshot]
+    ) -> [RepositoryBranchCacheKey: RepositoryBranchSnapshot] {
+        var merged: [RepositoryBranchCacheKey: RepositoryBranchSnapshot] = [:]
+        merged.reserveCapacity(attemptedKeys.count)
+        for key in attemptedKeys {
+            merged[key] = fresh[key] ?? previous[key]
+        }
+        return merged
     }
 }
 

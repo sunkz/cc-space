@@ -79,7 +79,13 @@ private actor WorkplaceRuntimeGitServiceSpy: GitServicing {
             throw error
         }
     }
-    func stashList(in directory: String) async -> [GitStashEntry] { [] }
+    var stashListsByDirectory: [String: [GitStashEntry]] = [:]
+    func stashList(in directory: String) async -> [GitStashEntry] {
+        stashListsByDirectory[directory] ?? []
+    }
+    func setStashList(_ entries: [GitStashEntry], for directory: String) {
+        stashListsByDirectory[directory] = entries
+    }
     func popStash(at index: Int, in directory: String) async throws {
         popStashCalls.append((index: index, directory: directory))
         if let error = popStashErrorsByDirectory[directory] {
@@ -779,6 +785,52 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         XCTAssertEqual(pushedDirectories, [localPath])
     }
 
+    /// git 进程执行到一半被取消**不是业务失败**:此前批量 push 的内层 catch 不区分
+    /// CancellationError,会把一次正常取消持久化成红色"操作已取消",与 onLockCancelled
+    /// 及 pull 路径"取消不落假失败"的既有口径矛盾。
+    func test_pushRepositoriesTreatsMidCommandCancellationAsCancelledNotFailed() async throws {
+        let stores = try makeServiceStores()
+        let repositoryStore = stores.repositoryStore
+        let workplaceStore = stores.workplaceStore
+        let workspaceRoot = stores.workspaceRoot
+
+        try repositoryStore.addRepository(gitURL: "git@github.com:org/api.git")
+        let repository = try XCTUnwrap(repositoryStore.repositories.first)
+        let workplace = try workplaceStore.createWorkplace(
+            name: "blog",
+            rootPath: workspaceRoot.path,
+            selectedRepositories: [repository]
+        )
+
+        let localPath = URL(fileURLWithPath: workplace.path).appendingPathComponent(repository.repoName).path
+        try FileManager.default.createDirectory(atPath: localPath, withIntermediateDirectories: true)
+
+        var state = try XCTUnwrap(syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore))
+        state.status = .success
+        state.hasLocalDirectory = true
+        state.localPath = localPath
+        state.lastError = nil
+        workplaceStore.updateSyncState(state)
+
+        let gitService = WorkplaceRuntimeGitServiceSpy()
+        await gitService.setBranchStatus(makeBranchStatus(hasUnpushedCommits: true), for: localPath)
+        await gitService.setPushError(CancellationError(), for: localPath)
+        let service = WorkplaceRuntimeService(
+            workplaceStore: workplaceStore,
+            syncCoordinator: SyncCoordinator(gitService: gitService),
+            workplaceRootPath: workspaceRoot.path
+        )
+
+        let result = try await service.pushRepositories(in: workplace)
+
+        XCTAssertEqual(result.failedCount, 0)
+        XCTAssertEqual(result.cancelledCount, 1)
+        let persistedState = try XCTUnwrap(
+            syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore)
+        )
+        XCTAssertNotEqual(persistedState.status, .failed, "取消不得落成失败态")
+    }
+
     func test_pushRepositoriesLimitsConcurrentPushesToFour() async throws {
         let stores = try makeServiceStores()
         let repositoryStore = stores.repositoryStore
@@ -1049,7 +1101,12 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         let persistedState = try XCTUnwrap(
             syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore)
         )
-        XCTAssertEqual(persistedState, originalState)
+        // 回滚不再是"原样恢复旧行":目录到底在不在按实探测(此前半删失败会把"目录健在"
+        // 的旧值原样写回,UI 呈假健康)。本夹具里 api 目录确实存在,故存在标志被纠偏为
+        // true;status/lastError 仍按原值恢复。
+        var expectedState = originalState
+        expectedState.hasLocalDirectory = true
+        XCTAssertEqual(persistedState, expectedState)
         XCTAssertTrue(workplaceStore.workplaces.contains { $0.id == workplace.id })
         XCTAssertTrue(FileManager.default.fileExists(atPath: workplace.path))
     }
@@ -2363,10 +2420,42 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         XCTAssertEqual(persistedState.status, .failed)
     }
 
+    /// 弹窗里的 index 来自打开那一刻的快照:期间用户在 IDE/终端 push/drop 过 stash,
+    /// 同一位置就是另一条了。drop 命中错条不可恢复,必须按身份对账拒操作。
+    func test_dropStashRefusesWhenStackChangedUnderneath() async throws {
+        let (_, workplace, state, gitService, service) = try await makeRuntimeFixture()
+        let displayed = GitStashEntry(
+            index: 0,
+            message: "WIP on main: 用户看到的那条",
+            date: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        let nowOnStack = GitStashEntry(
+            index: 0,
+            message: "WIP on dev: 外部新暂存的一条",
+            date: Date(timeIntervalSince1970: 1_800_000_000)
+        )
+        await gitService.setStashList([nowOnStack], for: state.localPath)
+
+        do {
+            try await service.dropStash(entry: displayed, for: state, in: workplace)
+            XCTFail("栈内容已被外部改动，应按身份对账拒绝")
+        } catch {
+            XCTAssertEqual(
+                error.localizedDescription,
+                WorkplaceRuntimeServiceError.stashListChanged.localizedDescription
+            )
+        }
+
+        let droppedStashes = await gitService.droppedStashes()
+        XCTAssertTrue(droppedStashes.isEmpty, "对账失败时绝不能把 drop 打到另一条 stash 上")
+    }
+
     func test_popStashRestoresEntryAndPersistsState() async throws {
         let (workplaceStore, workplace, state, gitService, service) = try await makeRuntimeFixture()
+        let entry = GitStashEntry(index: 1, message: "WIP on main: blog", date: Date(timeIntervalSince1970: 1_700_000_000))
+        await gitService.setStashList([entry], for: state.localPath)
 
-        try await service.popStash(at: 1, for: state, in: workplace)
+        try await service.popStash(entry: entry, for: state, in: workplace)
 
         let poppedStashes = await gitService.poppedStashes()
         XCTAssertEqual(poppedStashes.count, 1)
@@ -2386,9 +2475,11 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
             WorkplaceRuntimeStubError(message: "stash pop conflict"),
             for: state.localPath
         )
+        let entry = GitStashEntry(index: 0, message: "WIP on main: blog", date: Date(timeIntervalSince1970: 1_700_000_000))
+        await gitService.setStashList([entry], for: state.localPath)
 
         await XCTAssertThrowsErrorAsync(WorkplaceRuntimeStubError.self) {
-            try await service.popStash(at: 0, for: state, in: workplace)
+            try await service.popStash(entry: entry, for: state, in: workplace)
         }
 
         let persistedState = try XCTUnwrap(
@@ -2400,8 +2491,10 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
     func test_dropStashRemovesEntry() async throws {
         let (workplaceStore, workplace, state, gitService, service) = try await makeRuntimeFixture()
+        let entry = GitStashEntry(index: 2, message: "WIP on main: blog", date: Date(timeIntervalSince1970: 1_700_000_000))
+        await gitService.setStashList([entry], for: state.localPath)
 
-        try await service.dropStash(at: 2, for: state, in: workplace)
+        try await service.dropStash(entry: entry, for: state, in: workplace)
 
         let droppedStashes = await gitService.droppedStashes()
         XCTAssertEqual(droppedStashes.count, 1)

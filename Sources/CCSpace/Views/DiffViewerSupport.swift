@@ -21,9 +21,26 @@ struct DiffPatchLine: Equatable {
 
 /// 把 unified diff 的 patch 文本解析为可渲染的行模型。
 ///
-/// 跳过首个 hunk 之前的 `diff --git` / `index` / `---` / `+++` 等元数据行,
+/// 跳过首个 hunk 之前的 `diff --git` / `index` / 模式与重命名声明等元数据行,
 /// 根据 `@@` hunk 头维护两侧行号计数。
 enum DiffPatchLineParser {
+    /// 只可能出现在首个 `@@` 之前的 diff 头行前缀(git 的元数据区)。
+    /// 漏掉一类(如 `new file mode`、`similarity index`)会让这行落入上下文分支,
+    /// 带着 0/0 行号被渲染成一行内容。
+    static let headerMetadataPrefixes: [String] = [
+        "diff --git ",
+        "index ",
+        "--- ",
+        "+++ ",
+        "old mode ",
+        "new mode ",
+        "new file mode ",
+        "deleted file mode ",
+        "similarity index ",
+        "rename from ",
+        "rename to ",
+    ]
+
     private static let hunkPattern: NSRegularExpression? = try? NSRegularExpression(
         pattern: #"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$"#
     )
@@ -40,17 +57,16 @@ enum DiffPatchLineParser {
         var lines: [DiffPatchLine] = []
         var oldLineNumber = 0
         var newLineNumber = 0
-        // 是否已进入首个 hunk。元数据行(`diff --git`/`index`/`---`/`+++`)只可能出现在
-        // 首个 `@@` 之前;进入 hunk 后,删除行内容以 `-- ` 开头(如邮件签名分隔符)时
-        // patch 行恰为 `--- xxx`、新增行内容以 `++ ` 开头时为 `+++ xxx`——
-        // 若仍按前缀过滤,会把内容行整行丢弃并使后续行号漂移。
+        // 是否已进入首个 hunk。元数据行只可能出现在首个 `@@` 之前;进入 hunk 后,
+        // 删除行内容以 `- ` 开头(如邮件签名分隔符)时 patch 行恰为 `--- xxx`、
+        // 新增行内容以 `+ ` 开头时为 `+++ xxx`——若仍按前缀过滤,
+        // 会把内容行整行丢弃并使后续行号漂移。
         var hasEnteredHunk = false
 
         for raw in rawLines {
             if hasEnteredHunk == false {
                 // 元数据行先于 +/- 前缀判断,避免 `--- a/...` 被当作删除行。
-                if raw.hasPrefix("diff --git ") || raw.hasPrefix("index ") ||
-                    raw.hasPrefix("--- ") || raw.hasPrefix("+++ ") {
+                if Self.headerMetadataPrefixes.contains(where: { raw.hasPrefix($0) }) {
                     continue
                 }
             }
@@ -192,7 +208,9 @@ enum DiffFullFileExpander {
                 case .hunkHeader, .note: break
                 }
             }
-            nextNew = span.newStart + newCount
+            // 新侧被清空的文件 git 会给 `@@ -1,3 +0,0 @@`,游标归零后补尾行会去读
+            // fileLines[-1] 直接越界崩溃,故游标最低停在第 1 行。
+            nextNew = max(span.newStart + newCount, 1)
             nextOld = span.oldStart + oldCount
         }
         appendGapLines(untilNew: fileLines.count + 1)
@@ -302,6 +320,7 @@ enum DiffSplitRowBuilder {
         var rows: [DiffSplitRow] = []
         var pendingRemoved: [DiffPatchLine] = []
         var pendingAdded: [DiffPatchLine] = []
+        var pendingNotes: [DiffPatchLine] = []
 
         func flush() {
             let pairCount = max(pendingRemoved.count, pendingAdded.count)
@@ -311,8 +330,13 @@ enum DiffSplitRowBuilder {
                     right: index < pendingAdded.count ? pendingAdded[index] : nil
                 )))
             }
+            // 说明行附着在变更块之后展示,读起来才是"这行改了、且两侧都没有尾换行"。
+            for note in pendingNotes {
+                rows.append(DiffSplitRow(content: .note(note)))
+            }
             pendingRemoved.removeAll()
             pendingAdded.removeAll()
+            pendingNotes.removeAll()
         }
 
         for line in lines {
@@ -328,8 +352,14 @@ enum DiffSplitRowBuilder {
                 flush()
                 rows.append(DiffSplitRow(content: .hunkHeader(line)))
             case .note:
-                flush()
-                rows.append(DiffSplitRow(content: .note(line)))
+                // git 对"无尾换行文件改末行"的输出是 `-旧` / `\ No newline` / `+新` /
+                // `\ No newline` 交替,说明行夹在两侧变更之间:此时 flush 会把本应
+                // 配对的一行拆成左右各半空行,所以先攒着,由后续变更行继续配对。
+                if pendingRemoved.isEmpty, pendingAdded.isEmpty {
+                    rows.append(DiffSplitRow(content: .note(line)))
+                } else {
+                    pendingNotes.append(line)
+                }
             }
         }
         flush()
@@ -369,6 +399,41 @@ enum DiffWindowEmptyStateResolver {
         case .compare:
             return .noChanges
         }
+    }
+}
+
+/// Diff 列表折叠/展开状态的键控。
+///
+/// 不能用 `GitDiffEntry.id`:它掺了 patch 的 hashValue,聚焦刷新后内容一变旧键即作废,
+/// 用户特意折叠的文件会全部重新展开。这里按「文件路径 + 同路径出现序号」生成稳定键,
+/// 序号用于区分重命名时同批出现的同路径条目(它们的路径可能相同)。
+enum DiffExpansionKeys {
+    static func make(for diffs: [GitDiffEntry]) -> [String] {
+        var occurrences: [String: Int] = [:]
+        return diffs.map { diff in
+            let seen = occurrences[diff.filePath, default: 0]
+            occurrences[diff.filePath] = seen + 1
+            return seen == 0 ? diff.filePath : "\(diff.filePath)#\(seen)"
+        }
+    }
+}
+
+/// 工作区 diff 中未跟踪文件的展示上限与提示。
+///
+/// `GitService.diffWorkingDirectory` 只为前 `limit` 个未跟踪文件生成 patch,而窗口底部
+/// 的提交走 `git add --all`(全部改动一起提交):展示范围并不等于提交范围,
+/// 不说明的话用户会以为列表就是将要提交的内容。
+enum DiffWindowUntrackedDisplay {
+    /// 取自 Service 的同一常量:这里抄一份数值的话,Service 改了上限,
+    /// 界面上的"最多展示前 N 个"就成了谎报。
+    static let limit = GitService.untrackedDisplayLimit
+
+    /// 未跟踪文件都以"新增"条目出现,新增数触顶即视为可能被截断;
+    /// Service 未暴露被丢弃的数量,因此只给"达到上限"口径、不报精确个数。
+    static func truncationNotice(for entries: [GitDiffEntry]) -> String? {
+        let addedCount = entries.lazy.filter { $0.changeType == .added }.count
+        guard addedCount >= limit else { return nil }
+        return "未跟踪文件较多，列表最多展示前 \(limit) 个新增文件；提交仍会包含全部改动"
     }
 }
 

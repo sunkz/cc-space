@@ -314,6 +314,36 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(store.settings.aiSettings?.apiKey, "sk-secret-123", "回读成功时按真 Key 保存并回填内存")
     }
 
+    /// 清除配置时钥匙串删除失败必须中止并可见报错:照常落盘 nil 会让
+    /// apiKeyStoredInKeychain 与真实态背离,且旧 Key 仍躺在钥匙串里——用户随后
+    /// 重新配置且 Key 留空时,回读保护会把旧 Key 无声复活。
+    func test_clearAISettingsThrowsAndKeepsStateWhenKeychainDeleteFails() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fileStore = JSONFileStore(rootDirectory: root)
+        let keychain = DeleteFailingAPIKeyStore()
+        let store = SettingsStore(fileStore: fileStore, keychain: keychain)
+        try store.updateAISettings(
+            .init(baseURL: "https://api.example.com/v1", modelName: "gpt-test", apiKey: "sk-x")
+        )
+
+        XCTAssertThrowsError(try store.updateAISettings(nil)) { error in
+            guard case SettingsStoreError.keychainDeleteFailed = error else {
+                return XCTFail("应为 keychainDeleteFailed,实际:\(error)")
+            }
+            XCTAssertTrue(
+                error.localizedDescription.contains("清除 AI 配置失败"),
+                "面向用户文案须为简体中文: \(error.localizedDescription)"
+            )
+        }
+
+        // 状态保持真实:配置仍在、Key 仍在钥匙串——不出现"文件已清除但钥匙串残留"的谎报态。
+        XCTAssertEqual(keychain.storedKey, "sk-x")
+        XCTAssertEqual(store.settings.aiSettings?.apiKey, "sk-x")
+        XCTAssertTrue(store.apiKeyStoredInKeychain)
+        let reloaded = SettingsStore(fileStore: fileStore, keychain: DeleteFailingAPIKeyStore())
+        XCTAssertNotNil(reloaded.settings.aiSettings, "清除失败不得落盘 nil 配置")
+    }
+
     func test_decodingSettingsWithoutAISettingsYieldsNil() throws {
         let legacyJSON = #"{"workplaceRootPath":"/Users/demo/Workplaces"}"#
 
@@ -463,6 +493,45 @@ final class SettingsStoreTests: XCTestCase {
         )
     }
 
+    /// persistSettings(立即写盘)失败不得取消 pending 的防抖写:与 updateRootPath
+    /// 同口径——旧实现在 save 之前 cancel,写盘失败时防抖写被取消且无人重排,
+    /// 内存与 settings.json 背离直到下一次成功写盘。
+    /// 判别点:失败路径下防抖任务仍活着,到点 flush 失败进入重试,flushRetryCount 变正。
+    func test_persistSettingsFailureKeepsPendingDebouncedWrite() async throws {
+        try XCTSkipIf(geteuid() == 0, "root 身份下只读目录不生效")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let store = SettingsStore(
+            fileStore: JSONFileStore(rootDirectory: root),
+            flushRetryBaseSeconds: 0
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o500],
+            ofItemAtPath: root.path
+        )
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: root.path
+            )
+        }
+
+        store.updateLastSelectedRoute("workplaces") // 500ms 防抖后才落盘
+        XCTAssertThrowsError(try store.updateAppearanceMode(.dark), "前置:立即写盘失败")
+        XCTAssertEqual(store.flushRetryCount, 0, "前置:尚未有任何 flush")
+
+        let deadline = Date().timeIntervalSince1970 + 2
+        while Date().timeIntervalSince1970 < deadline, store.flushRetryCount == 0 {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+
+        XCTAssertGreaterThan(
+            store.flushRetryCount,
+            0,
+            "立即写盘失败后 pending 防抖写必须照常执行(不得取消后不补排)"
+        )
+    }
+
     func test_existingSettingsWithLegacyEditorCommandPreservesRootPath() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let fileStore = JSONFileStore(rootDirectory: root)
@@ -583,6 +652,30 @@ struct FailingAPIKeyStore: APIKeySecretStore {
     func readAPIKey() -> String? { nil }
     func storeAPIKey(_ apiKey: String) throws {
         throw APIKeySecretStoreError.unavailable(reason: "test")
+    }
+}
+
+/// 存储正常、仅"空串=删除"失败的钥匙串替身:复现清除配置时 SecItemDelete 出错。
+final class DeleteFailingAPIKeyStore: APIKeySecretStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _storedKey: String?
+
+    var storedKey: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _storedKey
+    }
+
+    func readAPIKey() -> String? { storedKey }
+
+    func storeAPIKey(_ apiKey: String) throws {
+        let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            throw APIKeySecretStoreError.unavailable(reason: "删除旧条目失败(status -1)")
+        }
+        lock.lock()
+        _storedKey = trimmed
+        lock.unlock()
     }
 }
 

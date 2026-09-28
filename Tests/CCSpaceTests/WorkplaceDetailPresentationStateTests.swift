@@ -78,10 +78,12 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
             path: workplacePath,
             selectedRepositoryIDs: []
         )
+        // 空仓库列表的工作区:目录存在性由视图侧后台探测注入,init 不再同步 stat。
         let actionState = WorkplaceActionState(
             workplace: workplace,
             repositories: [],
-            syncStates: []
+            syncStates: [],
+            probedWorkplaceDirectoryExists: true
         )
 
         let presentationState = WorkplaceDetailPresentationState(

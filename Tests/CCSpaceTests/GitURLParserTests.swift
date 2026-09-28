@@ -2,6 +2,32 @@ import XCTest
 @testable import CCSpace
 
 final class GitURLParserTests: XCTestCase {
+    /// 明文凭据必须被拒:检测走词法而非 URLComponents——
+    /// 含空格等非法字符的畸形 URL 会让解析返回 nil,依赖解析的防线整段被跳过。
+    func test_validateRemoteURLRejectsPlainCredentialsIncludingMalformedURL() {
+        for url in [
+            "https://user:pass@git.example.com/o/r.git",
+            "https://user:pa ss@git.example.com/o/r.git",
+            "http://u:p@h/o/r.git",
+        ] {
+            XCTAssertThrowsError(try GitURLParser.validateRemoteURL(url), "应拒绝带明文密码的地址：\(url)")
+            XCTAssertTrue(GitURLParser.containsPlainCredentials(url))
+        }
+    }
+
+    /// token 即用户名(无密码段)与无凭据地址按既有口径放行;路径里的 @ 不算凭据。
+    func test_validateRemoteURLAllowsTokenOnlyAndCredentialFreeURLs() throws {
+        for url in [
+            "https://ghp_AbCd1234@github.com/o/r.git",
+            "https://github.com/o/r.git",
+            "https://example.com/a@b/c.txt",
+            "git@example.com:o/r.git",
+        ] {
+            XCTAssertFalse(GitURLParser.containsPlainCredentials(url), "不应判为明文凭据：\(url)")
+            XCTAssertNoThrow(try GitURLParser.validateRemoteURL(url))
+        }
+    }
+
     func test_extractsRepositoryNameFromSSHURL() throws {
         XCTAssertEqual(
             try GitURLParser.repositoryName(from: "git@github.com:org/mobile-app.git"),

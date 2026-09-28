@@ -181,4 +181,196 @@ final class JSONFileStoreTests: XCTestCase {
 
         XCTAssertTrue(fileManager.fileExists(atPath: freshStaging.path))
     }
+
+    func test_cleanupStaleStagingDirectoriesKeepsStagingWhenBackupRescueFails() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let staleStaging = root.appendingPathComponent(".ccspace-json-write-\(UUID().uuidString)", isDirectory: true)
+        let backupDirectory = staleStaging.appendingPathComponent("backup", isDirectory: true)
+        try fileManager.createDirectory(at: backupDirectory, withIntermediateDirectories: true)
+        let preciousFile = backupDirectory.appendingPathComponent("settings.json")
+        try Data("precious".utf8).write(to: preciousFile)
+        try fileManager.setAttributes(
+            [.modificationDate: Date.distantPast],
+            ofItemAtPath: staleStaging.path
+        )
+
+        // move 失败(此处注入权限类异常)时绝不能删暂存目录:
+        // 恰在移动失败——即"被覆写前唯一副本"最需要保全——的时刻把它销毁违背清理意图。
+        JSONFileStore.cleanupStaleStagingDirectories(
+            in: root,
+            fileManager: MoveFailingFileManager()
+        )
+
+        XCTAssertTrue(fileManager.fileExists(atPath: staleStaging.path))
+        XCTAssertEqual(try Data(contentsOf: preciousFile), Data("precious".utf8))
+    }
+
+    // MARK: - 多文档事务的崩溃收敛(意图清单)
+
+    func test_saveMultiDocumentLeavesNoTransactionManifestOrStaging() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = JSONFileStore(rootDirectory: root)
+
+        let doc1 = try store.document(for: AppSettings(workplaceRootPath: "/a"), as: "settings.json")
+        let doc2 = try store.document(for: ["x"], as: "workplaces.json")
+        try store.save([doc1, doc2])
+
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        XCTAssertFalse(leftovers.contains { $0.hasPrefix(".ccspace-json-txn-") })
+        XCTAssertFalse(leftovers.contains { $0.hasPrefix(".ccspace-json-write-") })
+    }
+
+    func test_startupRecoveryRollsBackInterruptedMultiDocumentCommit() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+
+        // 模拟"两次 rename 之间崩溃":a.json 已提交(目标为新值,暂存里有旧值备份),
+        // b.json 未提交(目标仍是旧值,暂存里是新值待改名)。
+        try Data("NEW-A".utf8).write(to: root.appendingPathComponent("a.json"))
+        try Data("OLD-B".utf8).write(to: root.appendingPathComponent("b.json"))
+        let stagingName = ".ccspace-json-write-\(UUID().uuidString)"
+        let staging = root.appendingPathComponent(stagingName, isDirectory: true)
+        let backup = staging.appendingPathComponent("backup", isDirectory: true)
+        try fileManager.createDirectory(at: backup, withIntermediateDirectories: true)
+        try Data("OLD-A".utf8).write(to: backup.appendingPathComponent("a.json"))
+        try Data("NEW-B".utf8).write(to: staging.appendingPathComponent("b.json"))
+        try writeManifest(stagingName: stagingName, fileNames: ["a.json", "b.json"], in: root)
+
+        JSONFileStore.cleanupStaleStagingDirectories(in: root, olderThan: 0)
+
+        // 回滚到"全旧"自洽态:不能出现设置指新值、记录指旧值的混合态。
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("a.json"), encoding: .utf8), "OLD-A")
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("b.json"), encoding: .utf8), "OLD-B")
+        XCTAssertFalse(fileManager.fileExists(atPath: staging.path))
+        let manifests = try fileManager.contentsOfDirectory(atPath: root.path)
+            .filter { $0.hasPrefix(".ccspace-json-txn-") }
+        XCTAssertTrue(manifests.isEmpty)
+    }
+
+    func test_startupRecoveryRollsBackNewlyCreatedDocumentsOfInterruptedCommit() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+
+        // 崩溃点:a.json 已改名提交(有备份),sync-states.json 是本事务新建并搬入的
+        // (无备份),c.json 尚未处理(暂存文件仍在)。清单里只要还有未处理文档就是
+        // "未完成提交",已搬入的新文件必须被撤销删除。
+        try Data("NEW-A".utf8).write(to: root.appendingPathComponent("a.json"))
+        try Data("OLD-C".utf8).write(to: root.appendingPathComponent("c.json"))
+        try Data("NEW-STATE".utf8).write(to: root.appendingPathComponent("sync-states.json"))
+        let stagingName = ".ccspace-json-write-\(UUID().uuidString)"
+        let staging = root.appendingPathComponent(stagingName, isDirectory: true)
+        let backup = staging.appendingPathComponent("backup", isDirectory: true)
+        try fileManager.createDirectory(at: backup, withIntermediateDirectories: true)
+        try Data("OLD-A".utf8).write(to: backup.appendingPathComponent("a.json"))
+        try Data("NEW-C".utf8).write(to: staging.appendingPathComponent("c.json"))
+        try writeManifest(
+            stagingName: stagingName,
+            fileNames: ["a.json", "sync-states.json", "c.json"],
+            in: root
+        )
+
+        JSONFileStore.cleanupStaleStagingDirectories(in: root, olderThan: 0)
+
+        XCTAssertFalse(fileManager.fileExists(atPath: root.appendingPathComponent("sync-states.json").path))
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("a.json"), encoding: .utf8), "OLD-A")
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("c.json"), encoding: .utf8), "OLD-C")
+    }
+
+    func test_startupRecoveryForwardRollsCompletedCommitWithStaleManifest() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+
+        // 全部提交完成,只是"删清单 + 删暂存"之间崩溃:暂存文件全部消失、备份还在。
+        // 此刻清单残留必须判为"已提交"→ 前滚(仅清残留),不得把新数据回滚掉。
+        try Data("NEW-A".utf8).write(to: root.appendingPathComponent("a.json"))
+        try Data("NEW-B".utf8).write(to: root.appendingPathComponent("b.json"))
+        let stagingName = ".ccspace-json-write-\(UUID().uuidString)"
+        let staging = root.appendingPathComponent(stagingName, isDirectory: true)
+        let backup = staging.appendingPathComponent("backup", isDirectory: true)
+        try fileManager.createDirectory(at: backup, withIntermediateDirectories: true)
+        try Data("OLD-A".utf8).write(to: backup.appendingPathComponent("a.json"))
+        try Data("OLD-B".utf8).write(to: backup.appendingPathComponent("b.json"))
+        try writeManifest(stagingName: stagingName, fileNames: ["a.json", "b.json"], in: root)
+
+        JSONFileStore.cleanupStaleStagingDirectories(in: root, olderThan: 0)
+
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("a.json"), encoding: .utf8), "NEW-A")
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("b.json"), encoding: .utf8), "NEW-B")
+        XCTAssertFalse(fileManager.fileExists(atPath: staging.path))
+    }
+
+    func test_startupRecoveryLeavesFreshManifestAlone() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+
+        try Data("OLD-A".utf8).write(to: root.appendingPathComponent("a.json"))
+        let stagingName = ".ccspace-json-write-\(UUID().uuidString)"
+        let staging = root.appendingPathComponent(stagingName, isDirectory: true)
+        try fileManager.createDirectory(at: staging, withIntermediateDirectories: true)
+        try Data("NEW-A".utf8).write(to: staging.appendingPathComponent("a.json"))
+        let manifestURL = try writeManifest(
+            stagingName: stagingName,
+            fileNames: ["a.json"],
+            in: root,
+            modificationDate: Date()
+        )
+        // 新清单可能是并发实例的在途写入(默认阈值 10 分钟),不得回滚。
+
+        JSONFileStore.cleanupStaleStagingDirectories(in: root)
+
+        XCTAssertTrue(fileManager.fileExists(atPath: manifestURL.path))
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("a.json"), encoding: .utf8), "OLD-A")
+    }
+
+    @discardableResult
+    private func writeManifest(
+        stagingName: String,
+        fileNames: [String],
+        in root: URL,
+        modificationDate: Date = .distantPast
+    ) throws -> URL {
+        struct TestManifest: Encodable {
+            let stagingDirectoryName: String
+            let fileNames: [String]
+        }
+        let data = try JSONEncoder().encode(
+            TestManifest(stagingDirectoryName: stagingName, fileNames: fileNames)
+        )
+        let url = root.appendingPathComponent(".ccspace-json-txn-\(UUID().uuidString).json")
+        try data.write(to: url)
+        try FileManager.default.setAttributes(
+            [.modificationDate: modificationDate],
+            ofItemAtPath: url.path
+        )
+        return url
+    }
+
+    // MARK: - rename 前 fsync
+
+    func test_fsyncFileSucceedsOnExistingFileAndThrowsOnMissing() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let fileURL = root.appendingPathComponent("data.json")
+        try Data("{}".utf8).write(to: fileURL)
+
+        try JSONFileStore.fsyncFile(atPath: fileURL.path)
+
+        XCTAssertThrowsError(
+            try JSONFileStore.fsyncFile(atPath: root.appendingPathComponent("missing.json").path)
+        )
+    }
+}
+
+/// 注入 move 失败的 FileManager 替身:验证备份逃生失败时暂存目录被整体保留。
+private final class MoveFailingFileManager: FileManager {
+    override func moveItem(at srcURL: URL, to dstURL: URL) throws {
+        throw POSIXError(.EACCES)
+    }
 }

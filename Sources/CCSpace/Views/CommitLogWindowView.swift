@@ -46,6 +46,10 @@ struct CommitLogWindowView: View {
     @State private var isUnpushedOnly = false
     @State private var limit = Self.pageSize
     @State private var hasMore = false
+    /// 程序性重置"仅看未推送"(换 payload / 换分支)时置真,由
+    /// onChange(of: isUnpushedOnly) 消费一次即复位:程序重置与用户切换分流,
+    /// 前者由各条路径自己的 reload 统一刷新,避免重复触发整屏加载。
+    @State private var programmaticUnpushedReset = false
     /// payload 代际号:WindowGroup 复用同一窗口更换 payload 时,旧仓库的进行中加载
     /// 不得再把结果写进新仓库的状态(与 DiffWindowView 的 payloadGeneration 同模式)。
     @State private var payloadGeneration = 0
@@ -178,7 +182,7 @@ struct CommitLogWindowView: View {
             isLoadingMore = false
             errorMessage = nil
             searchText = ""
-            isUnpushedOnly = false
+            resetUnpushedOnlyProgrammatically()
             limit = Self.pageSize
             hasMore = false
             hasLoadedInitialData = false
@@ -247,7 +251,7 @@ struct CommitLogWindowView: View {
                     selectedBranch = ref
                     // 换分支后"仅看未推送"的可用性可能变化(新分支未必有上游),
                     // 留在勾选态会得到误导性的空列表,直接重置。
-                    isUnpushedOnly = false
+                    resetUnpushedOnlyProgrammatically()
                     limit = Self.pageSize
                     reloadCommits(resetting: true, showLoading: true)
                 }
@@ -324,6 +328,11 @@ struct CommitLogWindowView: View {
             .accessibilityLabel("刷新")
         }
         .onChange(of: isUnpushedOnly) { _, _ in
+            // 程序性重置走各自路径的统一刷新,这里只响应用户切换。
+            if programmaticUnpushedReset {
+                programmaticUnpushedReset = false
+                return
+            }
             // 切换筛选只重置分页,保留搜索词。
             limit = Self.pageSize
             reloadCommits(resetting: true, showLoading: true)
@@ -439,6 +448,14 @@ struct CommitLogWindowView: View {
         createBranchTask = nil
     }
 
+    /// 程序性复位"仅看未推送":仅在实际处于勾选态时打分流标记——
+    /// 值未变化则 onChange 不触发,标记会悬留并吞掉下一次用户切换的刷新。
+    private func resetUnpushedOnlyProgrammatically() {
+        guard isUnpushedOnly else { return }
+        programmaticUnpushedReset = true
+        isUnpushedOnly = false
+    }
+
     private func reload() {
         loadBranchContext()
         limit = Self.pageSize
@@ -495,6 +512,9 @@ struct CommitLogWindowView: View {
             case .success(let fetched, let hasMoreResult):
                 hasMore = hasMoreResult
                 commits = hasMore ? Array(fetched.prefix(currentLimit)) : fetched
+                // 静默刷新(resetting=false)也要清错误:content 优先渲染错误页,
+                // 不清则目录恢复后列表已更新、界面却永远停在"本地目录不存在"。
+                errorMessage = nil
                 isLoading = false
                 isLoadingMore = false
                 hasLoadedInitialData = true
@@ -819,7 +839,11 @@ struct CommitLogRowView: View {
         }
         .animation(.easeInOut(duration: 0.2), value: copied)
         .onDisappear {
+            // 先清状态再取消:行身份存续、仅滚出可视区时 @State 保留,
+            // 只取消不复位会让 1.5s 内消失的行对勾常亮(同 BranchSwitchPopoverView)。
+            copied = false
             resetTask?.cancel()
+            resetTask = nil
         }
     }
 

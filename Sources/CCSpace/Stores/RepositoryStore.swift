@@ -435,7 +435,9 @@ final class RepositoryStore: ObservableObject {
             throw RepositoryStoreError.invalidBackupFormat
         }
 
-        guard version <= RepositoryBackupDocument.currentVersion else {
+        // 版本必须落在受支持的区间:此前只设上界,version 为 0/负数(手工编辑或
+        // 伪造的备份)也会被当受支持版本导入。
+        guard (1...RepositoryBackupDocument.currentVersion).contains(version) else {
             throw RepositoryStoreError.unsupportedBackupVersion(version)
         }
 

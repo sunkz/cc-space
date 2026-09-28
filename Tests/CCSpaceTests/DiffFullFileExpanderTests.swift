@@ -85,6 +85,39 @@ final class DiffFullFileExpanderTests: XCTestCase {
         XCTAssertEqual(DiffFullFileExpander.expand(patchLines: patchLines, fileContent: nil), patchLines)
     }
 
+    func test_truncatedNewSideDoesNotIndexBelowZero() {
+        // 把已跟踪文件内容清空时 git 给出 `@@ -1,3 +0,0 @@`(新侧起始行号 0、共 0 行):
+        // 旧实现把补尾游标归零后去读 fileLines[-1],「展示所有行」必崩。
+        let patch = """
+        diff --git a/f.txt b/f.txt
+        index de98044..e69de29 100644
+        --- a/f.txt
+        +++ b/f.txt
+        @@ -1,3 +0,0 @@
+        -a
+        -b
+        -c
+        """
+        let patchLines = DiffPatchLineParser.parse(patch)
+        let expanded = DiffFullFileExpander.expand(patchLines: patchLines, fileContent: "")
+
+        // 空文件没有可补的行:结果与 patch 行一致(1 个头 + 3 条删除),不掺入上下文行。
+        XCTAssertEqual(expanded.count, 4)
+        XCTAssertEqual(expanded.filter { $0.kind == .removed }.map(\.text), ["-a", "-b", "-c"])
+        XCTAssertFalse(expanded.contains { $0.kind == .context })
+    }
+
+    func test_hunkWithZeroNewStartKeepsLeadingGapEmpty() {
+        // 同一形态的 patch 配上新侧仍有内容的全文(读盘与 diff 取自不同瞬间):
+        // 游标最低停在第 1 行,补出的是文件内容本身,不会越界也不会漏行。
+        let patchLines = DiffPatchLineParser.parse("@@ -1,1 +0,0 @@\n-a\n")
+        let expanded = DiffFullFileExpander.expand(patchLines: patchLines, fileContent: "x\ny\n")
+
+        XCTAssertEqual(expanded.map(\.text), ["@@ -1,1 +0,0 @@", "-a", " x", " y"])
+        XCTAssertEqual(expanded[2].newLineNumber, 1)
+        XCTAssertEqual(expanded[3].newLineNumber, 2)
+    }
+
     func test_returnsPatchLinesWhenPatchHasNoHunks() {
         // 空改动、纯重命名/权限变化的 patch 没有 hunk,不展开(避免把整个文件当上下文铺开)。
         XCTAssertEqual(

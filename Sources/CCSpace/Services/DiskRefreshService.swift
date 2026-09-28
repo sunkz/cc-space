@@ -24,6 +24,10 @@ struct DiskRefreshService {
     let repositoryStore: RepositoryStore
     private let refreshCalculator: RefreshCalculator
 
+    /// 快照不等价时的重试上限。活跃工作区里每次 pull/push 的预标瞬态都会让快照
+    /// 不等价，上限过低会让刷新被抖动耗尽而整体放弃（功能事实上不生效）。
+    static let snapshotRetryBudget = 8
+
     init(
         workplaceStore: WorkplaceStore,
         repositoryStore: RepositoryStore,
@@ -42,13 +46,16 @@ struct DiskRefreshService {
             guard Task.isCancelled == false else { return }
             retryCount += 1
             guard snapshot == currentSnapshot() else {
-                guard retryCount <= 3 else {
+                // 预算要足够宽松:活跃工作区里每次 pull/push 的预标瞬态都会让快照
+                // 不等价,预算 3 次时刷新几乎必然被"抖动"耗尽而整体放弃(功能事实上
+                // 不生效)。改为退避 + 更高上限,宁可多轮也不放弃刷新。
+                guard retryCount <= Self.snapshotRetryBudget else {
                     // 放弃前必须留痕:此前静默 return,刷新被整体跳过而无人知晓。
                     diskRefreshLog.notice("event=refresh_abandoned reason=snapshot_keeps_changing retries=\(retryCount)")
                     return
                 }
                 do {
-                    try await Task.sleep(for: .milliseconds(100))
+                    try await Task.sleep(for: .milliseconds(100 * retryCount))
                 } catch {
                     // 取消不是"重试仍不一致",直接退出,不要把取消信号吞掉。
                     return

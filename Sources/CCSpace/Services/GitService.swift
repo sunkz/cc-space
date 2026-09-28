@@ -127,11 +127,13 @@ enum GitServiceError: LocalizedError, Sendable {
     /// git 失败时 stderr 普遍会回显整个远端 URL,而用户常把 token 写进 URL
     /// (`https://oauth2:<token>@git.example.com/o/r.git`,或 GitHub 的
     /// `https://ghp_xxx@github.com/o/r.git` —— 用户名即 token,没有冒号段)。
-    /// 密码段允许 `/`(base64/URL 风格密钥常见含斜杠),用户名段不允许——
-    /// 无凭据的 `https://host/path` 因"首个 @ 前出现斜杠"不会被误脱敏。
+    /// 密码段允许 `/`(base64/URL 风格密钥常见含斜杠)与空格(畸形/未转义的密钥),
+    /// 用户名段不允许——无凭据的 `https://host/path` 因"首个 @ 前出现斜杠"不会被误脱敏。
+    /// 宁可多打码(端口 `:8080` 后同行出现游离 @ 时会被一并遮掉)也不漏打:
+    /// 漏打等于把令牌显示在 UI/日志里。
     private static let credentialPattern: NSRegularExpression? = {
         try? NSRegularExpression(
-            pattern: "[A-Za-z][A-Za-z0-9+.\\-]*://[^/\\s:@]+(?::[^\\s@]+)?@",
+            pattern: "[A-Za-z][A-Za-z0-9+.\\-]*://[^/\\s:@]+(?::[^@\\s]+(?: +[^@\\s]+)*)?@",
             options: []
         )
     }()
@@ -1288,8 +1290,15 @@ struct GitService: GitServicing {
             throw gitOperationError("无法识别当前分支")
         }
 
-        if await trackingBranch(in: directory) != nil {
-            try await runGit(arguments: ["-C", directory, "push"])
+        // 不用裸 `git push`:它会跟随用户全局 push.default,配 matching/all 时一次推出
+        // 多个分支(或直接报错),行为随环境漂移。两条路径都显式指定 remote + 当前分支;
+        // `--` 后的分支名由 git 优先解析为 ref(已实测:仓库内存在同名文件时仍推 ref),
+        // 因此不会被当成 pathspec,同时挡住以 `-` 开头的分支名进选项位。
+        if let upstream = await trackingBranch(in: directory) {
+            // 上游形如 `<remote>/<branch>`;异常前缀(空、以 `-` 开头会被当选项)退回 origin。
+            let prefix = upstream.split(separator: "/", maxSplits: 1).first.map(String.init) ?? ""
+            let remote = (prefix.isEmpty || prefix.hasPrefix("-")) ? "origin" : prefix
+            try await runGit(arguments: ["-C", directory, "push", remote, "--", currentBranch])
             return
         }
 
@@ -1306,6 +1315,39 @@ struct GitService: GitServicing {
 
     func stashPop(in directory: String) async throws {
         try await runGit(arguments: ["-C", directory, "stash", "pop"])
+    }
+
+    /// 工作区 diff 里最多展示多少个未跟踪文件(超出部分不进 diff,但 `commitAllChanges`
+    /// 的 `git add --all` 仍会提交它们——展示范围与提交范围不一致,必须由界面显式告知)。
+    /// 放在 Service 侧作单一事实来源,视图引用它而不是各自抄一份数值。
+    static let untrackedDisplayLimit = 100
+
+    /// 按字面量解释的 pathspec。
+    ///
+    /// git 对 pathspec 默认启用 wildmatch:`test[1].txt` 是"匹配 test1.txt"的字符类,
+    /// `a?b`/`*` 同理。文件名里出现这些字符是完全合法的(macOS/Linux 均可创建),
+    /// 一旦进 `checkout`/`clean -f` 就会作用到**另一个**文件——`clean -f` 删掉的
+    /// 未跟踪文件不可恢复。展示用路径与命令参数必须分离,命令侧一律加 `:(literal)`。
+    static func literalPathspec(_ path: String) -> String { ":(literal)" + path }
+
+    /// HEAD 等修订名解析不出来的失败特征(unborn HEAD 仓库下 `git diff HEAD` 的实测输出:
+    /// "fatal: ambiguous argument 'HEAD': unknown revision or path not in the working tree.")。
+    /// 只有这类失败才值得用去掉修订名的命令重试。
+    static func isUnresolvableRevisionError(_ error: Error) -> Bool {
+        guard let gitError = error as? GitServiceError else { return false }
+        let lower = gitError.stderr.lowercased()
+        return lower.contains("unknown revision")
+            || lower.contains("bad revision")
+            || lower.contains("does not have any commits")
+    }
+
+    /// ASCII 十六进制的 object ID(可缩写):`Character.isHexDigit` 按 Unicode 取值会放行
+    /// 阿拉伯-印度数字等非 ASCII 字符,与本仓库 ASCII-only 判定口径冲突(见 isCommitSHA)。
+    static func isHexObjectID(_ candidate: String, minLength: Int = 7, maxLength: Int = 40) -> Bool {
+        guard candidate.count >= minLength, candidate.count <= maxLength else { return false }
+        return candidate.allSatisfy { character in
+            ("0"..."9").contains(character) || ("a"..."f").contains(character) || ("A"..."F").contains(character)
+        }
     }
 
     /// 完整 commit SHA(40 位十六进制;未来 object format 也可能是 64 位)。
@@ -1460,6 +1502,8 @@ struct GitService: GitServicing {
     func discardChanges(filePath: String, in directory: String) async throws {
         // 不做 trim:调用方传入的是 git 解析出的原始路径,首尾空格是合法文件名的一部分,
         // trim 后会把丢弃操作作用到另一个(改写过的)路径上。
+        // pathspec 一律走 literalPathspec:文件名里的 `[ ] * ?` 在 git 默认的 wildmatch
+        // 下会被当通配符命中另一个文件,`clean -f` 落在错文件上即不可恢复的数据破坏。
         let trimmedPath = filePath
         guard Self.isSafeRepositoryRelativePath(trimmedPath) else {
             throw gitOperationError("文件路径无效，无法丢弃改动")
@@ -1470,7 +1514,7 @@ struct GitService: GitServicing {
             // 先把该路径移出暂存区,再按 HEAD 是否含该文件二选一:
             // 有则恢复内容(覆盖暂存+未暂存改动),无则按未跟踪文件删除。
             // reset 对各种文件状态均安全,失败不阻塞后续判断。
-            try? await runGit(arguments: ["-C", directory, "reset", "-q", "HEAD", "--", trimmedPath])
+            try? await runGit(arguments: ["-C", directory, "reset", "-q", "HEAD", "--", Self.literalPathspec(trimmedPath)])
             switch try await runRawGit(arguments: [
                 "-c", "core.quotepath=false",
                 "-C", directory, "cat-file", "-e", "HEAD:\(trimmedPath)",
@@ -1478,12 +1522,12 @@ struct GitService: GitServicing {
             case .exited(0):
                 try await runGit(arguments: [
                     "-c", "core.quotepath=false",
-                    "-C", directory, "checkout", "HEAD", "--", trimmedPath,
+                    "-C", directory, "checkout", "HEAD", "--", Self.literalPathspec(trimmedPath),
                 ])
             case .exited:
                 try await runGit(arguments: [
                     "-c", "core.quotepath=false",
-                    "-C", directory, "clean", "-f", "--", trimmedPath,
+                    "-C", directory, "clean", "-f", "--", Self.literalPathspec(trimmedPath),
                 ])
             case .crashed(let message):
                 throw gitOperationError(message)
@@ -1492,7 +1536,7 @@ struct GitService: GitServicing {
             // 无提交的仓库(unborn HEAD):所有文件都视同未跟踪,直接删除。
             try await runGit(arguments: [
                 "-c", "core.quotepath=false",
-                "-C", directory, "clean", "-f", "--", trimmedPath,
+                "-C", directory, "clean", "-f", "--", Self.literalPathspec(trimmedPath),
             ])
         case .crashed(let message):
             throw gitOperationError(message)
@@ -1668,7 +1712,8 @@ struct GitService: GitServicing {
 
     func commitDetail(hash: String, in directory: String) async -> GitCommitDetail? {
         // 只接受十六进制 commit ID(来自提交列表),避免把任意字符串当 rev 传给 git。
-        guard hash.count >= 7, hash.count <= 40, hash.allSatisfy(\.isHexDigit) else {
+        // 判定口径与 isCommitSHA 一致用 ASCII 字符集(见其注释),不用 `\.isHexDigit`。
+        guard Self.isHexObjectID(hash) else {
             return nil
         }
         guard let output = try? await runGitOutput(arguments: [
@@ -1928,7 +1973,9 @@ struct GitService: GitServicing {
             entries = GitDiffParser.parse(output: output)
         } catch {
             // 无 commit 的仓库:`git diff HEAD` 会失败,回退到仅未暂存的 diff。
-            // 只在失败时回退:干净仓库成功且输出为空,不必白跑第二个 git 进程。
+            // 只在"HEAD 这类修订名解析不了"时回退:超时/取消/非仓库等失败,回退那条
+            // 命令同样会失败,却要多等一个完整超时(最长从 60s 翻倍到 120s)。
+            guard Self.isUnresolvableRevisionError(error) else { throw error }
             // 回退仍失败则如实上抛(取消/非仓库等),不吞成空 diff。
             let rawOutput = try await runGitOutput(arguments: [
                 "-c", "core.quotepath=false",
@@ -1939,11 +1986,12 @@ struct GitService: GitServicing {
 
         // 补充 untracked 文件:`git diff --no-index /dev/null <file>` 为每个新文件生成 diff。
         // 该命令有差异时退出码为 1,属正常行为。限制最多处理 100 个文件,避免过多时卡顿。
+        // 补充 untracked 文件:`git diff --no-index /dev/null <file>` 为每个新文件生成 diff。
+        // 该命令有差异时退出码为 1,属正常行为。限制最多处理这么多文件,避免过多时卡顿。
         let untracked = await untrackedFiles(in: directory)
-        let untrackedLimit = 100
         let trackedPaths = Set(entries.map(\.filePath))
         var pending: [(index: Int, file: String)] = []
-        for (offset, file) in untracked.prefix(untrackedLimit).enumerated() where trackedPaths.contains(file) == false {
+        for (offset, file) in untracked.prefix(Self.untrackedDisplayLimit).enumerated() where trackedPaths.contains(file) == false {
             pending.append((index: offset, file: file))
         }
         guard pending.isEmpty == false else { return entries }
@@ -2015,6 +2063,10 @@ struct GitService: GitServicing {
     }
 
     func diffCommit(hash: String, in directory: String) async throws -> [GitDiffEntry] {
+        // hash 进 revs 参数位置、后面没有 `--` 可依赖:必须以 `-` 开头的串会被 git 当选项
+        // (如 `--output=<file>` 写文件;配了 diff.external 时更可触发外部命令),
+        // 口径与 commitDetail/blobContent 一致——先过守卫,再加 --end-of-options 兜底。
+        guard Self.isHexObjectID(hash, maxLength: 64) || Self.isCommitSHA(hash) else { return [] }
         // `--first-parent`:merge commit 的 `git show -p` 默认走 combined diff,
         // 干净合并时 patch 为空,而 `--numstat` 仍按第一父提交统计,
         // 会出现"文件列表有、diff 内容为空";统一按第一父提交取 diff 保证两者一致。
@@ -2022,7 +2074,8 @@ struct GitService: GitServicing {
         let output = try await runGitOutput(
             arguments: [
                 "-c", "core.quotepath=false",
-                "-C", directory, "show", "--first-parent", "--numstat", "-p", "--no-color", "--format=", hash,
+                "-C", directory, "show", "--first-parent", "--numstat", "-p", "--no-color",
+                "--format=", "--end-of-options", hash,
             ],
             allowedExitCodes: [0, 1]
         )

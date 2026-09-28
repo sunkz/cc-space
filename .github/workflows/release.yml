@@ -1,0 +1,273 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  # 刻意不挂 workflow_dispatch:构建 DMG 并创建 Release 只由 vX.Y.Z tag 触发,
+  # 杜绝手动运行误发/误构建;发版一律走 ./release.sh(带本地 lint+test 门禁)。
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    # 同一 tag 的 re-run / dispatch 并发时,两个 job 同时 `gh release upload --clobber`
+    # 会互相覆盖 asset(最后写入者赢,中间态下载链接可能指向半上传产物)。
+    # cancel-in-progress: false——后触发的排队等待而非打断正在跑的发布。
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select latest stable Xcode
+        # 逻辑收敛到 script/select_xcode.sh(单一事实来源);
+        # 排除 Xcode-beta.app 的原因见脚本注释。workflow 内 chmod +x 以保证
+        # runner 上的可执行位,不依赖 checkout 保留的文件模式。
+        run: |
+          chmod +x script/select_xcode.sh
+          ./script/select_xcode.sh
+
+      - name: Resolve release version
+        id: version
+        # 双保险:触发已限定 tag,但**手推的非 semver tag(如 vfoo)**仍会进来——
+        # 直接当版本号会写出非法的 CFBundleShortVersionString/CFBundleVersion,
+        # DMG 也会叫 CCSpace-vfoo.dmg 并照常发布。不合法 → 快速失败;
+        # 非 tag 的 ref_type 理论上不可达,保留同一分支兜底。
+        # 注:valid 输出仅被打包/上传/建 Release 三步的 if 引用(lint/test 刻意不设
+        # 守卫——坏 tag 也想尽早拿到 lint+test 诊断);删触发器后 valid 恒真,保留作防御。
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if [ "${REF_TYPE}" != "tag" ]; then
+            echo "==> 非 tag 触发(ref=${REF_NAME}),跳过打包与 Release 创建"
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          version="${REF_NAME#v}"
+          if ! printf '%s' "${version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "==> tag '${REF_NAME}' 不是 vX.Y.Z 格式,拒绝构建(避免产出非法版本号)" >&2
+            exit 1
+          fi
+
+          echo "valid=true" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "==> Release version: ${version}"
+
+      - name: Validate scripts and lint
+        run: ./run.sh lint
+
+      - name: Run tests
+        # 统一走 run.sh(与本地开发同一入口):逻辑单一事实来源。
+        run: ./run.sh test
+
+      - name: Detect signing configuration
+        id: signing_config
+        # 刻意不强制签名:维护者当前没有 Developer ID/公证 secrets,发布
+        # **未签名 DMG 是预期形态**(与 v0.0.2 一致)。缺 secrets 时下方
+        # signing/notary 各步骤经 if 守卫自动跳过,产物 ad-hoc 签名,
+        # 用户首启需右键打开或 `xattr -cr` 绕过 Gatekeeper。
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${MACOS_CERTIFICATE_P12}" ] && [ -n "${MACOS_CERTIFICATE_PASSWORD}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Import Developer ID certificate
+        id: signing
+        if: ${{ steps.signing_config.outputs.enabled == 'true' }}
+        env:
+          KEYCHAIN_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}-keychain
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          CERT_PATH="$RUNNER_TEMP/developer-id-application.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+
+          printf '%s' "$MACOS_CERTIFICATE_P12" | base64 -D -o "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep 'Developer ID Application' | head -n 1 | sed -E 's/.*"(.+)"/\1/')"
+
+          if [ -z "$SIGNING_IDENTITY" ]; then
+            echo "Developer ID Application identity not found in imported certificate" >&2
+            exit 1
+          fi
+
+          {
+            echo "KEYCHAIN_PATH=$KEYCHAIN_PATH"
+            echo "SIGNING_IDENTITY=$SIGNING_IDENTITY"
+          } >> "$GITHUB_ENV"
+
+      - name: Detect notarization configuration
+        id: notary_config
+        if: ${{ steps.signing.conclusion == 'success' }}
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${APPLE_ID}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD}" ] && [ -n "${APPLE_TEAM_ID}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Store notarization credentials
+        id: notary
+        if: ${{ steps.notary_config.outputs.enabled == 'true' }}
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+
+          xcrun notarytool store-credentials "ccspace-notarytool" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --keychain "$KEYCHAIN_PATH"
+
+          echo "NOTARYTOOL_PROFILE=ccspace-notarytool" >> "$GITHUB_ENV"
+
+      - name: Build universal binary and package DMG
+        if: steps.version.outputs.valid == 'true'
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          APP_NAME="CCSpace"
+          DISPLAY_NAME="CCSpace"
+          DIST_DIR="./dist"
+
+          # Build for each architecture
+          for ARCH in arm64 x86_64; do
+            echo "==> Building for ${ARCH}..."
+            swift build -c release --product "${APP_NAME}" --arch "${ARCH}"
+            BIN_PATH="$(swift build -c release --product "${APP_NAME}" --arch "${ARCH}" --show-bin-path)/${APP_NAME}"
+            cp "${BIN_PATH}" "${RUNNER_TEMP:?}/${APP_NAME}-${ARCH}"
+          done
+
+          # Create universal binary with lipo
+          echo "==> Creating universal binary..."
+          mkdir -p "${DIST_DIR}"
+          lipo -create "${RUNNER_TEMP}/${APP_NAME}-arm64" "${RUNNER_TEMP}/${APP_NAME}-x86_64" -output "${DIST_DIR}/${APP_NAME}"
+
+          # 发布前校验合并产物确为双架构，避免 lipo 静默产出单架构二进制
+          echo "==> Verifying universal binary..."
+          LIPO_INFO="$(lipo -info "${DIST_DIR}/${APP_NAME}")"
+          echo "${LIPO_INFO}"
+          if ! echo "${LIPO_INFO}" | grep -q 'arm64' || ! echo "${LIPO_INFO}" | grep -q 'x86_64'; then
+            echo "==> ERROR: binary is not universal (missing arm64 or x86_64): ${LIPO_INFO}" >&2
+            exit 1
+          fi
+
+          # Assemble app bundle
+          APP_BUNDLE="${DIST_DIR}/${DISPLAY_NAME}.app"
+          ./script/package_app.sh \
+            --binary "${DIST_DIR}/${APP_NAME}" \
+            --output "${APP_BUNDLE}" \
+            --version "${VERSION}" >/dev/null
+          rm -f "${DIST_DIR}/${APP_NAME}"
+
+          # Code sign if identity is available
+          if [ -n "${SIGNING_IDENTITY:-}" ]; then
+            CODESIGN_ARGS=(--force --options runtime --timestamp --sign "${SIGNING_IDENTITY}")
+            [ -n "${KEYCHAIN_PATH:-}" ] && CODESIGN_ARGS+=(--keychain "${KEYCHAIN_PATH}")
+            echo "==> Signing app bundle..."
+            codesign "${CODESIGN_ARGS[@]}" "${APP_BUNDLE}"
+          fi
+
+          # Notarize if profile is available
+          if [ -n "${NOTARYTOOL_PROFILE:-}" ] && [ "${NOTARYTOOL_PROFILE}" != "" ]; then
+            echo "==> Notarizing..."
+            NOTARY_ZIP="${DIST_DIR}/${APP_NAME}-notarize.zip"
+            ditto -c -k --keepParent "${APP_BUNDLE}" "${NOTARY_ZIP}"
+            NOTARY_ARGS=(--keychain-profile "${NOTARYTOOL_PROFILE}" --wait)
+            [ -n "${KEYCHAIN_PATH:-}" ] && NOTARY_ARGS+=(--keychain "${KEYCHAIN_PATH}")
+            xcrun notarytool submit "${NOTARY_ZIP}" "${NOTARY_ARGS[@]}"
+            xcrun stapler staple "${APP_BUNDLE}"
+            rm -f "${NOTARY_ZIP}"
+          fi
+
+          # Create DMG with Applications symlink
+          DMG_NAME="CCSpace-${TAG_NAME}.dmg"
+          DMG_STAGING="${DIST_DIR}/dmg-staging"
+          echo "==> Creating DMG: ${DMG_NAME}..."
+          rm -rf "${DMG_STAGING}"
+          mkdir -p "${DMG_STAGING}"
+          cp -R "${APP_BUNDLE}" "${DMG_STAGING}/"
+          ln -s /Applications "${DMG_STAGING}/Applications"
+          hdiutil create -volname "CCSpace" -srcfolder "${DMG_STAGING}" -ov -format UDZO "${DIST_DIR}/${DMG_NAME}"
+          rm -rf "${DMG_STAGING}"
+          (cd "${DIST_DIR}" && shasum -a 256 "${DMG_NAME}" > "${DMG_NAME}.sha256")
+
+          echo "==> Done: ${DIST_DIR}/${DMG_NAME}"
+
+      - name: Upload workflow artifacts
+        if: steps.version.outputs.valid == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: CCSpace-${{ github.ref_name }}
+          path: dist/*
+
+      - name: Create GitHub release
+        # 触发已限定 tag;版本号合法性由 Resolve release version 统一判定
+        # (valid=true 才走到这里)。
+        if: steps.version.outputs.valid == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          ASSETS=("dist/CCSpace-${TAG_NAME}.dmg" "dist/CCSpace-${TAG_NAME}.dmg.sha256")
+
+          # 不再无条件 `gh release delete`:重跑(含失败重试)先删线上 Release 会让
+          # 已发布的下载链接立刻 404、notes 基准漂移,若后续 create 再失败还会留下
+          # "有 tag 无 Release"的中间态。改为存在则原地更新 asset与标题(下载链接
+          # 与 notes 保持稳定),不存在才创建;两条路径的失败都在 set -e 下可见。
+          # 注:`view` 因网络失败会被误判为"不存在",此时 create 必然同样失败并中断,
+          # 不会静默产生重复 Release。
+          if gh release view "$TAG_NAME" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "==> Release ${TAG_NAME} 已存在,原地更新 assets 与标题(保留 notes)..."
+            gh release upload "$TAG_NAME" "${ASSETS[@]}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
+            gh release edit "$TAG_NAME" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "CCSpace ${TAG_NAME}"
+          else
+            gh release create "$TAG_NAME" "${ASSETS[@]}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "CCSpace ${TAG_NAME}" \
+              --generate-notes
+          fi

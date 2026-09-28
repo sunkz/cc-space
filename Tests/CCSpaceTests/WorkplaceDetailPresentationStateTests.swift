@@ -1,0 +1,408 @@
+import XCTest
+@testable import CCSpace
+
+final class WorkplaceDetailPresentationStateTests: XCTestCase {
+    @MainActor
+    func test_detailViewStoresTopLevelPullAction() {
+        let workplace = makeWorkplace(path: "/tmp/main", selectedRepositoryIDs: [])
+        let view = makeDetailView(workplace: workplace)
+
+        let childLabels = Set(Mirror(reflecting: view).children.compactMap(\.label))
+
+        XCTAssertTrue(childLabels.contains("actions"))
+    }
+
+    @MainActor
+    func test_detailViewDoesNotStoreWorkspaceShortcutActionsForPinCopyArchive() {
+        let workplace = makeWorkplace(path: "/tmp/main", selectedRepositoryIDs: [])
+        let view = makeDetailView(workplace: workplace)
+
+        let childLabels = Set(Mirror(reflecting: view).children.compactMap(\.label))
+
+        XCTAssertFalse(childLabels.contains("onTogglePinned"))
+        XCTAssertFalse(childLabels.contains("onDuplicateWorkplace"))
+        XCTAssertFalse(childLabels.contains("onToggleArchived"))
+    }
+
+    func test_idleWorkplaceEnablesEditSyncAndDelete() throws {
+        let repository = makeRepository(repoName: "blog")
+        let workplacePath = try makeLocalDirectory(named: "blog")
+        let localPath = try makeChildDirectory(named: "blog", in: workplacePath)
+        let workplace = makeWorkplace(
+            path: workplacePath,
+            selectedRepositoryIDs: [repository.id]
+        )
+        let actionState = WorkplaceActionState(
+            workplace: workplace,
+            repositories: [repository],
+            syncStates: [
+                RepositorySyncState(
+                    workplaceID: workplace.id,
+                    repositoryID: repository.id,
+                    status: .success,
+                    localPath: localPath,
+                    lastError: nil,
+                    lastSyncedAt: nil,
+                    hasLocalDirectory: true
+                )
+            ]
+        )
+
+        let presentationState = WorkplaceDetailPresentationState(
+            actionState: actionState,
+            isPerformingAction: false
+        )
+
+        XCTAssertFalse(presentationState.isActionLocked)
+        XCTAssertFalse(presentationState.showsOperationProgress)
+        XCTAssertTrue(presentationState.canEditWorkplace)
+        XCTAssertTrue(presentationState.canRefreshAllRepositories)
+        XCTAssertTrue(presentationState.canSyncAllRepositories)
+        XCTAssertTrue(presentationState.canPushAllRepositories)
+        XCTAssertTrue(presentationState.canMergeDefaultBranchIntoCurrent)
+        XCTAssertTrue(presentationState.canSwitchRepositoriesToDefaultBranch)
+        XCTAssertFalse(presentationState.canSwitchRepositoriesToWorkBranch)
+        XCTAssertTrue(presentationState.canOpenDirectory)
+        XCTAssertTrue(presentationState.canDeleteWorkplace)
+        XCTAssertEqual(presentationState.editHelp, "编辑工作区名称、分支和仓库配置")
+        XCTAssertEqual(presentationState.refreshHelp, "重新读取所有仓库的本地 Git 状态")
+        XCTAssertEqual(presentationState.syncHelp, "Pull 所有仓库：从远端拉取最新代码并合并到当前分支")
+        XCTAssertEqual(presentationState.pushHelp, "Push 所有仓库：将未推送的提交推送到远端")
+        XCTAssertEqual(presentationState.switchWorkBranchHelp, "请先在编辑中配置工作分支名称")
+        XCTAssertEqual(presentationState.deleteHelp, "删除工作区及其本地文件目录")
+    }
+
+    func test_performingActionLocksEditSyncAndDeleteImmediately() throws {
+        let workplacePath = try makeLocalDirectory(named: "blog")
+        let workplace = makeWorkplace(
+            path: workplacePath,
+            selectedRepositoryIDs: []
+        )
+        let actionState = WorkplaceActionState(
+            workplace: workplace,
+            repositories: [],
+            syncStates: []
+        )
+
+        let presentationState = WorkplaceDetailPresentationState(
+            actionState: actionState,
+            isPerformingAction: true
+        )
+
+        XCTAssertTrue(presentationState.isActionLocked)
+        XCTAssertTrue(presentationState.showsOperationProgress)
+        XCTAssertFalse(presentationState.canEditWorkplace)
+        XCTAssertFalse(presentationState.canRefreshAllRepositories)
+        XCTAssertFalse(presentationState.canSyncAllRepositories)
+        XCTAssertFalse(presentationState.canPushAllRepositories)
+        XCTAssertFalse(presentationState.canMergeDefaultBranchIntoCurrent)
+        XCTAssertFalse(presentationState.canSwitchRepositoriesToDefaultBranch)
+        XCTAssertFalse(presentationState.canSwitchRepositoriesToWorkBranch)
+        XCTAssertTrue(presentationState.canOpenDirectory)
+        XCTAssertFalse(presentationState.canDeleteWorkplace)
+        XCTAssertEqual(presentationState.editHelp, "工作区操作进行中")
+        XCTAssertEqual(presentationState.refreshHelp, "工作区操作进行中")
+        XCTAssertEqual(presentationState.syncHelp, "工作区操作进行中")
+        XCTAssertEqual(presentationState.pushHelp, "工作区操作进行中")
+        XCTAssertEqual(presentationState.switchWorkBranchHelp, "工作区操作进行中")
+        XCTAssertEqual(presentationState.deleteHelp, "工作区操作进行中")
+    }
+
+    /// isActionLocked 镜像(WorkplaceDetailView.syncActionLockedMirror)的真实依赖面:
+    /// isBusy 只由「匹配 workplace.id 且在选中集合内的 syncStates 行」推出——
+    /// repositories 不参与(只影响 failedRepositories 的 filter),selectedRepositoryIDs
+    /// 却直接决定一行算不算数。视图的三条 onChange 分别观察 syncStates、
+    /// isPerformingAction、workplace.selectedRepositoryIDs,这条断言把依赖面钉在纯值层。
+    func test_isBusyDependsOnSyncStatesAndSelectionButNotRepositoryList() {
+        let workplaceID = UUID()
+        let repository = makeRepository(repoName: "blog")
+        let workplace = makeWorkplace(
+            path: "/tmp/blog",
+            selectedRepositoryIDs: [repository.id],
+            id: workplaceID
+        )
+        let pulling = RepositorySyncState(
+            workplaceID: workplaceID,
+            repositoryID: repository.id,
+            status: .pulling,
+            localPath: "/tmp/blog/blog",
+            lastError: nil,
+            lastSyncedAt: nil,
+            hasLocalDirectory: true
+        )
+
+        // repositories 换成空数组不改变 isBusy:它对 isBusy 零影响。
+        XCTAssertTrue(
+            WorkplaceActionState(
+                workplace: workplace,
+                repositories: [repository],
+                syncStates: [pulling]
+            ).isBusy
+        )
+        XCTAssertTrue(
+            WorkplaceActionState(
+                workplace: workplace,
+                repositories: [],
+                syncStates: [pulling]
+            ).isBusy
+        )
+
+        // 同一行 syncStates,只把选中集合清空即可翻转 isBusy → 该变化源必须被观察。
+        let deselected = WorkplaceActionState(
+            workplace: makeWorkplace(path: "/tmp/blog", selectedRepositoryIDs: [], id: workplaceID),
+            repositories: [repository],
+            syncStates: [pulling]
+        )
+        XCTAssertFalse(deselected.isBusy)
+
+        // 与镜像同源:PresentationState.isActionLocked = isPerformingAction || isBusy。
+        XCTAssertFalse(
+            WorkplaceDetailPresentationState(actionState: deselected, isPerformingAction: false)
+                .isActionLocked
+        )
+        XCTAssertTrue(
+            WorkplaceDetailPresentationState(actionState: deselected, isPerformingAction: true)
+                .isActionLocked
+        )
+    }
+
+    func test_missingDirectoryStillDisablesOpenDirectoryWhenNotBusy() {
+        let workplace = makeWorkplace(
+            path: "",
+            selectedRepositoryIDs: []
+        )
+        let actionState = WorkplaceActionState(
+            workplace: workplace,
+            repositories: [],
+            syncStates: []
+        )
+
+        let presentationState = WorkplaceDetailPresentationState(
+            actionState: actionState,
+            isPerformingAction: false
+        )
+
+        XCTAssertFalse(presentationState.canOpenDirectory)
+    }
+
+    func test_deleteConfirmationIncludesPathWhenDirectoryExists() throws {
+        let workplacePath = try makeLocalDirectory(named: "blog")
+        let workplace = makeWorkplace(
+            path: " \(workplacePath) ",
+            selectedRepositoryIDs: []
+        )
+
+        // directoryPath 由调用方在触发时刻探测后传入(init 不再做磁盘 stat)。
+        let confirmationState = WorkplaceDeleteConfirmationState(
+            workplace: workplace,
+            directoryPath: workplacePath
+        )
+
+        XCTAssertEqual(confirmationState.title, "删除 Main")
+        XCTAssertEqual(confirmationState.confirmLabel, "确认删除")
+        XCTAssertEqual(
+            confirmationState.message,
+            """
+            将删除工作区记录，并删除本地目录中的所有文件。
+            目录：\(workplacePath)
+            此操作不可撤销。
+            """
+        )
+    }
+
+    func test_deleteConfirmationFallsBackWhenPathIsEmpty() {
+        let workplace = makeWorkplace(
+            path: "   ",
+            selectedRepositoryIDs: []
+        )
+
+        let confirmationState = WorkplaceDeleteConfirmationState(
+            workplace: workplace,
+            directoryPath: nil
+        )
+
+        XCTAssertEqual(
+            confirmationState.message,
+            "将删除工作区记录，此操作不可撤销。"
+        )
+    }
+
+    func test_repositoryDeleteConfirmationIncludesPathWhenLocalDirectoryExists() throws {
+        let localPath = try makeLocalDirectory(named: "blog")
+        let confirmationState = WorkplaceRepositoryDeleteConfirmationState(
+            repositoryName: "blog",
+            localPath: " \(localPath) ",
+            directoryPath: localPath
+        )
+
+        XCTAssertEqual(confirmationState.title, "删除 blog")
+        XCTAssertEqual(confirmationState.confirmLabel, "确认删除")
+        XCTAssertEqual(
+            confirmationState.message,
+            """
+            将从当前工作区移除该仓库，并删除本地目录中的所有文件。
+            目录：\(localPath)
+            此操作不可撤销。
+            """
+        )
+    }
+
+    func test_repositoryDeleteConfirmationFallsBackWhenPathIsEmpty() {
+        let confirmationState = WorkplaceRepositoryDeleteConfirmationState(
+            repositoryName: "blog",
+            localPath: "   ",
+            directoryPath: nil
+        )
+
+        XCTAssertEqual(
+            confirmationState.message,
+            "将从当前工作区移除该仓库，此操作不可撤销。"
+        )
+    }
+
+    func test_localRepositoriesEnableBatchBranchActions() throws {
+        let repository = makeRepository(repoName: "blog")
+        let localPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("blog")
+            .path
+        try FileManager.default.createDirectory(
+            atPath: localPath,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        let workplace = Workplace(
+            id: UUID(),
+            name: "Main",
+            path: "/tmp/blog",
+            selectedRepositoryIDs: [repository.id],
+            branch: "88",
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        let actionState = WorkplaceActionState(
+            workplace: workplace,
+            repositories: [repository],
+            syncStates: [
+                RepositorySyncState(
+                    workplaceID: workplace.id,
+                    repositoryID: repository.id,
+                    status: .failed,
+                    localPath: localPath,
+                    lastError: "old error",
+                    lastSyncedAt: nil,
+                    hasLocalDirectory: true
+                )
+            ]
+        )
+
+        let presentationState = WorkplaceDetailPresentationState(
+            actionState: actionState,
+            isPerformingAction: false
+        )
+
+        XCTAssertTrue(presentationState.canRefreshAllRepositories)
+        XCTAssertTrue(presentationState.canMergeDefaultBranchIntoCurrent)
+        XCTAssertTrue(presentationState.canPushAllRepositories)
+        XCTAssertTrue(presentationState.canSwitchRepositoriesToDefaultBranch)
+        XCTAssertTrue(presentationState.canSwitchRepositoriesToWorkBranch)
+        XCTAssertEqual(presentationState.refreshHelp, "重新读取所有仓库的本地 Git 状态")
+        XCTAssertEqual(presentationState.switchWorkBranchHelp, "切到工作分支：将所有仓库切到 88")
+    }
+
+    /// 显式构造详情视图夹具:生产 init 已去掉 no-op 默认 actions 与默认编辑器列表,
+    /// 测试调用点自行传入全套空回调。
+    @MainActor
+    private func makeDetailView(workplace: Workplace) -> WorkplaceDetailView {
+        WorkplaceDetailView(
+            workplace: workplace,
+            repositories: [],
+            syncStates: [],
+            gitService: GitService(),
+            actions: WorkplaceDetailActions(
+                onEdit: {},
+                onDelete: {},
+                onRetry: { _ in },
+                onPullAll: {},
+                onPush: {},
+                onPull: { _ in },
+                onPushRepository: { _, _ in },
+                onSwitchBranch: { _, _, _ in },
+                onCreateBranch: { _, _, _, _ in },
+                onDeleteBranch: { _, _, _, _ in },
+                onDeleteRemoteBranch: { _, _, _ in },
+                onSwitchRepositoryToDefaultBranch: { _, _ in },
+                onSwitchRepositoryToWorkBranch: { _, _ in },
+                onMergeRepositoryDefaultBranchIntoCurrent: { _, _ in },
+                onCreateMergeRequest: { _, _, _ in },
+                onOpenRepositoryWeb: { _, _ in },
+                onDeleteRepository: { _, _ in },
+                onTogglePinnedRepository: { _ in },
+                onStashChanges: { _, _ in },
+                onPopStash: { _, _, _ in },
+                onDropStash: { _, _, _ in },
+                onAbortInterruptedOperation: { _, _ in },
+                onMergeDefaultBranchIntoCurrent: {},
+                onSwitchAllRepositoriesToDefaultBranch: {},
+                onSwitchAllRepositoriesToWorkBranch: {},
+                onRefreshStatuses: {},
+                onCancelAction: {}
+            ),
+            installedEditors: [],
+            installedTerminals: [],
+            preferredOpenActionID: nil,
+            onSelectOpenAction: { _ in }
+        )
+    }
+
+    private func makeWorkplace(
+        path: String,
+        selectedRepositoryIDs: [UUID],
+        id: UUID = UUID()
+    ) -> Workplace {
+        Workplace(
+            id: id,
+            name: "Main",
+            path: path,
+            selectedRepositoryIDs: selectedRepositoryIDs,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+    }
+
+    private func makeRepository(
+        repoName: String,
+        id: UUID = UUID()
+    ) -> RepositoryConfig {
+        RepositoryConfig(
+            id: id,
+            gitURL: "https://example.com/\(repoName).git",
+            repoName: repoName,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+    }
+
+    private func makeLocalDirectory(named name: String) throws -> String {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent(name)
+            .path
+        try FileManager.default.createDirectory(
+            atPath: path,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        return path
+    }
+
+    private func makeChildDirectory(named name: String, in parentPath: String) throws -> String {
+        let path = URL(fileURLWithPath: parentPath).appendingPathComponent(name).path
+        try FileManager.default.createDirectory(
+            atPath: path,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        return path
+    }
+}

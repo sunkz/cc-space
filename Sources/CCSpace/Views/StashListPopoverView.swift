@@ -96,14 +96,16 @@ struct StashListPopoverView: View {
     private var stashList: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(entries) { entry in
+                // 分隔线判断改用下标:此前每行取一次 entries.last,整列表 O(N²)
+                // (CommitLogWindowView 同款修法)。
+                ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
                     StashRowView(
                         entry: entry,
                         actionsDisabled: actionsDisabled,
                         onPop: { onPop(entry.index) },
                         onRequestDrop: { onRequestDrop(entry) }
                     )
-                    if entry.id != entries.last?.id {
+                    if index < entries.count - 1 {
                         Divider()
                             .padding(.leading, 12)
                     }

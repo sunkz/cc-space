@@ -216,11 +216,10 @@ struct SyncCoordinator: Sendable {
         let repoLock = RepositoryOperationLock.shared
         var successCount = 0
         var failedCount = preparation.failed.count
-        var resultStates = preparation.failed
         let pulledResults = await Self.runLimitedTasks(
             preparation.pullable,
             maxConcurrentTasks: Self.maxConcurrentPullTasks
-        ) { state -> (state: RepositorySyncState, summary: RepositoryBranchPullOutcomeSummary?, cancelled: Bool) in
+        ) { state -> (original: RepositorySyncState, result: RepositorySyncState, summary: RepositoryBranchPullOutcomeSummary?, cancelled: Bool) in
             let localPath = state.localPath
             let repositoryName = URL(fileURLWithPath: localPath).lastPathComponent
             // 与 push/切分支共用 per-path 锁,避免对同一仓库的跨类操作交错执行。
@@ -233,41 +232,68 @@ struct SyncCoordinator: Sendable {
                     var failedState = state
                     failedState.status = .failed
                     failedState.lastError = UserFacingError.message(for: primary)
-                    return (failedState, summary, false)
+                    return (state, failedState, summary, false)
                 }
                 var successState = state
                 successState.status = .success
                 successState.lastSyncedAt = .now
                 successState.lastError = nil
-                return (successState, summary, false)
+                return (state, successState, summary, false)
             } catch is CancellationError {
                 // 取消不是失败:恢复操作前状态(pulling 只是副本状态,入参 state 未被改动),
                 // 不把 "cancelled" 落库成 .failed,避免取消后 UI 出现整列假失败。
                 // 标记 cancelled:该行进单独收口通道,不整行覆盖最新行(见下方回写)。
-                return (state, nil, true)
+                return (state, state, nil, true)
             } catch {
                 var failedState = state
                 failedState.status = .failed
                 failedState.lastError = UserFacingError.message(for: error)
-                return (failedState, nil, false)
+                return (state, failedState, nil, false)
             }
         }
         let branchSummaries = pulledResults.compactMap(\.summary)
 
         var cancelledSnapshots: [RepositorySyncState] = []
+        var results: [(original: RepositorySyncState, result: RepositorySyncState)] = []
+        results.reserveCapacity(pulledResults.count)
         for entry in pulledResults {
             // 取消行不参与计数、不进结果:整行旧快照落库会把等锁期间磁盘刷新/其它
             // 操作写入最新行的字段覆盖回 pull 前(同类 lost update)。
             if entry.cancelled {
-                cancelledSnapshots.append(entry.state)
+                cancelledSnapshots.append(entry.original)
                 continue
             }
-            if entry.state.status == .success {
+            if entry.result.status == .success {
                 successCount += 1
-            } else if entry.state.status == .failed {
+            } else if entry.result.status == .failed {
                 failedCount += 1
             }
-            resultStates.append(entry.state)
+            results.append((entry.original, entry.result))
+        }
+        // 回写按字段级增量合并(premarkedTransient: .pulling,见
+        // RepositorySyncState.merging):pull 持锁可达数分钟,期间磁盘刷新/其他操作
+        // 会改写行上与本操作无关的字段,整行覆盖会把取快照时的旧行落库,覆盖窗口内
+        // 的最新写入(lost update)。只回写本操作改动的字段,并把本操作预标的
+        // .pulling 瞬态归位为结果终态。
+        var updates: [RepositorySyncState] = []
+        updates.reserveCapacity(results.count)
+        for entry in results {
+            guard let current = workplaceStore.syncStates.first(where: {
+                $0.workplaceID == entry.original.workplaceID && $0.repositoryID == entry.original.repositoryID
+            }) else {
+                // 行在 pull 窗口内被去重/prune:维持 updateSyncStates 的补录语义,
+                // 原样回写结果行(仅仍被选中的行会真正落库,见 updateSyncStates)。
+                updates.append(entry.result)
+                continue
+            }
+            if let merged = RepositorySyncState.merging(
+                updated: entry.result,
+                onto: entry.original,
+                in: current,
+                premarkedTransient: .pulling
+            ) {
+                updates.append(merged)
+            }
         }
         // 取消收口:只归位本批 pull 预标的 .pulling 瞬态(按字段增量合并到最新行,
         // 其余字段保留最新值);行上若是其它在途操作的瞬态则不动,由其自行收口。
@@ -282,11 +308,14 @@ struct SyncCoordinator: Sendable {
             restored.lastError = snapshot.lastError
             cancelledRestores.append(restored)
         }
-        workplaceStore.updateSyncStates(resultStates + cancelledRestores)
+        workplaceStore.updateSyncStates(updates + cancelledRestores)
 
-        let failedNames = resultStates
-            .filter { $0.status == .failed }
-            .map { URL(fileURLWithPath: $0.localPath).lastPathComponent }
+        // 失败名单须覆盖两段:准备阶段探测失败(branchStatus 不可读/目录异常,未进
+        // pull 任务)与 pull 任务内失败的仓库,否则通知里只报后者、前者凭空消失。
+        let failedNames = preparation.failed.map { URL(fileURLWithPath: $0.localPath).lastPathComponent }
+            + results
+                .filter { $0.result.status == .failed }
+                .map { URL(fileURLWithPath: $0.result.localPath).lastPathComponent }
 
         return RepositoryPullResult(
             successCount: successCount,

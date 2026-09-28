@@ -50,9 +50,11 @@ struct ConflictListPopoverView: View {
     private var conflictList: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(unmergedPaths, id: \.self) { path in
+                // 分隔线判断改用下标:此前每行取一次 unmergedPaths.last,整列表 O(N²)
+                // (CommitLogWindowView 同款修法)。
+                ForEach(Array(unmergedPaths.enumerated()), id: \.element) { index, path in
                     ConflictFileRowView(filePath: path)
-                    if path != unmergedPaths.last {
+                    if index < unmergedPaths.count - 1 {
                         Divider()
                             .padding(.leading, 12)
                     }

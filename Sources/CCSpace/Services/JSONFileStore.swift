@@ -229,8 +229,19 @@ struct JSONFileStore: Sendable {
         let stagingDirectory = rootDirectory
             .appendingPathComponent("\(Self.stagingDirectoryPrefix)\(UUID().uuidString)", isDirectory: true)
         let backupDirectory = stagingDirectory.appendingPathComponent("backup", isDirectory: true)
-        try FileManager.default.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: backupDirectory, withIntermediateDirectories: true)
+        // 暂存/备份目录一并按 0700 创建:数据文件含 AI API Key(settings.json)等敏感
+        // 配置,写入后到 chmod 0600 之间存在窗口(以及崩溃残留待清理期间),目录 0700
+        // 保证同机其他用户无法遍历进入读取。
+        try FileManager.default.createDirectory(
+            at: stagingDirectory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try FileManager.default.createDirectory(
+            at: backupDirectory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
 
         // 回滚是否未能全部完成。为 true 时必须保留暂存目录——里面装着唯一一份备份。
         var rollbackFailed = false

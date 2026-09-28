@@ -77,7 +77,15 @@ struct GitProcessRunner {
         var environment = ProcessInfo.processInfo.environment
         environment.merge(additionalEnvironment) { _, injected in injected }
         environment["GIT_TERMINAL_PROMPT"] = "0"
-        environment["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes"
+        // 固定非交互 ssh:用户已有 GIT_SSH_COMMAND 时**追加** -o BatchMode=yes 而非
+        // 整体覆盖——用户可能借它指定自定义密钥/端口/代理,整体覆盖会把配置静默丢弃,
+        // clone/pull 认证失败且无从排查。BatchMode 仍保证不弹交互提示。
+        if let existingSSHCommand = environment["GIT_SSH_COMMAND"],
+           existingSSHCommand.trimmingCharacters(in: .whitespaces).isEmpty == false {
+            environment["GIT_SSH_COMMAND"] = existingSSHCommand + " -o BatchMode=yes"
+        } else {
+            environment["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes"
+        }
         // 固定 git 输出语言为英文:全项目的错误分类(pull 策略回退、分支缺失判定、
         // stash 恢复决策、localizeMessage 之外的子串匹配)都依赖英文文案子串。
         // 不设防时用户 shell 里一个 LANG=zh_CN 就能让整套分类逻辑静默失效。

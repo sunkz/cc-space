@@ -200,7 +200,8 @@ final class RepositoryWindowContextTests: XCTestCase {
         XCTAssertEqual(unpushedRequests.count, 1)
         XCTAssertEqual(unpushedRequests[0].count, 3)
 
-        // 目录缺失是同步硬失败,且入口代际递增须拦下在途旧加载的写回。
+        // 目录缺失是硬失败;目录探测已移入 Task.detached,结局异步送达,
+        // 用等待而非调用点同步断言。入口代际递增须拦下在途旧加载的写回。
         await stub.setCallDelay(nanoseconds: 100_000_000)
         context.loadCommits(directory: directory, limit: 2, rev: nil, unpushedOnly: false) { outcome in
             box.logOutcomes.append(outcome)
@@ -208,10 +209,13 @@ final class RepositoryWindowContextTests: XCTestCase {
         let missingDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("ccspace-missing-\(UUID().uuidString)")
             .path
+        let missingLoaded = expectation(description: "目录缺失结局送达")
         context.loadCommits(directory: missingDirectory, limit: 2, rev: nil, unpushedOnly: false) { outcome in
             box.logOutcomes.append(outcome)
+            missingLoaded.fulfill()
         }
-        XCTAssertEqual(box.logOutcomes.count, 3, "目录缺失应在调用点同步完成")
+        await fulfillment(of: [missingLoaded], timeout: 5.0)
+        XCTAssertEqual(box.logOutcomes.count, 3, "目录缺失前仅有两笔成功结局,被拦下的旧任务不应写回")
         guard case let .directoryMissing(reportedPath)? = box.logOutcomes.last else {
             XCTFail("期望 .directoryMissing 结局")
             return

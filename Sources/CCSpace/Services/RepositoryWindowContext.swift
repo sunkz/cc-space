@@ -149,14 +149,21 @@ final class RepositoryWindowContext: ObservableObject {
         logTask?.cancel()
         logRequestID += 1
         let requestID = logRequestID
-        // 目录缺失(工作区被外部删除等)是硬失败。代际已在入口递增:
-        // 即使早退,在途旧任务的写回也已被拦下。
-        guard FileManager.default.fileExists(atPath: directory) else {
-            completion(.directoryMissing(directory))
-            return
-        }
         let service = gitService
         logTask = Task {
+            // 目录缺失(工作区被外部删除等)是硬失败。代际已在入口递增:
+            // 即使早退,在途旧任务的写回也已被拦下。
+            // 探测走 Task.detached:外置盘/网盘的 stat 可达数百毫秒,本类是
+            // @MainActor,Task{} 会继承主线程、Task.detached 才真正离开
+            // (与项目内"fileExists 必须移出主线程"的既有约定对齐)。
+            let directoryExists: Bool = await Task.detached(priority: .userInitiated) {
+                FileManager.default.fileExists(atPath: directory)
+            }.value
+            guard directoryExists else {
+                guard !Task.isCancelled, requestID == logRequestID else { return }
+                completion(.directoryMissing(directory))
+                return
+            }
             let fetched: [GitCommitEntry]
             if unpushedOnly {
                 fetched = await service.unpushedCommits(in: directory, count: limit + 1, rev: rev)

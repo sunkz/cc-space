@@ -445,11 +445,15 @@ struct GitStashEntry: Identifiable, Equatable, Sendable {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard trimmed.isEmpty == false else { return nil }
             let parts = trimmed.components(separatedBy: fieldSeparator)
-            guard parts.count == 2 else { return nil }
+            // 消息本身可能含 \u{1F}(stash push -m 手工构造):此前 `count == 2` 硬性
+            // 丢弃该行,行序即栈位置,丢一行会让其后所有条目的 index 前移——
+            // popStash/dropStash 按 index 操作会命中错误的 stash(drop 不可恢复)。
+            // 改为 `count >= 2`:前 n-1 段重建完整消息,日期恒取末段,行永不丢。
+            guard parts.count >= 2 else { return nil }
             return GitStashEntry(
                 index: lineIndex,
-                message: parts[0],
-                date: dateFormatter.date(from: parts[1]) ?? .distantPast
+                message: parts.dropLast().joined(separator: fieldSeparator),
+                date: dateFormatter.date(from: parts[parts.count - 1]) ?? .distantPast
             )
         }
     }
@@ -1326,16 +1330,31 @@ struct GitService: GitServicing {
         // 用户改动静默滞留 stash 且操作报成功。
         let countBefore = try await trackedStashEntryCount(in: directory)
         try await stash(in: directory)
-        let countAfter = try await trackedStashEntryCount(in: directory)
+        // stash push 一旦成功,改动就已经进入 stash:此后的对账查询失败(进程级错误)
+        // 或被取消,绝不能把错误上抛——上抛会让调用方按"操作失败/已取消"收场,
+        // 而用户改动孤悬 stash、无任何恢复记录。降级为 created(sha: nil) 走无标识
+        // 恢复(交恢复侧弹栈顶),与下方"查询失败返回 nil"的既有保守口径一致,
+        // 不因追踪失败丢暂存。
+        let countAfter: Int?
+        do {
+            countAfter = try await trackedStashEntryCount(in: directory)
+        } catch {
+            return .created(sha: nil)
+        }
         // 计数查询失败(nil)时无法判"是否新建":保守按已新建处理(交恢复侧走 SHA /
         // 弹栈顶),绝不能折成 notCreated——那等于把刚暂存的改动留在栈里还报成功。
         let created = (countBefore == nil || countAfter == nil) ? true : (countAfter != countBefore)
         guard created else {
             return .notCreated
         }
-        // rev-parse 异常(仓库竞态删除等)时 topAfter 为 nil:退回无标识恢复,
+        // rev-parse 异常(仓库竞态删除等)或被取消时 topAfter 拿不到:退回无标识恢复,
         // 与旧行为等价,不因追踪失败而丢暂存。
-        let topAfter = try await trackedStashTopSHA(in: directory)
+        let topAfter: String?
+        do {
+            topAfter = try await trackedStashTopSHA(in: directory)
+        } catch {
+            return .created(sha: nil)
+        }
         return .created(sha: topAfter)
     }
 

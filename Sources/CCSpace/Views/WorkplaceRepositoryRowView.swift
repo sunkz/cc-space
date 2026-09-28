@@ -604,9 +604,11 @@ struct WorkplaceRepositoryRowView: View {
             // (纠偏:当前工具链下 View 整类型被推断为 @MainActor,本方法不再是
             // nonisolated,此处 Task 继承主执行器——首个 await 恢复后仍回到主线程,
             // 旧注释"已回到全局并发执行器,不在主线程"的前提不成立,勿再据此
-            // 论证"无需 detached"。维持现状不在此顺手改;若名单显著变多,
-            // 这一步应下沉进 Task.detached,而不是继续留在主线程。)
-            let normalized = branches.map(BranchListNormalization.remoteBranches)
+            // 论证"无需 detached"。归一下沉进 Task.detached:上千分支的排序
+            // 不能留在主线程,与 AddRepositorySheetView 同口径。)
+            let normalized: [String]? = await Task.detached(priority: .userInitiated) {
+                branches.map(BranchListNormalization.remoteBranches)
+            }.value
             await MainActor.run {
                 guard generation == remoteBranchesGeneration else { return }
                 remoteBranches = normalized

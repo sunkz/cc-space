@@ -710,7 +710,15 @@ struct WorkplaceRuntimeService {
                 let lockedPaths = [workplacePath]
                     + originalStates.map(\.localPath)
                     + containedStatePaths
+                let rootPath = workplaceRootPath
                 try await RepositoryOperationLock.shared.withLockPaths(lockedPaths) {
+                    // 等锁可达数分钟,期间路径可能被替换(symlink 换向、根目录变更):
+                    // :681 的 containment 校验发生在等锁之前,按 LocalPathSafety 的
+                    // TOCTOU 契约,破坏性删除必须在锁内、紧邻执行前复检。
+                    try LocalPathSafety.validateManagedPath(
+                        workplacePath,
+                        within: rootPath
+                    )
                     // 整棵工作区目录树的递归删除可能耗时数分钟,移出主线程执行。
                     try await Self.removeItemOffMainThread(
                         fileSystemService,
@@ -836,41 +844,26 @@ struct WorkplaceRuntimeService {
         var updates: [RepositorySyncState] = []
         updates.reserveCapacity(changes.count)
         for change in changes {
-            let original = change.original
-            let updated = change.updated
-            // 本服务只会在行快照上改动这四个展示字段,其余字段一律以最新行为准。
-            let changesStatus = updated.status != original.status
-            let changesError = updated.lastError != original.lastError
-            let changesSyncedAt = updated.lastSyncedAt != original.lastSyncedAt
-            let changesHasLocalDirectory = updated.hasLocalDirectory != original.hasLocalDirectory
-            let hasOwnChanges = changesStatus || changesError || changesSyncedAt || changesHasLocalDirectory
+            // 行在 await 窗口内被去重/prune:维持 updateSyncStates 的补录语义,
+            // 有自身改动的行原样回写(与改动前的整体覆盖行为一致),无变化则不落库。
             guard let current = workplaceStore.syncStates.first(where: {
-                $0.workplaceID == updated.workplaceID && $0.repositoryID == updated.repositoryID
+                $0.workplaceID == change.updated.workplaceID && $0.repositoryID == change.updated.repositoryID
             }) else {
-                guard hasOwnChanges else { continue }
-                // 行在 await 窗口内被去重/prune:维持 updateSyncStates 的补录语义,
-                // 原样回写本行(与改动前的整体覆盖行为一致)。
-                updates.append(updated)
+                if RepositorySyncState.hasOwnChanges(from: change.original, to: change.updated) {
+                    updates.append(change.updated)
+                }
                 continue
             }
-            // 瞬态收口:操作期间该行可能被标成"进行中"瞬态(单仓 switchBranch 预标、
-            // 批量切换锁内预标 .switching),而结果与操作前快照恰好同值时,也必须把
-            // 瞬态归位成本次结果的终态,否则行永久卡在转轮、UI 锁死。
-            // 只收口**本操作自己预标过**的瞬态:他人转轮(如后台 pull 的 .pulling)
-            // 属于另一轮操作,强改回本操作的旧终态会吞掉别人的进行中状态。
-            let convergesTransient = current.status == premarkedTransient && current.status != updated.status
-            guard hasOwnChanges || convergesTransient else {
-                // 本操作没有任何字段变化(如被取消的行恢复原状态):不落库,
-                // 对齐 pull 路径"取消不落假失败/假成功"的约定。
-                continue
+            // 字段级增量合并(见 RepositorySyncState.merging):只回写本操作改动的
+            // 展示字段,其余字段以最新行为准,避免覆盖 await 窗口内的其他写入。
+            if let merged = RepositorySyncState.merging(
+                updated: change.updated,
+                onto: change.original,
+                in: current,
+                premarkedTransient: premarkedTransient
+            ) {
+                updates.append(merged)
             }
-            var merged = current
-            if changesStatus || convergesTransient { merged.status = updated.status }
-            if changesError { merged.lastError = updated.lastError }
-            if changesSyncedAt { merged.lastSyncedAt = updated.lastSyncedAt }
-            if changesHasLocalDirectory { merged.hasLocalDirectory = updated.hasLocalDirectory }
-            guard merged != current else { continue }
-            updates.append(merged)
         }
         workplaceStore.updateSyncStates(updates)
     }

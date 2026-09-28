@@ -34,10 +34,17 @@ final class GitStashEntryTests: XCTestCase {
 
         let entries = GitStashEntry.parseList(output)
 
-        // 无分隔符、字段数不符(2 个分隔符)的行被跳过,只保留合法条目。
-        XCTAssertEqual(entries.count, 1)
-        XCTAssertEqual(entries[0].message, "valid")
-        XCTAssertEqual(entries[0].index, 2)
+        // 仅「无任何分隔符」的行被跳过(仍占位,index 不回缩)。含分隔符的行不再因
+        // 字段数不符被丢弃:消息本身可能含 \u{1F},此前丢行会让其后所有条目的
+        // index 前移,pop/drop 按 index 操作会命中错误的 stash。日期解析失败时
+        // 兜底 .distantPast。
+        XCTAssertEqual(entries.count, 2)
+        XCTAssertEqual(entries[0].index, 1)
+        XCTAssertEqual(entries[0].message, "CCSpace manual stash\u{1F}not-a-date")
+        XCTAssertEqual(entries[0].date, .distantPast)
+        XCTAssertEqual(entries[1].index, 2)
+        XCTAssertEqual(entries[1].message, "valid")
+        XCTAssertNotEqual(entries[1].date, .distantPast)
     }
 
     func test_parseListHandlesEmptyOutput() {

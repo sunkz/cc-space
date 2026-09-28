@@ -79,4 +79,32 @@ final class DiffPatchLineParserTests: XCTestCase {
     func test_emptyPatchProducesNoLines() {
         XCTAssertEqual(DiffPatchLineParser.parse(""), [])
     }
+
+    func test_doesNotDropHunkBodyLinesResemblingMetadata() {
+        // hunk 体内删除行内容以 `- ` 开头(如邮件签名分隔符)时,patch 行恰为
+        // `--- xxx`;新增行内容以 `+ ` 开头时为 `+++ xxx`。进入 hunk 后不得再按
+        // 元数据前缀过滤,否则内容行整行丢失且后续行号漂移。
+        let patch = """
+        diff --git a/sig.md b/sig.md
+        index 1111111..2222222 100644
+        --- a/sig.md
+        +++ b/sig.md
+        @@ -1,3 +1,3 @@ body
+         before
+        --- signature delimiter
+        +++ plus prefix line
+         after
+        """
+        let lines = DiffPatchLineParser.parse(patch)
+        XCTAssertEqual(lines.count, 5)
+        XCTAssertEqual(lines[0].kind, .hunkHeader(context: "body"))
+        XCTAssertEqual(lines[1].kind, .context)
+        XCTAssertEqual(lines[2].kind, .removed)
+        XCTAssertEqual(lines[2].oldLineNumber, 2)
+        XCTAssertEqual(lines[3].kind, .added)
+        XCTAssertEqual(lines[3].newLineNumber, 2)
+        XCTAssertEqual(lines[4].kind, .context)
+        XCTAssertEqual(lines[4].oldLineNumber, 3)
+        XCTAssertEqual(lines[4].newLineNumber, 3)
+    }
 }

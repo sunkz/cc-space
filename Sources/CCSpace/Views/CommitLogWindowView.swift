@@ -193,10 +193,16 @@ struct CommitLogWindowView: View {
             reload()
         }
         .onWindowBecomeKey {
-            // 相等 payload 的 openWindow 只聚焦不重建内容:聚焦时刷新保证数据最新;
-            // 首次打开的 becomeKey 与 .task 首载重叠,由 hasLoadedInitialData 跳过。
+            // 相等 payload 的 openWindow 只聚焦不重建内容:聚焦时静默刷新保证数据最新。
+            // 不得调 reload():它会把 limit 重置回首页并闪整屏加载态——用户翻看历史
+            // 提交时切出再切回,浏览位置直接丢失。这里走 resetting=false 的静默刷新:
+            // 保留 limit 与现有列表(仅底部加载区转圈),与 Diff 窗口聚焦行为
+            // (load(isRefresh: true))对齐。首次打开的 becomeKey 与 .task 首载
+            // 重叠,由 hasLoadedInitialData 跳过。
             guard hasLoadedInitialData else { return }
-            reload()
+            guard isCreatingBranch == false else { return }
+            loadBranchContext()
+            reloadCommits(resetting: false, showLoading: false)
         }
         .onDisappear {
             cancelAllTasks()

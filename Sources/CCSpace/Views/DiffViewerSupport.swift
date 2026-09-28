@@ -21,7 +21,7 @@ struct DiffPatchLine: Equatable {
 
 /// 把 unified diff 的 patch 文本解析为可渲染的行模型。
 ///
-/// 跳过 `diff --git` / `index` / `---` / `+++` 等元数据行,
+/// 跳过首个 hunk 之前的 `diff --git` / `index` / `---` / `+++` 等元数据行,
 /// 根据 `@@` hunk 头维护两侧行号计数。
 enum DiffPatchLineParser {
     private static let hunkPattern: NSRegularExpression? = try? NSRegularExpression(
@@ -40,14 +40,22 @@ enum DiffPatchLineParser {
         var lines: [DiffPatchLine] = []
         var oldLineNumber = 0
         var newLineNumber = 0
+        // 是否已进入首个 hunk。元数据行(`diff --git`/`index`/`---`/`+++`)只可能出现在
+        // 首个 `@@` 之前;进入 hunk 后,删除行内容以 `-- ` 开头(如邮件签名分隔符)时
+        // patch 行恰为 `--- xxx`、新增行内容以 `++ ` 开头时为 `+++ xxx`——
+        // 若仍按前缀过滤,会把内容行整行丢弃并使后续行号漂移。
+        var hasEnteredHunk = false
 
         for raw in rawLines {
-            // 元数据行先于 +/- 前缀判断,避免 `--- a/...` 被当作删除行。
-            if raw.hasPrefix("diff --git ") || raw.hasPrefix("index ") ||
-                raw.hasPrefix("--- ") || raw.hasPrefix("+++ ") {
-                continue
+            if hasEnteredHunk == false {
+                // 元数据行先于 +/- 前缀判断,避免 `--- a/...` 被当作删除行。
+                if raw.hasPrefix("diff --git ") || raw.hasPrefix("index ") ||
+                    raw.hasPrefix("--- ") || raw.hasPrefix("+++ ") {
+                    continue
+                }
             }
             if raw.hasPrefix("@@") {
+                hasEnteredHunk = true
                 let hunk = parseHunkHeader(raw)
                 oldLineNumber = hunk.oldStart
                 newLineNumber = hunk.newStart

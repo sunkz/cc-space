@@ -1,4 +1,10 @@
 import Foundation
+import os
+
+private let gitServiceLog = Logger(
+    subsystem: "com.ccspace.app",
+    category: "GitService"
+)
 
 enum GitServiceError: LocalizedError, Sendable {
     case commandFailed(exitCode: Int32, stderr: String)
@@ -1643,11 +1649,25 @@ struct GitService: GitServicing {
             "refs/heads",
         ])
 
-        guard let statusOutput = try? await statusTask else { return nil }
+        let statusOutput: String
+        do {
+            statusOutput = try await statusTask
+        } catch {
+            logSnapshotReadFailure(error, command: "status --porcelain=2 --branch", directory: directory)
+            return nil
+        }
         var status = GitBranchStatusSnapshot.parsePorcelainV2(statusOutput)
 
+        let branchesOutput: String?
+        do {
+            branchesOutput = try await branchesTask
+        } catch {
+            logSnapshotReadFailure(error, command: "for-each-ref refs/heads", directory: directory)
+            branchesOutput = nil
+        }
+
         let branchList: [String]
-        if let branchesOutput = try? await branchesTask {
+        if let branchesOutput {
             branchList = branchesOutput
                 .components(separatedBy: .newlines)
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -1670,6 +1690,23 @@ struct GitService: GitServicing {
             currentBranch: status.currentBranch,
             branches: sortedBranches,
             status: status
+        )
+    }
+
+    /// 分支快照读取失败留痕。此前这一路是 `try?` 全量吞掉:fd 耗尽那类**进程级**失败
+    /// (60s 超时/输出超限/进程启动失败)在用户侧只剩"仓库状态永远加载不出来、
+    /// 点刷新也没反应",且没有任何可查痕迹。
+    ///
+    /// 只上报进程级失败:git 真实非零退出(仓库损坏、目录已不在)与任务取消都是常态,
+    /// 详情页 30s 轮询 × N 个仓库会把它们刷成噪声。
+    private func logSnapshotReadFailure(
+        _ error: any Error,
+        command: String,
+        directory: String
+    ) {
+        guard error is GitServiceError == false, error is CancellationError == false else { return }
+        gitServiceLog.error(
+            "event=git_snapshot_read_failed command=\(command, privacy: .public) path=\(directory, privacy: .public) reason=\(error.localizedDescription, privacy: .public)"
         )
     }
 

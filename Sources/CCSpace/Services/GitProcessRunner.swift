@@ -117,6 +117,16 @@ struct GitProcessRunner {
         // 超时定时器在正常退出路径已被取消,因此排水本身也需要兜底时限。
         let drainFallbackInterval: TimeInterval = 30
 
+        // 收尾摘掉排水调度器:它强引用 scheduleDrainFallback 闭包,而该闭包又强引用
+        // stdoutBox/stderrBox,两个 box 的 onOverflow 反过来引用本 box——
+        // DataBox → onOverflow → DrainSchedulerBox → scheduler → DataBox 是每次调用
+        // 必现的强引用环,环上的 Process 与两条 Pipe 永不释放,即每次 git 调用泄漏 4 个 fd。
+        // 数小时累积到 fd 上限后 `process.run()` 全线失败,而上游读取用 `try?` 吞掉错误,
+        // 表现就是"仓库状态永远加载不出来、点刷新也没反应"。
+        // 摘除时机是续体已恢复之后:此后 scheduler 只可能被 onCancel/超限回调读到,
+        // 两条路径要么已自行恢复续体,要么兜底排水 item 早已入队并自带清理。
+        defer { drainSchedulerBox.scheduler = nil }
+
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 continuationBox.store(continuation)
@@ -182,7 +192,9 @@ struct GitProcessRunner {
                 /// isTimeoutPath:本次兜底由超时路径调度时置位——即使管道排干失败,
                 /// 也必须恢复为超时错误而不是"被 SIGTERM 的退出码 + 半截输出"的伪成功。
                 nonisolated(unsafe) let scheduleDrainFallback: (Bool, @escaping @Sendable () -> Void) -> Void = { isTimeoutPath, resume in
-                    nonisolated(unsafe) let drainFallbackWork = DispatchWorkItem { [processBox, continuationBox, stdoutRead, stderrRead] in
+                    // 执行体与 item 分离:item 只攥着这个小盒子,见 DrainWorkBox 注释。
+                    let drainWorkBox = DrainWorkBox()
+                    nonisolated(unsafe) let cleanup: () -> Void = { [processBox, continuationBox, stdoutRead, stderrRead] in
                         // 只摘除读回调,不 closeFile:与回调执行竞态的 close 属未定义行为;
                         // 引用释放后 Pipe 在 deinit 中关闭 fd。
                         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
@@ -222,11 +234,21 @@ struct GitProcessRunner {
                             )
                         )
                     }
+                    drainWorkBox.store(cleanup)
+                    nonisolated(unsafe) let drainFallbackWork = DispatchWorkItem { [drainWorkBox] in
+                        // 已摘除执行体(正常排干)时空转。
+                        drainWorkBox.takeForFire()?()
+                    }
                     DispatchQueue.global().asyncAfter(
                         deadline: .now() + drainFallbackInterval,
                         execute: drainFallbackWork
                     )
                     readGroup.notify(queue: .global()) {
+                        // 排干即摘执行体:`cancel()` 只是标记,队列仍会把 item 真身持到
+                        // 兜底时限(生产 30s),item 若直接捕获清理闭包,Process 与两条 Pipe
+                        // 的 4 个 fd 就要陪跑到时限结束——每次 git 调用都摊上 30 秒滞留,
+                        // 会被 5s/30s 的周期刷新叠成可观的稳态占用。
+                        drainWorkBox.clear()
                         drainFallbackWork.cancel()
                         resume()
                     }
@@ -251,6 +273,14 @@ struct GitProcessRunner {
                 timeoutBox.store(timeoutWork)
 
                 process.terminationHandler = { completedProcess in
+                    // 主动摘除:handler 闭包捕获 stdoutBox/scheduleDrainFallback,后者又经
+                    // processBox 回指 Process,构成反向引用环。取消/异常路径都会置 nil,
+                    // 正常退出路径此前依赖"Foundation 回收后自行释放"这一未验证前提;
+                    // 每次 git 调用泄漏 Process + Pipe + 最大 64MB 缓冲会被 5s 周期刷新放大。
+                    // 摘除必须先于认领判定:claim 失败(取消/超时已接管退出状态)时的提前
+                    // return 会让上面的摘除永远不执行,Process → handler → processBox → Process
+                    // 的环就此永久留在图上,两条 Pipe 的 fd 与输出缓冲一起长期滞留。
+                    completedProcess.terminationHandler = nil
                     timeoutBox.release()
                     guard continuationClaim.claim() else { return }
                     scheduleDrainFallback(false) {
@@ -262,11 +292,6 @@ struct GitProcessRunner {
                             )
                         )
                     }
-                    // 主动摘除:handler 闭包捕获 stdoutBox/scheduleDrainFallback,后者又经
-                    // processBox 回指 Process,构成反向引用环。取消/异常路径都会置 nil,
-                    // 正常退出路径此前依赖"Foundation 回收后自行释放"这一未验证前提;
-                    // 每次 git 调用泄漏 Process + Pipe + 最大 64MB 缓冲会被 5s 周期刷新放大。
-                    completedProcess.terminationHandler = nil
                 }
 
                 do {
@@ -561,6 +586,36 @@ private final class DrainSchedulerBox: @unchecked Sendable {
             _scheduler = newValue
             lock.unlock()
         }
+    }
+}
+
+/// 兜底排水执行体的转发盒(与 TimeoutWorkItemBox 同一动机):dispatch 队列会把被 `cancel()`
+/// 的 item 真身持有到自身 deadline,若 item 直接捕获清理闭包,闭包里的 Process 与两条 Pipe
+/// (4 个 fd)要陪跑到 deadline 才释放。正常排干(两侧 EOF)时 clear() 摘走执行体,队列里
+/// 只剩这个空盒子;EOF 迟迟不来时执行体仍在盒内,兜底清理按原语义照常执行。
+private final class DrainWorkBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cleanup: (() -> Void)?
+
+    func store(_ cleanup: @escaping () -> Void) {
+        lock.lock()
+        self.cleanup = cleanup
+        lock.unlock()
+    }
+
+    /// 排干完成后摘除执行体,此后到期的 item 空转。调用点是 readGroup.notify
+    /// (两条管道均已 EOF、读回调已自摘、group 已平衡),此刻清理确实无必要。
+    func clear() {
+        lock.lock()
+        cleanup = nil
+        lock.unlock()
+    }
+
+    /// 到期时取执行体;已 clear 则为 nil。
+    func takeForFire() -> (() -> Void)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return cleanup
     }
 }
 

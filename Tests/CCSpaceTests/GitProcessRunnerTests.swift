@@ -1,4 +1,5 @@
 import XCTest
+import Darwin
 @testable import CCSpace
 
 final class GitProcessRunnerTests: XCTestCase {
@@ -89,4 +90,48 @@ final class GitProcessRunnerTests: XCTestCase {
         }
     }
 
+    /// 每条命令的两条管道(4 个 fd)必须随调用结束全部收回。
+    ///
+    /// 曾经的回归:DataBox → onOverflow → DrainSchedulerBox → 调度器闭包 → DataBox 构成
+    /// 每次调用必现的强引用环,Process/Pipe 永不释放,fd 以"每次 git 调用 4 个"的速率
+    /// 累积;数小时后耗尽上限,`process.run()` 全线失败,而上游读取用 `try?` 吞掉错误,
+    /// 用户侧只剩"切回前台后仓库状态加载不出来、点刷新也没反应"。
+    func test_repeatedRunsDoNotLeakFileDescriptors() async throws {
+        let runner = GitProcessRunner()
+        let baseline = openPipeDescriptorCount()
+
+        for _ in 0..<20 {
+            _ = try await runner.run(
+                arguments: ["--version"],
+                captureStdout: true,
+                captureStderr: true,
+                timeout: 15
+            )
+        }
+        // 管道随排干通知释放,释放点在本次调用结束前后数毫秒内;留出这点余量只为
+        // 让断言不依赖线程调度。排水兜底时限(30s)不参与:执行体在排干时已摘走。
+        try await Task.sleep(for: .milliseconds(800))
+
+        let after = openPipeDescriptorCount()
+        XCTAssertLessThanOrEqual(
+            after,
+            baseline + 4,
+            "git 调用残留未关闭的管道 fd(baseline=\(baseline) after=\(after),20 次调用共 80 个管道 fd 必须全部收回)"
+        )
+    }
+
+    /// 当前进程打开的**管道** fd 数。
+    ///
+    /// 只数管道而不数全部 fd:XCTest 自身会陆续打开普通文件,按总 fd 数断言会把
+    /// 无关增长算成泄漏。`Pipe()` 走 `pipe(2)`,fstat 形态为 S_IFIFO。
+    private func openPipeDescriptorCount() -> Int {
+        var statBuffer = stat()
+        var count = 0
+        for fd in 0..<getdtablesize() where fcntl(Int32(fd), F_GETFD) >= 0 {
+            if fstat(Int32(fd), &statBuffer) == 0, (statBuffer.st_mode & S_IFMT) == S_IFIFO {
+                count += 1
+            }
+        }
+        return count
+    }
 }

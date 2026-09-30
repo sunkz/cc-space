@@ -205,9 +205,10 @@ struct RepositorySettingsSection: View {
 
     private var headerSection: some View {
         // 区块头只留标题+副标题:仓库计数不再展示。
-        // 导入/导出是**整个仓库区**的备份动作,不属于「新增」这一操作,故置于标题行右侧:
+        // 导入/导出是**整个仓库区**的备份动作,不属于「新增」这一操作,故置于区块头右侧:
         // 有仓库/空列表两种状态下位置完全一致,操作区只剩搜索+新增仓库。
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        // 与副标题行对齐(.lastTextBaseline):贴标题显得偏高,压到副标题这条线上视觉重心才稳。
+        HStack(alignment: .lastTextBaseline, spacing: 8) {
             CCSpaceSectionTitle(
                 title: "Git 仓库",
                 subtitle: "在此添加的仓库可在创建工作区时直接勾选。",

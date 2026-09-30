@@ -30,25 +30,19 @@ struct CCSpace: App {
         JSONFileStore.cleanupStaleStagingDirectories(in: appSupportDirectory)
 
         // AI 服务(提交信息生成/测试连接/模型列表):Diff 独立窗口与主窗口的
-        // SettingsStore 不共享状态,服务在每次请求时直接读盘取最新配置,变更即时生效。
-        // API Key 已迁钥匙串(见 SecurityAPIKeyStore):读盘结果里的 apiKey 恒为空,
-        // 这里按托管态补读钥匙串,再交给服务消费。
+        // SettingsStore 不共享状态,服务在每次请求时直接读盘取最新配置,变更即时生效
+        // (API Key 明文在 settings.json 中,读盘即得完整配置)。
         let settingsFileStore = JSONFileStore(
             rootDirectory: appSupportDirectory
         )
-        let keychain = SecurityAPIKeyStore.shared
         aiCommitService = AICommitMessageService(
             settingsReader: {
                 do {
-                    var settings = try settingsFileStore.loadIfPresent(
+                    return try settingsFileStore.loadIfPresent(
                         AppSettings.self,
                         from: "settings.json",
                         default: AppSettings(workplaceRootPath: "")
                     )
-                    // API Key 已迁钥匙串:读盘结果里的 apiKey 恒为空,
-                    // 这里按托管态补读钥匙串,再交给服务消费(规则见 AppSettings 扩展)。
-                    settings.backfillAPIKeyFromKeychainIfManaged(using: keychain)
-                    return settings
                 } catch {
                     // 此前 `try?` 吞掉全部读盘/解码错误:settings.json 临时不可读时
                     // AI 功能静默降级为"未配置",现场无任何日志可查。

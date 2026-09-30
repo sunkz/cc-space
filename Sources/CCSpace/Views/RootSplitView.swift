@@ -18,6 +18,9 @@ struct RootSplitView: View {
     @State private var refreshGeneration: UInt64 = 0
     /// 设置页当前页签:tab 栏挂在标题栏 principal 位置,状态放在根视图共享给 SettingsView。
     @State private var settingsTab: SettingsTab = .general
+    /// AI 表单是否存在未保存修改:跨视图上报链 AISettingsSection → SettingsView →
+    /// 这里,标题栏页签标记(SettingsTabBar)从这里读。离开设置页时上报方复位。
+    @State private var aiSettingsHasUnsavedChanges = false
     @StateObject private var appViewModel = AppViewModel()
     @StateObject private var detailActionCoordinator = WorkplaceDetailActionCoordinator()
     @StateObject private var updateChecker = UpdateChecker()
@@ -86,6 +89,11 @@ struct RootSplitView: View {
         )
     }
 
+    /// 工具栏「获取更新」按钮的文案/图标状态,与版本号展示同源(都取自 updatePresentationState)。
+    private var updateButtonState: UpdateButtonPresentationState {
+        UpdateButtonPresentationState(updatePresentationState: updatePresentationState)
+    }
+
     private var diskRefreshService: DiskRefreshService {
         DiskRefreshService(
             workplaceStore: workplaceStore,
@@ -109,8 +117,8 @@ struct RootSplitView: View {
         // 而实例随即被丢弃。三者互不依赖(SettingsStore 的换根在调用时才传入
         // WorkplaceStore),可以各自独立惰性构造。
         // autoclosure 在视图生命周期内只求值一次 → SettingsStore.init 只跑一次,
-        // 其末尾的 API Key 迁移/钥匙串回填因此是"每启动一次",且早于 body 里任何
-        // 读 `aiSettings.apiKey` 的消费方(时序见 SettingsStore.init 注释)。
+        // 读盘(loadIfPresent)因此是"每启动一次",且早于 body 里任何读
+        // `aiSettings`(API Key 明文存 settings.json)的消费方。
         _settingsStore = StateObject(wrappedValue: SettingsStore(fileStore: fileStore))
         _repositoryStore = StateObject(wrappedValue: RepositoryStore(fileStore: fileStore))
         _workplaceStore = StateObject(wrappedValue: WorkplaceStore(fileStore: fileStore))
@@ -180,6 +188,7 @@ struct RootSplitView: View {
                             gitService: gitService,
                             aiService: aiService,
                             showOnboarding: $showOnboarding,
+                            hasUnsavedAIChanges: $aiSettingsHasUnsavedChanges,
                             selectedTab: $settingsTab
                         )
                     case .workplaces:
@@ -228,9 +237,7 @@ struct RootSplitView: View {
                     appViewModel.selectedWorkplaceID
                 }
                 // 路由持久化回调必须先于下面任何会改路由的动作(否则首个回调
-                // 找不到落点)。API Key 迁移不再挂这里:它随 SettingsStore 构造完成
-                // (StateObject 首次求值,早于 AISettingsSection 的 @State 首帧取值),
-                // 挪到 onAppear 已经晚于首帧,曾导致输入框捕获空 Key。
+                // 找不到落点)。
                 bindRoutePersistenceCallbacks()
                 // 启动恢复持久化的外观;覆盖若已被外部清空(显式模式下即不一致)会在此重新应用。
                 AppearanceModeApplier.reconcileOverride(with: settingsStore.settings.appearanceMode)
@@ -936,12 +943,15 @@ struct RootSplitView: View {
         .ccspaceScreenBackground()
     }
 
-    /// [设置][AI] tab 栏:挂 principal 位置,标题栏正中,与右上 light/dark 同一行。
+    /// [通用][AI] tab 栏:挂 principal 位置,标题栏正中,与右上 light/dark 同一行。
     @ToolbarContentBuilder
     private var settingsTabToolbarItem: some ToolbarContent {
         if appViewModel.route == .settings {
             ToolbarItem(placement: .principal) {
-                SettingsTabBar(selectedTab: $settingsTab)
+                SettingsTabBar(
+                    selectedTab: $settingsTab,
+                    showsUnsavedChanges: aiSettingsHasUnsavedChanges
+                )
             }
         }
     }
@@ -963,12 +973,22 @@ struct RootSplitView: View {
                     .ccspaceToolbarActionButton(prominent: true)
                     .ccspaceQuickHelp(settingsStore.settings.appearanceMode.toolbarButtonTitle)
 
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Button("获取更新 ↗", action: openReleasesPage)
-                            .buttonStyle(.plain)
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(.blue)
-                            .ccspaceQuickHelp("前往 Releases 下载最新版本")
+                    // 图标没有文字基线,整行按 .center 对齐:标识(15pt 墨迹)与 13pt 的
+                    // 版本号文字自然居中,不需要为字号变化维护魔法偏移。
+                    HStack(alignment: .center, spacing: 10) {
+                        // GitHub 标识代替原来的「获取更新 ↗」文字:系统符号库没有
+                        // GitHub 标识(见 GitHubMarkShape),且工具栏越短越好——
+                        // 完整文案(含"发现新版本 vX.Y.Z")走悬浮提示与无障碍名称。
+                        // 不加"跳转外链"角标:GitHub 标识本身已说明去处,再加符号只会更挤。
+                        Button(action: openReleasesPage) {
+                            GitHubMarkShape()
+                                .fill(updateButtonState.usesAccentTint ? Color.accentColor : Color.primary)
+                                .frame(width: 15, height: 15)
+                        }
+                        .buttonStyle(.plain)
+                        // 图标按钮没有可见文字,靠 providesLabel 把文案挂成无障碍名称;
+                        // 传 true 后 QuickHelp 会去重,不会 label/hint 各读一遍。
+                        .ccspaceQuickHelp(updateButtonState.title, providesLabel: true)
 
                         toolbarVersionText
                     }

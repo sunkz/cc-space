@@ -58,7 +58,7 @@ final class RootSplitViewSupportTests: XCTestCase {
 
     func test_runtimeServiceFactoryPassesTrimmedSettingsRootPath() {
         let fileStore = JSONFileStore(
-            rootDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            rootDirectory: makeTestRootURL()
         )
         let workplaceStore = WorkplaceStore(fileStore: fileStore)
         let service = RootSplitRuntimeServices.makeWorkplaceRuntimeService(

@@ -6,10 +6,11 @@ struct RepositorySettingsSection: View {
     @ObservedObject var repositoryStore: RepositoryStore
     @ObservedObject var workplaceStore: WorkplaceStore
     let gitService: GitServicing
+    /// 搜索词由 SettingsView 持有:同页的「回到顶部」按过滤后条数判断,需要同源。
+    @Binding var searchText: String
     /// 新增/编辑弹层共用的只读信息查询:提升为存储属性,避免在 sheet 内容闭包里
     /// 每次 body 求值都重建一份(此前在两处 sheet 闭包内各内联构造)。
     private let infoService: RepositoryInfoService
-    @State private var searchText: String = ""
     @State private var feedback: CCSpaceFeedback?
     @State private var deletePresentationState: RepositoryDeletePresentationState?
     @State private var showAddSheet = false
@@ -23,11 +24,13 @@ struct RepositorySettingsSection: View {
     init(
         repositoryStore: RepositoryStore,
         workplaceStore: WorkplaceStore,
-        gitService: GitServicing
+        gitService: GitServicing,
+        searchText: Binding<String>
     ) {
         self.repositoryStore = repositoryStore
         self.workplaceStore = workplaceStore
         self.gitService = gitService
+        self._searchText = searchText
         infoService = RepositoryInfoService(gitService: gitService)
     }
 
@@ -92,7 +95,7 @@ struct RepositorySettingsSection: View {
             searchText: searchText
         )
         return VStack(alignment: .leading, spacing: 12) {
-            headerSection(repositoryCount: repositories.count)
+            headerSection
 
             if let shownFeedback = feedback {
                 CCSpaceFeedbackBanner(feedback: shownFeedback, onClose: { self.feedback = nil })
@@ -200,8 +203,11 @@ struct RepositorySettingsSection: View {
         }
     }
 
-    private func headerSection(repositoryCount: Int) -> some View {
-        HStack(alignment: .top, spacing: 12) {
+    private var headerSection: some View {
+        // 区块头只留标题+副标题:仓库计数不再展示。
+        // 导入/导出是**整个仓库区**的备份动作,不属于「新增」这一操作,故置于标题行右侧:
+        // 有仓库/空列表两种状态下位置完全一致,操作区只剩搜索+新增仓库。
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
             CCSpaceSectionTitle(
                 title: "Git 仓库",
                 subtitle: "在此添加的仓库可在创建工作区时直接勾选。",
@@ -212,17 +218,14 @@ struct RepositorySettingsSection: View {
 
             Spacer(minLength: 12)
 
-            // 指示器与计数 pill 高度不同,内层按中心线对齐,避免跟随外层 .top 对齐错位。
-            HStack(alignment: .center, spacing: 12) {
-                GitEnvironmentStatusView(gitService: gitService)
+            backupActionButtons
+        }
+    }
 
-                CCSpacePill(
-                    title: "\(repositoryCount) 个仓库",
-                    systemImage: "shippingbox",
-                    tint: .secondary
-                )
-            }
-
+    /// 导入/导出不再收进「更多」菜单,作为可见按钮呈现。
+    /// 空列表没有可备份的内容,导出置灰,避免导出一份空 JSON。
+    private var backupActionButtons: some View {
+        Group {
             Button("导入") {
                 importRepositoriesBackup()
             }
@@ -233,6 +236,7 @@ struct RepositorySettingsSection: View {
                 exportRepositoriesBackup()
             }
             .ccspaceSecondaryActionButton()
+            .disabled(repositories.isEmpty)
             .ccspaceQuickHelp("将当前仓库配置导出为 JSON 备份")
         }
     }
@@ -275,10 +279,17 @@ struct RepositorySettingsSection: View {
                                 .ccspaceQuickHelp("默认分支")
                         }
 
+                        // MR 目标分支胶囊超阈值折叠为「+N」:全量平铺会把右侧
+                        // 操作按钮挤出行外(HStack 不换行)。
                         let mrOnlyBranches = repository.mrTargetBranches.filter { $0 != repository.defaultBranch }
-                        ForEach(mrOnlyBranches, id: \.self) { branch in
+                        let pillGroup = RepositoryBranchPillGroupPresentationState(branches: mrOnlyBranches)
+                        ForEach(pillGroup.visibleBranches, id: \.self) { branch in
                             RepositoryBranchPill(title: branch)
                                 .ccspaceQuickHelp("MR 目标分支")
+                        }
+                        if let overflowCountText = pillGroup.overflowCountText {
+                            RepositoryBranchPill(title: overflowCountText)
+                                .ccspaceQuickHelp(pillGroup.overflowQuickHelpText ?? "MR 目标分支")
                         }
                     }
 

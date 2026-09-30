@@ -26,7 +26,7 @@ final class WorkplaceStoreSyncStateDeduplicationTests: XCTestCase {
     }
 
     func test_loadDeduplicatesSyncStatesSharingCompositeKey() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let missingPath = root.appendingPathComponent("missing-repo").path
         // 两行同组合键但内容不同:解码本身不报错(容错解码/手工编辑都可能引入),
@@ -46,7 +46,7 @@ final class WorkplaceStoreSyncStateDeduplicationTests: XCTestCase {
 
     /// 启动 `.task` 每次无条件调用该方法:重复键若进建字典会 precondition trap(崩溃循环)。
     func test_reconcileHasLocalDirectoryFlagsToleratesDuplicatedCompositeKey() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let missingPath = root.appendingPathComponent("missing-repo").path
         try duplicatedSyncStatesJSON(localPath: missingPath).write(

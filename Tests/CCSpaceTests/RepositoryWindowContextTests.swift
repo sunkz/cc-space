@@ -273,7 +273,7 @@ private actor WindowContextGitStub: GitServicing {
     func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] {
         await recentCommits(in: directory, count: count, rev: nil)
     }
-    func remoteBranches(for remoteURL: String) async -> [String] { [] }
+    func remoteBranches(for remoteURL: String) async -> [String]? { [] }
 
     // RepositoryWindowContext 实际使用的通道
     func branches(in directory: String) async -> [String] {

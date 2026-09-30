@@ -188,8 +188,12 @@ final class GitLayerRobustnessTests: XCTestCase {
         // hash 进 revs 位置且后无 `--`:以 `-` 开头会被 git 当选项(如 --output= 写文件)。
         // 守卫口径必须与 commitDetail/blobContent 一致,在派发进程前拒掉。
         let service = GitService()
-        let entries = try await service.diffCommit(hash: "--output=/tmp/pwned", in: "/nonexistent-dir")
-        XCTAssertEqual(entries, [])
+        do {
+            _ = try await service.diffCommit(hash: "--output=/tmp/pwned", in: "/nonexistent-dir")
+            XCTFail("非法提交标识应被守卫拒绝")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "提交标识非法，无法读取其改动")
+        }
     }
 
     func test_isHexObjectIDRejectsNonASCIIHexDigitsAndOutOfRange() {

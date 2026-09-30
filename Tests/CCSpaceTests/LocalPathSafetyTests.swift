@@ -64,6 +64,17 @@ final class LocalPathSafetyTests: XCTestCase {
         XCTAssertEqual(LocalPathSafety.normalizedPath("   "), "")
     }
 
+    /// 相对路径必须归一为空串(由调用点的 isEmpty 防御统一转拒绝)。
+    /// 相对路径的锚点是本进程 CWD——对 GUI app 是未定义值且会随环境漂移,
+    /// 同一配置两次启动归一成不同路径,锁 key 与 containment 判定随之失效。
+    func test_normalizedPathRejectsRelativePaths() {
+        XCTAssertEqual(LocalPathSafety.normalizedPath("workplaces/demo"), "")
+        XCTAssertEqual(LocalPathSafety.normalizedPath("./demo"), "")
+        XCTAssertEqual(LocalPathSafety.normalizedPath("~/demo"), "")
+        // 前导空白 + 相对路径同样拒绝(不能因为 trim 后看似绝对就放过)。
+        XCTAssertEqual(LocalPathSafety.normalizedPath("  demo"), "")
+    }
+
     // MARK: - childPath
 
     func test_childPathJoinsComponentUnderParent() throws {

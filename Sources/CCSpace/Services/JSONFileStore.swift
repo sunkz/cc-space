@@ -211,6 +211,22 @@ struct JSONFileStore: Sendable {
         }
     }
 
+    /// 把**目录项**变更(rename/link/unlink)同步到稳定存储:文件数据 fsync 后,
+    /// rename 本身可能仍滞留在目录的元数据缓存里,断电后目录回到改名前的形态。
+    /// 提交完成后对数据目录补一次刷写,"清单已删/暂存已清"的收敛才有磁盘依据。
+    /// open 用 O_RDONLY(非 FREAD)才能对目录生效;APFS 上对目录的 F_FULLFSYNC
+    /// 只刷目录元数据,不会退化成同步刷整卷。
+    static func fsyncDirectory(atPath path: String) throws {
+        let descriptor = open(path, O_RDONLY)
+        guard descriptor >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer { close(descriptor) }
+        guard fcntl(descriptor, F_FULLFSYNC) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
+
     /// 同卷 `rename(2)` 原子覆盖:目标文件在任一时刻都是完整的旧内容或完整的新内容,
     /// **不存在** `removeItem + moveItem` 那种"旧文件已删、新文件未就位"的崩溃窗口。
     /// 不用 `FileManager.moveItem`(目标已存在时报错),也不用 `replaceItemAt`
@@ -383,6 +399,9 @@ struct JSONFileStore: Sendable {
                     if FileManager.default.fileExists(atPath: destinationURL.path) {
                         let backupURL = backupDirectory.appendingPathComponent(document.fileName)
                         try FileManager.default.copyItem(at: destinationURL, to: backupURL)
+                        // 备份是跨启动恢复(recoverInterruptedTransactions)换回旧内容的来源:
+                        // copyItem 不 fsync,断电后暂存里的备份可能是零页,回滚即把损坏写回正式文件。
+                        try Self.fsyncFile(atPath: backupURL.path)
                         // 回滚副本已自建(backupURL),替换本身用 rename(2) 原子覆盖:
                         // 不留废纸篓副本,且崩溃时目标文件要么是旧内容要么是新内容,不会消失。
                         try Self.atomicReplace(stagedURL: stagedURL, destinationURL: destinationURL)
@@ -407,6 +426,8 @@ struct JSONFileStore: Sendable {
                         // 同主路径:rename(2) 原子换回旧内容,不经废纸篓,也不留中间窗口。
                         // 不能整体 try?:换回失败必须进 rollbackFailed 分支保住备份。
                         try Self.atomicReplace(stagedURL: backupURL, destinationURL: destinationURL)
+                        // 换回的旧内容同样要落稳:否则断电后正式文件回到零页备份的形态。
+                        try? Self.fsyncFile(atPath: destinationURL.path)
                     } catch let rollbackError {
                         jsonFileStoreLog.error("event=rollback_restore_failed file=\(document.fileName, privacy: .public) reason=\(rollbackError.localizedDescription, privacy: .public)")
                         rollbackFailed = true
@@ -456,8 +477,10 @@ struct JSONFileStore: Sendable {
             throw error
         }
 
-        // 提交完成,先撤清单再清暂存:两步之间崩溃留下的"已完成事务"残留清单
-        // 会在下次启动被前滚(仅清残留),不影响数据正确性。
+        // 提交完成:先让 rename 的目录项落稳,再撤清单、清暂存。
+        // 顺序不能反:若 fsync 排在清残留之后,断电会让"清单已删、rename 未落盘",
+        // 下次启动的跨启动恢复(依赖清单)已无从回滚。
+        try? Self.fsyncDirectory(atPath: rootDirectory.path)
         if let manifestURL {
             try? FileManager.default.removeItem(at: manifestURL)
         }

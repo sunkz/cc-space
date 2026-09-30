@@ -120,8 +120,53 @@ final class GitProcessRunnerTests: XCTestCase {
         )
     }
 
-    /// 当前进程打开的**管道** fd 数。
+    /// 子进程环境组装:继承来的 git 覆盖变量必须被剥掉。
     ///
+    /// app 从 git shell 函数/wrapper 里启动时,GIT_DIR 这类变量会随继承进入每个
+    /// git 子进程并**压过** `-C <目录>` 定位——所有仓库操作被指向启动它的那个仓库,
+    /// 且因为命令"成功执行",错误完全不可归因。
+    /// 测试纯函数而不是真起进程:setenv 是进程级全局状态,并行跑测时会污染同进程
+    /// 的其它用例(见 ShellHelper 注释)。
+    func test_childEnvironmentStripsInheritedGitOverrides() {
+        let environment = GitProcessRunner.childEnvironment(
+            inherited: [
+                "GIT_DIR": "/someone/else/.git",
+                "GIT_WORK_TREE": "/someone/else",
+                "GIT_INDEX_FILE": "/someone/else/.git/index",
+                "GIT_CONFIG_SYSTEM": "/someone/else/gitconfig",
+                "GIT_CONFIG_COUNT": "1",
+                "HOME": "/Users/tester",
+            ],
+            additional: ["GIT_CONFIG_GLOBAL": "/isolated/gitconfig"]
+        )
+
+        for key in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT"] {
+            XCTAssertNil(environment[key], "继承的 \(key) 必须被剥离,否则 -C 定位被劫持")
+        }
+        // 注入项在剥离**之后**合并:测试用的配置隔离仍然生效。
+        XCTAssertEqual(environment["GIT_CONFIG_GLOBAL"], "/isolated/gitconfig")
+        // 无关变量与固定项保持。
+        XCTAssertEqual(environment["HOME"], "/Users/tester")
+        XCTAssertEqual(environment["LC_ALL"], "C")
+        XCTAssertEqual(environment["GIT_TERMINAL_PROMPT"], "0")
+    }
+
+    /// 用户已有的 GIT_SSH_COMMAND 只追加 BatchMode,不整体覆盖。
+    func test_childEnvironmentAppendsBatchModeToExistingSSHCommand() {
+        let withUserValue = GitProcessRunner.childEnvironment(
+            inherited: ["GIT_SSH_COMMAND": "ssh -i ~/.ssh/id_custom"]
+        )
+        XCTAssertEqual(
+            withUserValue["GIT_SSH_COMMAND"],
+            "ssh -i ~/.ssh/id_custom -o BatchMode=yes",
+            "整体覆盖会把用户的密钥/端口配置静默丢弃"
+        )
+
+        let withoutUserValue = GitProcessRunner.childEnvironment(inherited: [:])
+        XCTAssertEqual(withoutUserValue["GIT_SSH_COMMAND"], "ssh -o BatchMode=yes")
+    }
+
+    /// 当前进程打开的**管道** fd 数。    ///
     /// 只数管道而不数全部 fd:XCTest 自身会陆续打开普通文件,按总 fd 数断言会把
     /// 无关增长算成泄漏。`Pipe()` 走 `pipe(2)`,fstat 形态为 S_IFIFO。
     private func openPipeDescriptorCount() -> Int {

@@ -52,6 +52,11 @@ enum LocalPathSafety {
         // 的非法字节,出现在路径里几乎必然来自被手工篡改的 JSON 配置)。按"非法路径"
         // 归一为空串,让所有调用点现有的 isEmpty 防御统一转为拒绝。
         guard trimmedPath.contains("\0") == false else { return "" }
+        // 相对路径一律拒绝:锚点是**本进程的当前工作目录**,对 GUI app 是未定义值,
+        // 且可能随环境漂移——同一份配置在两次启动归一成不同路径,锁 key 也随之变化,
+        // containment 判定形同虚设。生产路径全部来自绝对化的面板选择/拼接,非法输入
+        // 走空串由既有 isEmpty 防御统一转拒绝。
+        guard trimmedPath.hasPrefix("/") else { return "" }
         let leadingTrimmed = String(path.drop(while: { $0 == " " || $0 == "\t" || $0.isNewline }))
         return URL(fileURLWithPath: leadingTrimmed).standardizedFileURL.path
     }

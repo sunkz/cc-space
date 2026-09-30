@@ -12,10 +12,16 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # git 故障(非仓库/对象损坏等)不能静默吞掉:此前 `2>/dev/null || true` 让
 # run.sh 打包时版本号可能无声回退成 0.0.0,与 release.sh 的 fail-fast 语义相反。
-# 这里失败时向 stderr 打警告再回退 0.0.0——保持"无合法 tag 也输出 0.0.0"的
+# 失败时向 stderr 打警告再回退 0.0.0——保持"无合法 tag 也输出 0.0.0"的
 # 不阻断契约(run 场景下开发调试不该被版本号卡住),但把异常显式暴露出来。
-if ! tag_list="$(git -C "${ROOT_DIR}" tag --list 'v[0-9]*' --sort=-version:refname 2>&1)"; then
-    echo "警告: git tag 枚举失败,版本号回退为 0.0.0:${tag_list}" >&2
+#
+# 数据通道与诊断通道必须分开:此前 `2>&1` 把 git 的 stderr 混进 tag_list,
+# 而 tag_list 随后要当"tag 列表"参与 grep——诊断文字一旦形如 `v1.2.3`
+# (git 的 tag 告警恰恰会这么写)就会被当成本项目版本号输出。
+# git 的 stderr 直接让它进本脚本 stderr(调用方 `$(...)` 只捕 stdout),
+# 既可见于终端,又不污染数据。
+if ! tag_list="$(git -C "${ROOT_DIR}" tag --list 'v[0-9]*' --sort=-version:refname)"; then
+    echo "警告: git tag 枚举失败,版本号回退为 0.0.0(错误见上方 git 输出)" >&2
     tag_list=""
 fi
 latest_tag="$(printf '%s\n' "${tag_list}" \

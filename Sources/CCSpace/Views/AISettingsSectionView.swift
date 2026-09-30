@@ -2,17 +2,22 @@ import SwiftUI
 
 /// 设置页「AI 服务」区块:配置 OpenAI 兼容服务,供提交信息生成等 AI 功能共用。
 ///
-/// 服务地址与模型名保存在 settings.json;API Key 优先存入钥匙串,
-/// 钥匙串不可用时降级为明文保存在 settings.json(界面据此展示明文落盘警示)。
+/// 服务地址、模型名与 API Key 明文保存在 settings.json(数据目录/文件已收紧为
+/// 仅本人可读写);表单回显即已存值,所见即所存。
 /// 支持从服务拉取模型列表选择、测试连接。
 struct AISettingsSection: View {
     @ObservedObject private var settingsStore: SettingsStore
     private let aiService: AIServiceInfoServicing
+    /// 未保存修改的上报通道:由 RootSplitView 持有、经 SettingsView 注入,
+    /// 驱动标题栏 AI 页签的「•」标记。本视图只报状态,不关心展示位置。
+    @Binding private var hasUnsavedChanges: Bool
 
     @State private var baseURLText: String
     @State private var modelNameText: String
     /// API Key 输入;初始化时回显已保存值(SecureField 按字符显示掩码),所见即所存。
     @State private var apiKeyText: String
+    /// 明文显示 API Key(默认掩码):掩码下粘贴错一个字符无从核对。
+    @State private var showsAPIKeyPlain = false
     @State private var feedback: CCSpaceFeedback?
     @State private var isTestingConnection = false
     @State private var isFetchingModels = false
@@ -22,9 +27,14 @@ struct AISettingsSection: View {
     @State private var fetchModelsTask: Task<Void, Never>?
     @State private var testConnectionTask: Task<Void, Never>?
 
-    init(settingsStore: SettingsStore, aiService: AIServiceInfoServicing) {
+    init(
+        settingsStore: SettingsStore,
+        aiService: AIServiceInfoServicing,
+        hasUnsavedChanges: Binding<Bool>
+    ) {
         self.settingsStore = settingsStore
         self.aiService = aiService
+        self._hasUnsavedChanges = hasUnsavedChanges
         let aiSettings = settingsStore.settings.aiSettings
         _baseURLText = State(initialValue: aiSettings?.baseURL ?? "")
         _modelNameText = State(initialValue: aiSettings?.modelName ?? "")
@@ -33,6 +43,20 @@ struct AISettingsSection: View {
 
     private var trimmedAPIKey: String {
         apiKeyText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 表单展示状态:与已存配置逐字段比对(输入框初值即来自已存配置)。
+    private var formState: AISettingsFormPresentationState {
+        AISettingsFormPresentationState(
+            baseURL: baseURLText,
+            modelName: modelNameText,
+            apiKey: apiKeyText,
+            stored: settingsStore.settings.aiSettings
+        )
+    }
+
+    private var isDirty: Bool {
+        formState.isDirty
     }
 
     var body: some View {
@@ -51,6 +75,11 @@ struct AISettingsSection: View {
             padding: 12,
             borderOpacity: 0.03
         )
+        // initial: true 保证首帧即对齐:上次离开设置页若带着未保存修改,
+        // onDisappear 的复位与本次进入的首帧存在时序窗口,首帧必须补报一次。
+        .onChange(of: isDirty, initial: true) { _, newValue in
+            hasUnsavedChanges = newValue
+        }
         .onDisappear {
             // 视图从视图树移除(设置页整体关闭)时取消在途请求并复位进行中状态。
             // 页签切换不再触发本回调:两页签常驻视图树以保留未保存输入。
@@ -60,6 +89,8 @@ struct AISettingsSection: View {
             testConnectionTask = nil
             isFetchingModels = false
             isTestingConnection = false
+            // 离开设置页后表单随视图销毁,标记一并清零,不留陈旧的页签「•」。
+            hasUnsavedChanges = false
         }
     }
 
@@ -77,6 +108,13 @@ struct AISettingsSection: View {
             }
 
             Spacer(minLength: 12)
+
+            if isDirty {
+                Text("未保存")
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+                    .accessibilityLabel("有未保存的修改")
+            }
 
             testConnectionButton
             saveButton
@@ -103,15 +141,53 @@ struct AISettingsSection: View {
     private var saveButton: some View {
         Button("保存") { save() }
             .ccspacePrimaryActionButton()
+            // 无修改时禁用:此前恒可点,点了也只是回一句"已保存";
+            // ⌘S 同样只在有未保存修改时生效(disabled 的按钮不接快捷键)。
+            .disabled(isDirty == false)
+            .keyboardShortcut("s", modifiers: .command)
     }
 
     // MARK: - 配置表单
 
-    /// API Key 输入框(掩码显示)。
+    /// API Key 输入组:默认掩码、眼睛按钮切换明文(核对粘贴);
+    /// 有密钥可清时给显式「清除密钥」入口,一键删除并落盘,
+    /// 不必手动清空输入框再点保存。
     private var apiKeyField: some View {
-        SecureField("sk-…", text: $apiKeyText)
+        HStack(spacing: 6) {
+            Group {
+                if showsAPIKeyPlain {
+                    TextField("sk-…", text: $apiKeyText)
+                } else {
+                    SecureField("sk-…", text: $apiKeyText)
+                }
+            }
             .textFieldStyle(.roundedBorder)
             .onSubmit(save)
+
+            Button {
+                showsAPIKeyPlain.toggle()
+            } label: {
+                Image(systemName: showsAPIKeyPlain ? "eye.slash" : "eye")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .foregroundStyle(.secondary)
+            .ccspaceQuickHelp(showsAPIKeyPlain ? "隐藏 API Key" : "显示 API Key", providesLabel: true)
+
+            if hasAPIKeyToClear {
+                Button("清除密钥") { clearAPIKey() }
+                    .ccspaceSecondaryActionButton()
+                    .ccspaceQuickHelp("删除已保存的 API Key，Base URL 与模型名保留")
+            }
+        }
+    }
+
+    /// 是否存在可清除的密钥:已存,或输入框里有内容。
+    private var hasAPIKeyToClear: Bool {
+        if settingsStore.settings.aiSettings?.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            return true
+        }
+        return trimmedAPIKey.isEmpty == false
     }
 
     private var configPanel: some View {
@@ -119,34 +195,23 @@ struct AISettingsSection: View {
             fieldRow(label: "Base URL") {
                 TextField("https://open.bigmodel.cn/api/paas/v4", text: $baseURLText)
                     .textFieldStyle(.roundedBorder)
+                    // 与 API Key、模型名同口径:回车即保存。三格只差 baseURL 需要回车确认
+                    // 时最容易让人以为"没生效"而再点一次保存按钮。
+                    .onSubmit(save)
             }
 
-            HStack(alignment: .center, spacing: 10) {
-                Text("API Key")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-
+            fieldRow(label: "API Key") {
                 apiKeyField
-
-                Text("模型名")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .padding(.leading, 2)
-
-                TextField("glm-5.3-flash", text: $modelNameText)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(minWidth: 100, maxWidth: 140)
-
-                fetchModelsButton
             }
 
-            // 钥匙串不可用时的明文降级是持久状态,提示常驻展示直到恢复;
-            // apiKeyStoredInKeychain 由 SettingsStore 维护,这里只读。
-            if settingsStore.apiKeyStoredInKeychain == false {
-                Text("钥匙串不可用，API Key 正以明文保存在 settings.json 中")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
+            fieldRow(label: "模型名") {
+                HStack(spacing: 6) {
+                    TextField("glm-5.3-flash", text: $modelNameText)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit(save)
+
+                    fetchModelsButton
+                }
             }
         }
         .ccspaceInsetPanel(
@@ -165,13 +230,13 @@ struct AISettingsSection: View {
                 ProgressView()
                     .controlSize(.small)
             } else {
-                Image(systemName: "chevron.up.chevron.down")
+                Label("选择模型", systemImage: "chevron.up.chevron.down")
             }
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
         .disabled(isFetchingModels)
-        .ccspaceQuickHelp("从服务获取可用模型列表", providesLabel: true)
+        .ccspaceQuickHelp("从服务获取可用模型列表并选择")
         .ccspacePopover(isPresented: $showsModelPicker, arrowEdge: .bottom) {
             modelPickerPopover
         }
@@ -315,20 +380,30 @@ struct AISettingsSection: View {
     }
 
     /// 动作前置校验;requireModel 为 false 时允许模型名暂空(如先拉列表再选模型)。
+    /// API Key 不参与校验:本地服务无需密钥(见 AISettingsFormPresentationState)。
     private func validateInputsForAction(requireModel: Bool) -> Bool {
-        if trimmedBaseURL.isEmpty {
-            feedback = CCSpaceFeedback(style: .error, message: "请先填写 Base URL")
-            return false
-        }
-        if requireModel && trimmedModelName.isEmpty {
-            feedback = CCSpaceFeedback(style: .error, message: "请先填写模型名")
-            return false
-        }
-        if trimmedAPIKey.isEmpty {
-            feedback = CCSpaceFeedback(style: .error, message: "请先填写 API Key")
+        if let message = AISettingsFormPresentationState.actionValidationError(
+            baseURL: trimmedBaseURL,
+            modelName: trimmedModelName,
+            requireModel: requireModel
+        ) {
+            feedback = CCSpaceFeedback(style: .error, message: message)
             return false
         }
         return true
+    }
+
+    /// 显式删除已保存的 API Key(输入框一并清空并立即落盘),
+    /// 不牵动 Base URL/模型名的未保存修改。
+    private func clearAPIKey() {
+        do {
+            try settingsStore.clearStoredAPIKey()
+            apiKeyText = ""
+            showsAPIKeyPlain = false
+            feedback = CCSpaceFeedbackFactory.actionSuccess("已清除保存的 API Key")
+        } catch {
+            feedback = CCSpaceFeedbackFactory.actionError(action: "清除 API Key", error: error)
+        }
     }
 }
 

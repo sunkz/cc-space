@@ -4,7 +4,7 @@ import XCTest
 @MainActor
 final class RepositoryStoreTests: XCTestCase {
     func test_addRepositoryRejectsDuplicateURL() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
 
         try store.addRepository(gitURL: "git@github.com:org/api.git")
@@ -18,7 +18,7 @@ final class RepositoryStoreTests: XCTestCase {
     }
 
     func test_addRepositoryRejectsDuplicateRepoNameFromDifferentURL() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
 
         try store.addRepository(gitURL: "git@github.com:team-a/api.git")
@@ -32,7 +32,7 @@ final class RepositoryStoreTests: XCTestCase {
     }
 
     func test_addRepositoryRejectsInvalidRepoNameForLocalPath() {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
 
         XCTAssertThrowsError(
@@ -43,7 +43,7 @@ final class RepositoryStoreTests: XCTestCase {
     }
 
     func test_removeRepositoryDeletesAndPersists() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let fileStore = JSONFileStore(rootDirectory: root)
         let store = RepositoryStore(fileStore: fileStore)
         let workplaceStore = WorkplaceStore(fileStore: fileStore)
@@ -65,7 +65,7 @@ final class RepositoryStoreTests: XCTestCase {
     /// 删仓库必须与工作区关联清理一次原子提交:repositories.json 落盘的同时,
     /// 工作区的选中/置顶列表与 sync states 里的引用一并清掉并持久化。
     func test_removeRepositoryAtomicallyCleansWorkplaceAssociations() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let fileStore = JSONFileStore(rootDirectory: root)
         let store = RepositoryStore(fileStore: fileStore)
         let workplaceStore = WorkplaceStore(fileStore: fileStore)
@@ -99,7 +99,7 @@ final class RepositoryStoreTests: XCTestCase {
     /// "https://x/repo.git/" 与 "https://x/repo" 应视为同一仓库:
     /// 归一化必须循环剥离尾部 "/" 与 ".git",单次剥离会漏判。
     func test_addRepositoryTreatsTrailingSlashAndGitSuffixAsDuplicate() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
 
         try store.addRepository(gitURL: "https://github.com/org/repo")
@@ -112,7 +112,7 @@ final class RepositoryStoreTests: XCTestCase {
     }
 
     func test_updateRepositoryChangesURLWithoutChangingRepoName() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let fileStore = JSONFileStore(rootDirectory: root)
         let store = RepositoryStore(fileStore: fileStore)
 
@@ -130,7 +130,7 @@ final class RepositoryStoreTests: XCTestCase {
     }
 
     func test_addAndUpdateRepositoryTrimWhitespace() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
 
         try store.addRepository(gitURL: " git@github.com:org/api.git ")
@@ -142,7 +142,7 @@ final class RepositoryStoreTests: XCTestCase {
     }
 
     func test_updateRepositoryRejectsDuplicateURL() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
 
         try store.addRepository(gitURL: "git@github.com:org/api.git")
@@ -157,7 +157,7 @@ final class RepositoryStoreTests: XCTestCase {
     }
 
     func test_updateRepositoryRejectsRepoNameChange() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
 
         try store.addRepository(gitURL: "git@github.com:org/api.git")
@@ -171,8 +171,8 @@ final class RepositoryStoreTests: XCTestCase {
     }
 
     func test_deduplicatePersistedRepositoriesDoesNotAutoImportRepositoriesFromDisk() async throws {
-        let rootDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let fileStore = JSONFileStore(rootDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        let rootDirectory = makeTestRootURL()
+        let fileStore = JSONFileStore(rootDirectory: makeTestRootURL())
         let store = RepositoryStore(fileStore: fileStore)
 
         let workplaceA = rootDirectory.appendingPathComponent("hello")
@@ -192,7 +192,7 @@ final class RepositoryStoreTests: XCTestCase {
     }
 
     func test_exportBackupWritesRepositoryBackupDocument() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
         let backupURL = root.appendingPathComponent("repositories-backup.json")
 
@@ -215,7 +215,7 @@ final class RepositoryStoreTests: XCTestCase {
     }
 
     func test_importBackupImportsNewRepositoriesAndSkipsDuplicates() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
         let backupURL = root.appendingPathComponent("repositories-backup.json")
 
@@ -251,7 +251,7 @@ final class RepositoryStoreTests: XCTestCase {
     }
 
     func test_importBackupRejectsInvalidBackupFormat() {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
         let backupURL = root.appendingPathComponent("repositories-backup.json")
 
@@ -266,7 +266,7 @@ final class RepositoryStoreTests: XCTestCase {
     }
 
     func test_importBackupRejectsEmptyRepositoryList() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
         let backupURL = root.appendingPathComponent("repositories-backup.json")
         let v1JSON = """
@@ -287,7 +287,7 @@ final class RepositoryStoreTests: XCTestCase {
     }
 
     func test_exportBackupV2IncludesMRTargetBranches() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
         let backupURL = root.appendingPathComponent("repositories-backup.json")
 
@@ -306,7 +306,7 @@ final class RepositoryStoreTests: XCTestCase {
     }
 
     func test_importBackupV1FormatImportsWithEmptyMRTargetBranches() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
         let backupURL = root.appendingPathComponent("repositories-backup.json")
 
@@ -331,7 +331,7 @@ final class RepositoryStoreTests: XCTestCase {
 
     /// 版本校验必须有下界:version 为 0/负数(手工编辑或伪造的备份)不得被当受支持版本导入。
     func test_importBackupRejectsVersionBelowOne() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let backupURL = root.appendingPathComponent("repositories-backup.json")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
 
@@ -364,7 +364,7 @@ final class RepositoryStoreTests: XCTestCase {
     }
 
     func test_importBackupV2FormatImportsWithMRTargetBranches() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
         let backupURL = root.appendingPathComponent("repositories-backup.json")
 
@@ -390,7 +390,7 @@ final class RepositoryStoreTests: XCTestCase {
     }
 
     func test_importBackupMergesMRTargetBranchesForExistingRepositories() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
         let backupURL = root.appendingPathComponent("repositories-backup.json")
 
@@ -460,7 +460,7 @@ final class RepositoryStoreTests: XCTestCase {
     /// 去重事件序号必须单调递增:根视图用 `.onChange` 观察事件,而清理条数可能
     /// 连续两次相同(1→1),按条数观察第二次不会触发、提示永久丢失。
     func test_applyDeduplicationResultBumpsSequenceWhenCleanupCountRepeats() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
         XCTAssertNil(store.lastDeduplicationCleanupCount)
         XCTAssertEqual(store.deduplicationCleanupSequence, 0)
@@ -482,7 +482,7 @@ final class RepositoryStoreTests: XCTestCase {
     }
 
     func test_importBackupSkipsInvalidEntryAndKeepsRest() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
         let backupURL = root.appendingPathComponent("backup.json")
@@ -496,6 +496,154 @@ final class RepositoryStoreTests: XCTestCase {
         XCTAssertEqual(result.importedCount, 2, "一条坏数据不得毁掉整个导入")
         XCTAssertEqual(result.skippedCount, 1)
         XCTAssertEqual(Set(store.repositories.map(\.repoName)), ["good-one", "good-two"])
+    }
+
+    /// repositories.json 混入重复 id(两条不同 URL)时加载必须收敛:
+    /// 否则去重的 keptIDs(Set<UUID>)会把同 id 两条都判为保留,更新/删除只可达首条。
+    func test_duplicateRepositoryIDsAreDeduplicatedOnLoad() throws {
+        let root = makeTestRootURL()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let id = UUID()
+        let now = Date()
+        let first = RepositoryConfig(
+            id: id,
+            gitURL: "git@github.com:org/blog.git",
+            repoName: "blog",
+            createdAt: now,
+            updatedAt: now
+        )
+        let second = RepositoryConfig(
+            id: id,
+            gitURL: "git@github.com:org/web.git",
+            repoName: "web",
+            createdAt: now,
+            updatedAt: now
+        )
+        let data = try JSONFileStore.makeEncoder().encode([first, second])
+        try data.write(to: root.appendingPathComponent("repositories.json"))
+
+        let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
+
+        XCTAssertEqual(store.repositories.count, 1, "重复 id 的仓库应在加载时收敛到首条")
+        XCTAssertEqual(store.repositories.first?.repoName, "blog")
+    }
+
+    /// mrTargetBranches 的"无重复"是不变量:此前只在 decode 路径去重,
+    /// 成员式构造(新增仓库弹窗、导入前的内存对象)可带着重复值进入
+    /// `ForEach(id: \.self)`,造成 SwiftUI 重复 ID。两条路径必须都收敛。
+    func test_repositoryConfigDeduplicatesMRTargetBranchesOnBothPaths() throws {
+        let now = Date()
+        let constructed = RepositoryConfig(
+            id: UUID(),
+            gitURL: "git@github.com:org/blog.git",
+            repoName: "blog",
+            mrTargetBranches: ["main", "develop", "main"],
+            createdAt: now,
+            updatedAt: now
+        )
+        XCTAssertEqual(constructed.mrTargetBranches, ["main", "develop"], "构造路径应保序去重")
+
+        let json = """
+        {
+            "id": "\(constructed.id.uuidString)",
+            "gitURL": "git@github.com:org/blog.git",
+            "repoName": "blog",
+            "mrTargetBranches": ["develop", "main", "develop", "release/1"],
+            "createdAt": "2024-01-01T00:00:00Z",
+            "updatedAt": "2024-01-01T00:00:00Z"
+        }
+        """
+        let decoded = try JSONFileStore.makeDecoder().decode(
+            RepositoryConfig.self,
+            from: Data(json.utf8)
+        )
+        XCTAssertEqual(decoded.mrTargetBranches, ["develop", "main", "release/1"], "解码路径保持保序去重")
+    }
+
+    // MARK: - commitDiskRefresh(刷新结果 + 去重删除单批原子提交)
+    func test_commitDiskRefreshPrunesReferencesAndPersistsAtomically() throws {
+        let root = makeTestRootURL()
+        let fileStore = JSONFileStore(rootDirectory: root)
+        let repositoryStore = RepositoryStore(fileStore: fileStore)
+        let workplaceStore = WorkplaceStore(fileStore: fileStore)
+        try repositoryStore.addRepository(gitURL: "git@github.com:org/blog.git")
+        try repositoryStore.addRepository(gitURL: "git@github.com:org/web.git")
+        let kept = repositoryStore.repositories[0]
+        let removed = repositoryStore.repositories[1]
+        let workplace = try workplaceStore.createWorkplace(
+            name: "demo",
+            rootPath: "/Users/demo/Workplaces",
+            selectedRepositories: repositoryStore.repositories
+        )
+        try workplaceStore.setRepositoryPinned(true, repositoryID: removed.id, in: workplace.id)
+
+        let repositoryResult = RepositoryDeduplicationResult(repositories: [kept], changed: true)
+        // changed=false 也要提交:去重引用清理本身就是变化(旧两步写的缺口)。
+        let workplaceResult = WorkplaceDiskRefreshResult(
+            workplaces: workplaceStore.workplaces,
+            syncStates: workplaceStore.syncStates,
+            changed: false
+        )
+
+        try repositoryStore.commitDiskRefresh(
+            workplaceResult: workplaceResult,
+            repositoryResult: repositoryResult,
+            workplaceStore: workplaceStore
+        )
+
+        XCTAssertEqual(repositoryStore.repositories.map(\.id), [kept.id])
+        XCTAssertEqual(repositoryStore.lastDeduplicationCleanupCount, 1)
+        XCTAssertEqual(repositoryStore.deduplicationCleanupSequence, 1)
+        let updatedWorkplace = try XCTUnwrap(workplaceStore.workplaces.first)
+        XCTAssertEqual(updatedWorkplace.selectedRepositoryIDs, [kept.id], "被删仓库的选中引用应同批清理")
+        XCTAssertTrue(updatedWorkplace.pinnedRepositoryIDs.isEmpty, "置顶引用同样要摘除")
+        XCTAssertEqual(Set(workplaceStore.syncStates.map(\.repositoryID)), [kept.id])
+
+        let reloadedRepositoryStore = RepositoryStore(fileStore: fileStore)
+        let reloadedWorkplaceStore = WorkplaceStore(fileStore: fileStore)
+        XCTAssertEqual(reloadedRepositoryStore.repositories.map(\.id), [kept.id])
+        XCTAssertEqual(reloadedWorkplaceStore.workplaces.first?.selectedRepositoryIDs, [kept.id])
+        XCTAssertEqual(Set(reloadedWorkplaceStore.syncStates.map(\.repositoryID)), [kept.id])
+    }
+
+    func test_commitDiskRefreshWithNoChangesWritesNothing() throws {
+        let root = makeTestRootURL()
+        let fileStore = JSONFileStore(rootDirectory: root)
+        let repositoryStore = RepositoryStore(fileStore: fileStore)
+        let workplaceStore = WorkplaceStore(fileStore: fileStore)
+        try repositoryStore.addRepository(gitURL: "git@github.com:org/blog.git")
+        _ = try workplaceStore.createWorkplace(
+            name: "demo",
+            rootPath: "/Users/demo/Workplaces",
+            selectedRepositories: repositoryStore.repositories
+        )
+        workplaceStore.flushSyncStates()
+
+        let mtimeBefore = (try? FileManager.default.attributesOfItem(atPath: root.appendingPathComponent("repositories.json").path)[.modificationDate] as? Date) ?? .distantPast
+        let snapshot = WorkplaceStore.snapshot(
+            workplaces: workplaceStore.workplaces,
+            syncStates: workplaceStore.syncStates
+        )
+        let workplaceResult = WorkplaceDiskRefreshResult(
+            workplaces: snapshot.workplaces,
+            syncStates: snapshot.syncStates,
+            changed: false
+        )
+        let repositoryResult = RepositoryDeduplicationResult(
+            repositories: repositoryStore.repositories,
+            changed: false
+        )
+
+        try repositoryStore.commitDiskRefresh(
+            workplaceResult: workplaceResult,
+            repositoryResult: repositoryResult,
+            workplaceStore: workplaceStore
+        )
+
+        XCTAssertEqual(repositoryStore.deduplicationCleanupSequence, 0)
+        let mtimeAfter = (try? FileManager.default.attributesOfItem(atPath: root.appendingPathComponent("repositories.json").path)[.modificationDate] as? Date) ?? .distantPast
+        XCTAssertEqual(mtimeAfter, mtimeBefore, "无任何变化时不得触发落盘写")
     }
 
 }

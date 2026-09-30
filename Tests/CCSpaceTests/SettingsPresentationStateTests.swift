@@ -61,7 +61,8 @@ final class SettingsPresentationStateTests: XCTestCase {
 final class SettingsTabPresentationStateTests: XCTestCase {
     func test_allTabsOrderAndTitles() {
         XCTAssertEqual(SettingsTabPresentationState.allTabs, [.general, .ai])
-        XCTAssertEqual(SettingsTab.general.title, "设置")
+        // 页签在设置页内部,不自称"设置"(自指),与内容范围一致叫"通用"。
+        XCTAssertEqual(SettingsTab.general.title, "通用")
         XCTAssertEqual(SettingsTab.ai.title, "AI")
     }
 
@@ -71,8 +72,31 @@ final class SettingsTabPresentationStateTests: XCTestCase {
     }
 
     func test_pickerTitlesUseUnicodeStarForIconTabs() {
-        XCTAssertEqual(SettingsTab.general.pickerTitle, "设置")
-        XCTAssertEqual(SettingsTab.ai.pickerTitle, "✦ AI")
+        XCTAssertEqual(SettingsTab.general.pickerTitle(), "通用")
+        XCTAssertEqual(SettingsTab.ai.pickerTitle(), "✦ AI")
+        XCTAssertEqual(
+            SettingsTab.ai.pickerTitle(showingUnsavedChanges: true),
+            "✦ AI •",
+            "未保存标记以「•」追加在段标题尾部"
+        )
+    }
+
+    func test_unsavedChangesMarkerOnlyAppearsOnAITab() {
+        let state = SettingsTabPresentationState(selectedTab: .general, showsUnsavedChanges: true)
+
+        XCTAssertEqual(
+            state.pickerTitle(for: .ai),
+            "✦ AI •",
+            "AI 表单有未保存修改时,AI 页签带「•」标记"
+        )
+        XCTAssertEqual(
+            state.pickerTitle(for: .general),
+            "通用",
+            "通用页签没有表单输入,恒不带未保存标记"
+        )
+
+        let cleanState = SettingsTabPresentationState(selectedTab: .general)
+        XCTAssertEqual(cleanState.pickerTitle(for: .ai), "✦ AI")
     }
 
     func test_selectionAndAccessibilityLabels() {
@@ -80,6 +104,6 @@ final class SettingsTabPresentationStateTests: XCTestCase {
         XCTAssertTrue(state.isSelected(.ai))
         XCTAssertFalse(state.isSelected(.general))
         XCTAssertEqual(state.accessibilityLabel(for: .ai), "AI（当前页签）")
-        XCTAssertEqual(state.accessibilityLabel(for: .general), "设置")
+        XCTAssertEqual(state.accessibilityLabel(for: .general), "通用")
     }
 }

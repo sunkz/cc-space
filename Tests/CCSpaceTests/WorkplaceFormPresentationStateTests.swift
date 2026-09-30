@@ -331,6 +331,8 @@ final class WorkplaceFormPresentationStateTests: XCTestCase {
 
         XCTAssertTrue(presentationState.canSubmit)
         XCTAssertEqual(presentationState.selectedRepositorySubtitle, "2 个已选")
+        // 视图用这个计数决定保存前是否要弹"本地目录会被删除"的二次确认。
+        XCTAssertEqual(presentationState.removedRepositoryCount, 1)
         XCTAssertEqual(
             presentationState.removalWarningFeedback,
             CCSpaceFeedback(style: .warning, message: "取消勾选后，如本地目录已存在，将一并删除对应本地文件。")
@@ -371,6 +373,7 @@ final class WorkplaceFormPresentationStateTests: XCTestCase {
         XCTAssertFalse(emptyNameState.canSubmit)
         XCTAssertFalse(noSelectionState.canSubmit)
         XCTAssertEqual(noSelectionState.selectedRepositorySubtitle, "")
+        XCTAssertEqual(noSelectionState.removedRepositoryCount, 1)
         XCTAssertEqual(
             noSelectionState.removalWarningFeedback,
             CCSpaceFeedback(style: .warning, message: "取消勾选后，如本地目录已存在，将一并删除对应本地文件。")

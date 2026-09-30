@@ -73,7 +73,7 @@ final class WorkplaceActionStateTests: XCTestCase {
         XCTAssertEqual(actionState.workplace, targetWorkplace)
         XCTAssertEqual(actionState.failedRepositories, [failedRepository])
         XCTAssertEqual(actionState.activeRepositoryCount, 0)
-        XCTAssertTrue(actionState.hasPullableRepositories)
+        XCTAssertTrue(actionState.hasLocalRepositories)
         XCTAssertFalse(actionState.isBusy)
         XCTAssertTrue(actionState.canRetryFailedRepositories)
         XCTAssertTrue(actionState.canSyncAllRepositories)
@@ -135,7 +135,7 @@ final class WorkplaceActionStateTests: XCTestCase {
             ]
         )
 
-        XCTAssertTrue(actionState.hasPullableRepositories)
+        XCTAssertTrue(actionState.hasLocalRepositories)
         XCTAssertTrue(actionState.canSyncAllRepositories)
     }
 

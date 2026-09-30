@@ -127,7 +127,9 @@ final class RepositoryStore: ObservableObject {
     init(fileStore: JSONFileStore) {
         self.fileStore = fileStore
         do {
-            self.repositories = try fileStore.loadIfPresent([RepositoryConfig].self, from: "repositories.json", default: [])
+            self.repositories = RepositoryStore.deduplicatedIDs(
+                try fileStore.loadIfPresent([RepositoryConfig].self, from: "repositories.json", default: [])
+            )
         } catch {
             repositoryStoreLog.error("event=load_repositories_failed reason=\(error.localizedDescription, privacy: .public)")
             didRecoverFromCorruptFile = true
@@ -137,13 +139,21 @@ final class RepositoryStore: ObservableObject {
                 RepositoryConfig.self,
                 from: "repositories.json"
             ) {
-                self.repositories = tolerated.values
+                self.repositories = RepositoryStore.deduplicatedIDs(tolerated.values)
                 repositoryStoreLog.error("event=recovered_partial_repositories kept=\(tolerated.values.count, privacy: .public) dropped=\(tolerated.droppedCount, privacy: .public)")
             } else {
                 self.repositories = []
             }
             fileStore.preserveCorruptFile(named: "repositories.json")
         }
+    }
+
+    /// 按 `id` 去重保留首条:手工编辑或容错抢救可能引入重复 id。不去重则
+    /// `deduplicationResult` 的 keptIDs(Set<UUID>)会把两条不同 URL/名称的同 id
+    /// 记录都判为保留,UI ForEach(id: \.self) 撞重复身份,更新/删除只可达首条。
+    nonisolated static func deduplicatedIDs(_ repositories: [RepositoryConfig]) -> [RepositoryConfig] {
+        var seenIDs = Set<UUID>()
+        return repositories.filter { seenIDs.insert($0.id).inserted }
     }
 
     /// 内存先行、同步写盘:写盘成功才改内存,失败抛给调用方回滚。
@@ -296,8 +306,7 @@ final class RepositoryStore: ObservableObject {
     nonisolated static func deduplicationResult(
         for repositories: [RepositoryConfig],
         protectedRepositoryIDs: Set<UUID> = []
-    ) -> RepositoryDeduplicationResult {
-        // 保留优先级排序:被工作区/同步态引用者 > createdAt 更早者 > 其余。
+    ) -> RepositoryDeduplicationResult {        // 保留优先级排序:被工作区/同步态引用者 > createdAt 更早者 > 其余。
         // 旧逻辑按数组顺序"保留第一条、硬删其余",可能删掉的恰是被工作区引用的
         // 那条而留下新添加的重复记录——工作区静默丢仓库。结果仍按原数组顺序输出,
         // 不改变列表展示序。
@@ -331,6 +340,84 @@ final class RepositoryStore: ObservableObject {
             repositories: deduplicatedRepositories,
             changed: deduplicatedRepositories.count != repositories.count
         )
+    }
+
+    /// 从工作区记录中摘除对 `removedRepositoryIDs` 的选中/置顶引用(纯函数)。
+    nonisolated static func removingReferences(
+        from workplaces: [Workplace],
+        to removedRepositoryIDs: Set<UUID>
+    ) -> [Workplace] {
+        guard removedRepositoryIDs.isEmpty == false else { return workplaces }
+        return workplaces.map { workplace in
+            var updated = workplace
+            updated.selectedRepositoryIDs.removeAll { removedRepositoryIDs.contains($0) }
+            updated.pinnedRepositoryIDs.removeAll { removedRepositoryIDs.contains($0) }
+            return updated
+        }
+    }
+
+    /// 磁盘刷新结果 + 去重硬删除的**单批原子提交**:三份文档(repositories/
+    /// workplaces/sync-states)一次 `save(documents)` 落盘,任一失败整体回滚。
+    /// 取代此前"apply 刷新结果 → 再单独 pruneReferencesToRepositories"的两步写:
+    /// 两步之间任何并发跨 Store 提交(如 removeRepository)会基于旧内存把首步结果
+    /// 整体覆写回盘,且立即 prune 落盘的又是新内存——去重删除与其引用清理
+    /// 不再原子,悬空引用窗口重新打开。
+    func commitDiskRefresh(
+        workplaceResult: WorkplaceDiskRefreshResult,
+        repositoryResult: RepositoryDeduplicationResult,
+        workplaceStore: WorkplaceStore
+    ) throws {
+        guard repositoryStoreRootsMatch(workplaceStore) else {
+            throw RepositoryStoreError.crossStoreRootMismatch
+        }
+        let keptIDs = Set(repositoryResult.repositories.map(\.id))
+        let removedIDs = Set(repositories.map(\.id)).subtracting(keptIDs)
+        // 引用摘除基于**快照输入**(workplaceResult.workplaces,即刷新计算所用状态),
+        // 与 diskRefreshResult 自身的去重改写在同一份数据上完成,再单独 prune 一步省掉。
+        let prunedWorkplaces = Self.removingReferences(
+            from: workplaceResult.workplaces,
+            to: removedIDs
+        )
+        let filteredSyncStates = workplaceResult.syncStates.filter {
+            removedIDs.contains($0.repositoryID) == false
+        }
+        let applyWorkplaceChanges = workplaceResult.changed
+            || prunedWorkplaces != workplaceResult.workplaces
+            || filteredSyncStates.count != workplaceResult.syncStates.count
+
+        var documents = [JSONFileStoreDocument]()
+        if repositoryResult.changed {
+            documents.append(try fileStore.document(for: repositoryResult.repositories, as: "repositories.json"))
+        }
+        if applyWorkplaceChanges {
+            documents += try workplaceStore.persistenceDocuments(
+                workplaces: prunedWorkplaces,
+                syncStates: filteredSyncStates
+            )
+        }
+        guard documents.isEmpty == false else { return }
+        try fileStore.save(documents)
+
+        if repositoryResult.changed {
+            let removedNames = Self.removedRepositoryNames(from: repositories, keeping: repositoryResult.repositories)
+            repositories = repositoryResult.repositories
+            lastDeduplicationCleanupCount = removedNames.count
+            deduplicationCleanupSequence += 1
+            repositoryStoreLog.notice(
+                "event=deduplication_removed count=\(removedNames.count) names=\(removedNames.joined(separator: ","), privacy: .private)"
+            )
+        }
+        if applyWorkplaceChanges {
+            workplaceStore.applyPersistedState(
+                workplaces: prunedWorkplaces,
+                syncStates: filteredSyncStates
+            )
+        }
+    }
+
+    private func repositoryStoreRootsMatch(_ workplaceStore: WorkplaceStore) -> Bool {
+        fileStore.rootDirectory.standardizedFileURL
+            == workplaceStore.rootDirectoryForCrossStoreCheck.standardizedFileURL
     }
 
     private func mutateRepository(id: UUID, _ mutate: (inout RepositoryConfig) -> Void) throws {

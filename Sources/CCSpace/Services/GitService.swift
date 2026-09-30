@@ -231,7 +231,9 @@ protocol GitServicing: Sendable {
     func recentCommits(in directory: String, count: Int, rev: String?) async -> [GitCommitEntry]
     /// 指定 ref 领先其上游的提交(`<rev>@{u}..<rev>`);ref 无上游或执行失败时返回空。
     func unpushedCommits(in directory: String, count: Int, rev: String?) async -> [GitCommitEntry]
-    func remoteBranches(for remoteURL: String) async -> [String]
+    /// 远端分支名单;`nil` 表示探测失败(URL 非法/网络失败),空数组是"远端确无分支"。
+    /// 调用方据此区分:stale-while-revalidate 的展示方在 nil 时保留旧缓存。
+    func remoteBranches(for remoteURL: String) async -> [String]?
     /// 一次远端探测:同时取分支列表与默认分支。真实实现单次
     /// `ls-remote --symref` 完成,省一半网络往返;默认实现回退到分头查询。
     func probeRemoteInfo(for remoteURL: String) async -> (branches: [String], defaultBranch: String?)
@@ -348,7 +350,7 @@ extension GitServicing {
     func probeRemoteInfo(for remoteURL: String) async -> (branches: [String], defaultBranch: String?) {
         async let branchesTask = remoteBranches(for: remoteURL)
         async let defaultBranchTask = defaultBranch(for: remoteURL)
-        return await (branchesTask, defaultBranchTask)
+        return await (branchesTask ?? [], defaultBranchTask)
     }
 }
 
@@ -1488,7 +1490,7 @@ struct GitService: GitServicing {
         let fieldSeparator = "\u{1F}"
         // 读取失败与"无 stash"都返回 []:列表页只读展示,空态已由 UI 区分,
         // 不为只读路径引入 throwing 接口。
-        guard let output = try? await runGitOutput(arguments: [
+        guard let output = await readGitOutput(operation: "stash-list", arguments: [
             "-C", directory,
             "stash", "list", "--format=%gs\(fieldSeparator)%cI",
         ]) else {
@@ -1558,10 +1560,9 @@ struct GitService: GitServicing {
         }
         // 与 remoteBranches 同款 20s:ls-remote 类探测弱网时快速失败,
         // 表单探测/默认分支回退都不该让用户对着 60s 的转圈干等。
-        guard let output = try? await runGitOutput(
-            arguments: ["ls-remote", "--symref", remoteURL, "HEAD"],
-            timeout: 20
-        ) else {
+        guard let output = await readGitOutput(operation: "default-branch-probe", arguments: [
+            "ls-remote", "--symref", remoteURL, "HEAD"
+        ], timeout: 20) else {
             return nil
         }
         let branch = Self.parseSymrefLsRemote(output: output).defaultBranch
@@ -1572,7 +1573,7 @@ struct GitService: GitServicing {
     }
 
     func defaultBranch(in directory: String) async -> String? {
-        if let output = try? await runGitOutput(arguments: [
+        if let output = await readGitOutput(operation: "default-branch-local", arguments: [
             "-C", directory,
             "symbolic-ref",
             "--quiet",
@@ -1592,7 +1593,7 @@ struct GitService: GitServicing {
     }
 
     func currentBranch(in directory: String) async -> String? {
-        guard let output = try? await runGitOutput(arguments: ["-C", directory, "branch", "--show-current"]) else {
+        guard let output = await readGitOutput(operation: "current-branch", arguments: ["-C", directory, "branch", "--show-current"]) else {
             return nil
         }
         let branch = output.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1600,7 +1601,7 @@ struct GitService: GitServicing {
     }
 
     func branchStatus(in directory: String) async -> GitBranchStatusSnapshot? {
-        guard let output = try? await runGitOutput(arguments: [
+        guard let output = await readGitOutput(operation: "branch-status", arguments: [
             "-C", directory,
             "status",
             "--porcelain=2",
@@ -1613,7 +1614,7 @@ struct GitService: GitServicing {
 
     func branches(in directory: String) async -> [String] {
         // 读取失败与"无本地分支"都返回 []:分支面板空态已可区分,与 stashList 同款取舍。
-        guard let output = try? await runGitOutput(arguments: [
+        guard let output = await readGitOutput(operation: "branches", arguments: [
             "-C", directory,
             "for-each-ref",
             "--format=%(refname:short)",
@@ -1753,7 +1754,7 @@ struct GitService: GitServicing {
         guard Self.isHexObjectID(hash) else {
             return nil
         }
-        guard let output = try? await runGitOutput(arguments: [
+        guard let output = await readGitOutput(operation: "commit-detail", arguments: [
             "-C", directory,
             "show",
             "-s",
@@ -1775,7 +1776,7 @@ struct GitService: GitServicing {
 
     /// `git rev-parse --absolute-git-dir`,返回如 `/repo/.git`(worktree 下为各自 gitdir)。
     private func absoluteGitDirectory(in directory: String) async -> String? {
-        guard let output = try? await runGitOutput(arguments: [
+        guard let output = await readGitOutput(operation: "git-dir-resolve", arguments: [
             "-C", directory,
             "rev-parse",
             "--absolute-git-dir",
@@ -1795,7 +1796,7 @@ struct GitService: GitServicing {
     }
 
     func branchMetadata(in directory: String) async -> [String: GitBranchMetadata] {
-        guard let output = try? await runGitOutput(arguments: [
+        guard let output = await readGitOutput(operation: "branch-metadata", arguments: [
             "-C", directory,
             "for-each-ref",
             "--format=%(refname:short)%01%(committerdate:unix)%01%(upstream:track)%01%(upstream)",
@@ -1807,7 +1808,7 @@ struct GitService: GitServicing {
     }
 
     func remoteURL(in directory: String) async -> String? {
-        guard let output = try? await runGitOutput(arguments: ["-C", directory, "remote", "get-url", "origin"]) else {
+        guard let output = await readGitOutput(operation: "remote-url", arguments: ["-C", directory, "remote", "get-url", "origin"]) else {
             return nil
         }
         let url = output.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1932,7 +1933,7 @@ struct GitService: GitServicing {
             // 注意:rev range 必须直接作为 revs 参数,不能放在 `--` 之后(`--` 后是路径语义)。
             arguments.append(range)
         }
-        return try? await runGitOutput(arguments: arguments)
+        return await readGitOutput(operation: "commit-log", arguments: arguments)
     }
 
     /// 解析 `git log --format=… --numstat` 输出。
@@ -1975,12 +1976,15 @@ struct GitService: GitServicing {
                 // 新的元数据行:先把上一条落盘。
                 flushPending()
                 let parts = line.components(separatedBy: fieldSeparator)
-                guard parts.count == 4 else { continue }
+                // `>= 4` + 中段回拼:提交标题可以合法含 \u{1F} 字符(任意 UTF-8 文本),
+                // 精确 4 段判定会把这样的记录整条丢弃——与 GitStashEntry.parseList
+                // 对消息字段的同款纠偏一致。
+                guard parts.count >= 4 else { continue }
                 pendingMeta = (
                     hash: parts[0],
-                    subject: parts[1],
-                    author: parts[2],
-                    date: dateFormatter.date(from: parts[3]) ?? .distantPast
+                    subject: parts[1..<(parts.count - 2)].joined(separator: fieldSeparator),
+                    author: parts[parts.count - 2],
+                    date: dateFormatter.date(from: parts[parts.count - 1]) ?? .distantPast
                 )
             } else if line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
                       pendingMeta != nil {
@@ -2086,7 +2090,7 @@ struct GitService: GitServicing {
 
     /// 列出工作区中未跟踪的文件(排除 .gitignore 命中的文件)。
     private func untrackedFiles(in directory: String) async -> [String] {
-        guard let output = try? await runGitOutput(arguments: [
+        guard let output = await readGitOutput(operation: "untracked-files", arguments: [
             "-c", "core.quotepath=false",
             "-C", directory, "ls-files", "--others", "--exclude-standard", "-z",
         ]) else {
@@ -2103,7 +2107,11 @@ struct GitService: GitServicing {
         // hash 进 revs 参数位置、后面没有 `--` 可依赖:必须以 `-` 开头的串会被 git 当选项
         // (如 `--output=<file>` 写文件;配了 diff.external 时更可触发外部命令),
         // 口径与 commitDetail/blobContent 一致——先过守卫,再加 --end-of-options 兜底。
-        guard Self.isHexObjectID(hash, maxLength: 64) || Self.isCommitSHA(hash) else { return [] }
+        // 守卫拒绝必须抛错而非吞成 []:空数组在这里与"该提交无改动"的合法结果
+        // 不可区分,静默返回会让窗口展示一个语义完全错误的"空 diff"。
+        guard Self.isHexObjectID(hash, maxLength: 64) || Self.isCommitSHA(hash) else {
+            throw gitOperationError("提交标识非法，无法读取其改动")
+        }
         // `--first-parent`:merge commit 的 `git show -p` 默认走 combined diff,
         // 干净合并时 patch 为空,而 `--numstat` 仍按第一父提交统计,
         // 会出现"文件列表有、diff 内容为空";统一按第一父提交取 diff 保证两者一致。
@@ -2128,7 +2136,7 @@ struct GitService: GitServicing {
         // 否则任意 revision 字符串可读仓库内任意 blob(如 .git 配置对象)。
         guard Self.isSafeRefName(revision) || Self.isCommitSHA(revision) else { return nil }
         guard Self.isSafeRepositoryRelativePath(path) else { return nil }
-        return try? await runGitOutput(arguments: [
+        return await readGitOutput(operation: "blob-content", arguments: [
             "-C", directory, "cat-file", "blob", "\(revision):\(path)",
         ])
     }
@@ -2154,7 +2162,11 @@ struct GitService: GitServicing {
     /// 全部差异;两个非当前分支之间仍按提交对比。
     func diffBranches(base: String, head: String, in directory: String) async throws -> [GitDiffEntry] {
         // revs 参数无 `--` 保护,外来 ref 先过守卫(见 isSafeRefName 注释)。
-        guard Self.isSafeRefName(base), Self.isSafeRefName(head) else { return [] }
+        // 守卫拒绝抛错而非吞 []:空数组与"两分支无差异"不可区分,静默返回
+        // 会展示语义错误的空 diff(同 diffCommit 口径)。
+        guard Self.isSafeRefName(base), Self.isSafeRefName(head) else {
+            throw gitOperationError("分支名称非法，无法比较改动")
+        }
         let currentBranch = await currentBranch(in: directory)
         let range = (head == currentBranch) ? base : "\(base)..\(head)"
         // `git diff` 在存在差异时退出码为 1,属正常,需允许。
@@ -2172,7 +2184,7 @@ struct GitService: GitServicing {
 
     func divergence(base: String, head: String, in directory: String) async -> GitRefDivergence? {
         guard Self.isSafeRefName(base), Self.isSafeRefName(head) else { return nil }
-        guard let output = try? await runGitOutput(arguments: [
+        guard let output = await readGitOutput(operation: "divergence", arguments: [
             "-C", directory,
             "rev-list",
             "--left-right",
@@ -2184,14 +2196,17 @@ struct GitService: GitServicing {
         return GitRefDivergence.parse(output)
     }
 
-    func remoteBranches(for remoteURL: String) async -> [String] {
-        guard (try? GitURLParser.validateRemoteURL(remoteURL)) != nil else { return [] }
+    func remoteBranches(for remoteURL: String) async -> [String]? {
+        guard (try? GitURLParser.validateRemoteURL(remoteURL)) != nil else { return nil }
         // 分支弹窗远端页签的实时名单:网络不通/慢时按默认 60s 干等,
         // 用户体感就是"卡死";ref 列表探测 20s 未响应即按失败处理,
         // 弹窗内提供重试/刷新入口,不再阻塞等待。
-        guard let output = try? await runGitOutput(arguments: [
+        // 失败返回 nil(而非 []):`ls-remote` 非零退出(auth/网络/坏 URL)与
+        // "远端确实没有分支"必须可区分,否则调用方一次抖动就会把可用的旧名单
+        // 覆盖成空列表(stale 缓存污染)。
+        guard let output = await readGitOutput(operation: "remote-branches", arguments: [
             "ls-remote", "--heads", remoteURL
-        ], timeout: 20) else { return [] }
+        ], timeout: 20) else { return nil }
 
         return output
             .components(separatedBy: .newlines)
@@ -2212,9 +2227,9 @@ struct GitService: GitServicing {
     /// 限定输出规模)同时得到分支列表与默认分支,替代分头两次联网查询。
     func probeRemoteInfo(for remoteURL: String) async -> (branches: [String], defaultBranch: String?) {
         guard (try? GitURLParser.validateRemoteURL(remoteURL)) != nil else { return ([], nil) }
-        guard let output = try? await runGitOutput(arguments: [
-            "ls-remote", "--symref", remoteURL, "HEAD", "refs/heads/*",
         // 表单远端探测是最该快失败的路径:与 remoteBranches 统一 20s(此前 60s,弱网干等)。
+        guard let output = await readGitOutput(operation: "probe-remote-info", arguments: [
+            "ls-remote", "--symref", remoteURL, "HEAD", "refs/heads/*",
         ], timeout: 20) else { return ([], nil) }
         let parsed = Self.parseSymrefLsRemote(output: output)
         if let defaultBranch = parsed.defaultBranch {
@@ -2256,7 +2271,7 @@ struct GitService: GitServicing {
     /// 只读本地引用,不联网。排除 origin/HEAD 这类符号引用。
     /// 读取失败与"无远端"都返回 []:与 branches/stashList 同款取舍,不为只读路径引入 throwing 接口。
     func remoteTrackingBranches(in directory: String) async -> [String] {
-        guard let output = try? await runGitOutput(arguments: [
+        guard let output = await readGitOutput(operation: "remote-tracking-branches", arguments: [
             "-C", directory,
             "for-each-ref",
             "--format=%(refname:short)",
@@ -2277,7 +2292,7 @@ struct GitService: GitServicing {
     }
 
     func gitEnvironmentInfo() async -> GitEnvironmentInfo {
-        let version = (try? await runGitOutput(arguments: ["--version"]))?
+        let version = (await readGitOutput(operation: "git-version", arguments: ["--version"]))?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return GitEnvironmentInfo(
             isAvailable: version?.isEmpty == false,
@@ -2287,7 +2302,7 @@ struct GitService: GitServicing {
     }
 
     private func trackingBranch(in directory: String) async -> String? {
-        guard let output = try? await runGitOutput(arguments: [
+        guard let output = await readGitOutput(operation: "upstream-tracking-branch", arguments: [
             "-C", directory,
             "rev-parse",
             "--abbrev-ref",
@@ -2402,6 +2417,25 @@ struct GitService: GitServicing {
         } catch is GitServiceError {
             // runGitOutput 的进程级错误(超时/输出超限/启动失败/取消)都不是
             // GitServiceError,走到这里只可能是 git 真实退出码非 0。
+            return nil
+        }
+    }
+
+    /// 只读查询的容错入口:与 `try?` 吞错等价,但失败必须留痕(命令名 + 原因)。
+    /// 此前 20 余处读路径静默吞错,"角标没了/列表空了"在现场完全无从归因。
+    private func readGitOutput(
+        operation: String,
+        arguments: [String],
+        timeout: TimeInterval = 60
+    ) async -> String? {
+        do {
+            return try await runGitOutput(arguments: arguments, timeout: timeout)
+        } catch {
+            // 任务取消属正常生命周期事件,不是异常,不留痕。
+            if error is CancellationError { return nil }
+            gitServiceLog.error(
+                "event=read_git_output_failed operation=\(operation, privacy: .public) reason=\(error.localizedDescription, privacy: .public)"
+            )
             return nil
         }
     }

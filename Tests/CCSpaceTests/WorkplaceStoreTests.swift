@@ -4,7 +4,7 @@ import XCTest
 @MainActor
 final class WorkplaceStoreTests: XCTestCase {
     func test_createWorkplaceBuildsPathFromRootAndName() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let fileStore = JSONFileStore(rootDirectory: root)
         let store = WorkplaceStore(fileStore: fileStore)
         let repository = makeRepository(
@@ -1053,7 +1053,7 @@ final class WorkplaceStoreTests: XCTestCase {
         let workplaceID = UUID()
         let keptID = UUID()
         let duplicateID = UUID()
-        let rootURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let rootURL = makeTestRootURL()
         try? FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
         let workplaceURL = rootURL.appendingPathComponent("ios-dev")
         try? FileManager.default.createDirectory(at: workplaceURL, withIntermediateDirectories: true)
@@ -1105,7 +1105,7 @@ final class WorkplaceStoreTests: XCTestCase {
         let workplaceID = UUID()
         let staleID = UUID()
         let selectedID = UUID()
-        let rootURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let rootURL = makeTestRootURL()
         try? FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
         let workplaceURL = rootURL.appendingPathComponent("ios-dev")
         try? FileManager.default.createDirectory(at: workplaceURL, withIntermediateDirectories: true)
@@ -1499,7 +1499,7 @@ final class WorkplaceStoreTests: XCTestCase {
     /// (防 `Dictionary(uniqueKeysWithValues:)` precondition trap)那段实际走不到。
     /// 用 `replaceSyncStates`(对入参不去重)注入内存态重复键,才真正落到防御分支——必须不 trap。
     func test_reconcileHasLocalDirectoryFlagsToleratesInMemoryDuplicateKeys() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let missingPath = root.appendingPathComponent("missing-repo").path
         let fileStore = JSONFileStore(rootDirectory: root)
@@ -1535,8 +1535,130 @@ final class WorkplaceStoreTests: XCTestCase {
         XCTAssertEqual(reloaded.syncStates.count, 1, "落盘后按加载去重收敛到一行")
     }
 
+    // MARK: - 第八轮存储/持久化簇回归
+
+    /// 嵌套工作区(换根 rebase 产生多级路径)不在根一层的枚举里,
+    /// 旧实现会把它当"用户已删除"连记录带 sync states 清掉;逐记录探测必须保住它。
+    func test_diskRefreshResultKeepsNestedWorkplaceAbsentFromTopLevelEnumeration() throws {
+        let rootURL = tempRoot()
+        let nestedURL = rootURL.appendingPathComponent("group/nested")
+        try FileManager.default.createDirectory(at: nestedURL, withIntermediateDirectories: true)
+        let topURL = rootURL.appendingPathComponent("top")
+        try FileManager.default.createDirectory(at: topURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+
+        let nestedID = UUID()
+        let topID = UUID()
+        let goneID = UUID()
+        let workplaces = [
+            Workplace(
+                id: nestedID,
+                name: "nested",
+                path: nestedURL.path,
+                selectedRepositoryIDs: [],
+                createdAt: .now,
+                updatedAt: .now
+            ),
+            Workplace(
+                id: topID,
+                name: "top",
+                path: topURL.path,
+                selectedRepositoryIDs: [],
+                createdAt: .now,
+                updatedAt: .now
+            ),
+            Workplace(
+                id: goneID,
+                name: "gone",
+                path: rootURL.appendingPathComponent("gone").path,
+                selectedRepositoryIDs: [],
+                createdAt: .now,
+                updatedAt: .now
+            )
+        ]
+
+        let result = WorkplaceStore.diskRefreshResult(
+            workplaces: workplaces,
+            syncStates: [],
+            rootPath: rootURL.path
+        )
+
+        XCTAssertEqual(
+            Set(result.workplaces.map(\.id)),
+            [nestedID, topID],
+            "磁盘上仍存在的嵌套工作区不得因顶层枚举缺席被删除;真正删除的仍要删"
+        )
+    }
+
+    /// workplaces.json 混入重复 id(手工编辑/容错抢救)时加载必须收敛:
+    /// 重复 id 会让 mutateWorkplace 的索引定位只命中首条、第二条永不可达。
+    func test_duplicateWorkplaceIDsAreDeduplicatedOnLoad() throws {
+        let root = tempRoot()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let id = UUID()
+        let first = Workplace(
+            id: id,
+            name: "ios-dev",
+            path: "/Users/demo/Workplaces/ios-dev",
+            selectedRepositoryIDs: [],
+            createdAt: .now,
+            updatedAt: .now
+        )
+        var second = first
+        second.name = "ios-dev-copy"
+        let data = try JSONFileStore.makeEncoder().encode([first, second])
+        try data.write(to: root.appendingPathComponent("workplaces.json"))
+
+        let store = WorkplaceStore(fileStore: JSONFileStore(rootDirectory: root))
+
+        XCTAssertEqual(store.workplaces.count, 1, "重复 id 的工作区应在加载时收敛到首条")
+        XCTAssertEqual(store.workplaces.first?.name, "ios-dev")
+    }
+
+    /// sync-states 的写失败重试预算独立于 workplaces 的单文件写:
+    /// 旧实现 persistWorkplaces 成功也会把 flushRetryCount 归零,
+    /// "交替写两类数据"场景下重试计数被永远重置、永不封顶收敛。
+    func test_flushSyncStatesRetryBudgetIsNotResetByWorkplaceWrite() throws {
+        try XCTSkipIf(geteuid() == 0, "root 身份下只读目录不生效")
+        let root = tempRoot()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let fileStore = JSONFileStore(rootDirectory: root)
+        let store = WorkplaceStore(fileStore: fileStore, flushRetryBaseSeconds: 600)
+        let repository = makeRepository(repoName: "api")
+        _ = try store.createWorkplace(
+            name: "ios-dev",
+            rootPath: "/Users/demo/Workplaces",
+            selectedRepositories: [repository]
+        )
+        store.flushSyncStates()
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: root.path)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+        }
+        store.flushSyncStates()
+        let countAfterFailure = store.flushRetryCount
+        XCTAssertGreaterThan(countAfterFailure, 0, "前置:sync-states 写失败已进入重试")
+
+        XCTAssertThrowsError(
+            try store.createWorkplace(
+                name: "android-dev",
+                rootPath: "/Users/demo/Workplaces",
+                selectedRepositories: [repository]
+            ),
+            "只读目录下 createWorkplace 的单文件写必然失败"
+        )
+
+        XCTAssertEqual(
+            store.flushRetryCount,
+            countAfterFailure,
+            "workplaces 单文件写路径(无论成败)都不得重置 sync-states 的重试预算"
+        )
+    }
+
     private func tempRoot() -> URL {
-        FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        makeTestRootURL()
     }
 
     private func makeRepository(id: UUID = UUID(), repoName: String) -> RepositoryConfig {

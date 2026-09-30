@@ -17,7 +17,22 @@ final class RunScriptTests: XCTestCase {
         )
 
         XCTAssertTrue(script.contains("/usr/bin/open"))
-        XCTAssertFalse(script.contains(#""${DEBUG_BINARY}" >/tmp/${APP_NAME}.log 2>&1 &"#))
+        // 启动器必须真的指向 .app bundle:此前第二条断言是拿整行字面量
+        // (`"${DEBUG_BINARY}" >/tmp/${APP_NAME}.log 2>&1 &`) 做反向匹配,
+        // 而 run.sh 里早已不存在 DEBUG_BINARY——那条断言恒真,拦不住任何回归。
+        // 改为锁语义要素:不得有"裸产物后台启动 + /tmp 日志"的形态。
+        XCTAssertTrue(
+            script.contains(#"/usr/bin/open -n "${app_bundle}""#),
+            "run 命令必须以 .app bundle 为启动对象"
+        )
+        XCTAssertFalse(script.contains(">/tmp/"), "run.sh 不得把产物日志重定向进 /tmp")
+        let backgroundLaunchLines = script.split(separator: "\n").filter { line in
+            line.hasSuffix(" &") || line.hasSuffix(" &)")
+        }
+        XCTAssertTrue(
+            backgroundLaunchLines.isEmpty,
+            "run.sh 不得后台启动子进程: \(backgroundLaunchLines)"
+        )
     }
 
     func test_readmeDoesNotRecommendSwiftRunForGuiLaunch() throws {

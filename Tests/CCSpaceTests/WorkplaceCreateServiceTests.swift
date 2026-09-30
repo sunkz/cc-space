@@ -53,7 +53,7 @@ private actor WorkplaceCreateGitServiceSpy: GitServicing {
     }
 
     func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] { [] }
-    func remoteBranches(for remoteURL: String) async -> [String] { [] }
+    func remoteBranches(for remoteURL: String) async -> [String]? { [] }
 
     func cloneDirectories() async -> [String] {
         cloneCalls.map(\.directory)

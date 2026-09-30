@@ -20,6 +20,10 @@ struct AddRepositorySheetView: View {
     @State private var showBranchSuggestions = false
     @State private var didAttemptRemoteFetch = false
     @State private var autoFetchTask: Task<Void, Never>?
+    /// 远端探测代际:URL 每次变化 +1,探测回写主线程前只认自己那次代际。
+    /// 过期(被新 URL 取代)的探测不得翻 isLoadingRemoteBranches/didAttemptRemoteFetch,
+    /// 否则旧地址的迟到结果会把"未能获取远端分支"提示误挂到从未探测过的新输入上。
+    @State private var remoteFetchGeneration = 0
     @FocusState private var isMRBranchInputFocused: Bool
 
     private var defaultBranch: String? {
@@ -146,6 +150,10 @@ struct AddRepositorySheetView: View {
             // 改地址视为新的一次提交,重新放开同步闸(见 hasSubmitted)。
             hasSubmitted = false
             autoFetchTask?.cancel()
+            remoteFetchGeneration += 1
+            // 新探测尚未启动(防抖中),旧探测又不会再代写标志:这里统一复位,
+            // 避免 URL 被清空后 spinner 挂在"加载中"无人收口。
+            isLoadingRemoteBranches = false
             didAttemptRemoteFetch = false
             guard !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
             autoFetchTask = Task {
@@ -166,17 +174,19 @@ struct AddRepositorySheetView: View {
     @MainActor
     private func fetchRemoteBranchesAndDefault(for url: String) async {
         guard !url.isEmpty else { return }
+        let generation = remoteFetchGeneration
         isLoadingRemoteBranches = true
+
+        let (branches, defaultBranch) = await infoService.probeRemote(gitURL: url)
+
+        // 探测期间用户可能继续输入:URL 已变/代际已换则丢弃过期结果,
+        // loading/attempt 标志留给当前代际的探测自己收口,旧探测不得代写。
+        guard !Task.isCancelled, generation == remoteFetchGeneration,
+              gitURL.trimmingCharacters(in: .whitespacesAndNewlines) == url else { return }
         defer {
             isLoadingRemoteBranches = false
             didAttemptRemoteFetch = true
         }
-
-        let (branches, defaultBranch) = await infoService.probeRemote(gitURL: url)
-
-        // 探测期间用户可能继续输入:URL 已变则丢弃过期结果,避免旧建议覆盖新输入。
-        guard !Task.isCancelled,
-              gitURL.trimmingCharacters(in: .whitespacesAndNewlines) == url else { return }
 
         // 排序(localizedStandardCompare)放到后台做:分支上千时不卡弹层主线程,
         // 与 BranchListNormalization 的"加载时归一一次"约定一致。
@@ -185,7 +195,9 @@ struct AddRepositorySheetView: View {
         }.value
 
         // 后台排序期间输入仍可能变化:回主线程赋值前再校验一次。
-        guard !Task.isCancelled,
+        // 代际必须一并校验:仅 URL 相同不足以说明本轮仍有效(重输同一 URL 会 bump 代际),
+        // 否则过期轮会越过上面的守卫在这里提前收口,把当代际的 loading/attempt 标志代写。
+        guard !Task.isCancelled, generation == remoteFetchGeneration,
               gitURL.trimmingCharacters(in: .whitespacesAndNewlines) == url else { return }
 
         remoteBranchSuggestions = ordered

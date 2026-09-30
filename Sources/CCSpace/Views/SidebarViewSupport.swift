@@ -125,14 +125,27 @@ enum WorkplaceRelativeTimeFormatter {
         now: Date = Date(),
         calendar: Calendar = .current
     ) -> String {
+        // year/month/day 任一分量取不到时退化到系统日期格式:旧写法用 `?? 0` 兜底,
+        // 会在提交列表里渲染出"0月0日"这种既不合语法、用户也无法解读的文案。
         let dateComponents = calendar.dateComponents([.year, .month, .day], from: date)
-        let month = dateComponents.month ?? 0
-        let day = dateComponents.day ?? 0
-        if dateComponents.year == calendar.component(.year, from: now) {
+        guard let year = dateComponents.year,
+              let month = dateComponents.month,
+              let day = dateComponents.day else {
+            return Self.fallbackDateFormatter.string(from: date)
+        }
+        if year == calendar.component(.year, from: now) {
             return "\(month)月\(day)日"
         }
-        return "\(dateComponents.year ?? 0)年\(month)月\(day)日"
+        return "\(year)年\(month)月\(day)日"
     }
+
+    /// 日历分量缺失时的兜底格式(仅理论上非格里高利/受限日历会走到)。
+    private static let fallbackDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter
+    }()
 }
 
 struct SidebarWorkplaceRowPresentationState {
@@ -325,6 +338,9 @@ struct CCSpaceMarqueeText: View {
 struct SidebarWorkplaceRowView: View {
     let workplace: Workplace
     let hasFailed: Bool
+    /// 相对时间基准,由外层 body 每轮渲染求值一次后传入(逐行各取 Date() 会让
+    /// 同一屏的文案跨在阈值两侧)。
+    let now: Date
     let branchName: String?
     let onTogglePinned: (Workplace) -> Void
     let onDuplicateWorkplace: (Workplace) -> Void
@@ -335,7 +351,8 @@ struct SidebarWorkplaceRowView: View {
     private var rowPresentationState: SidebarWorkplaceRowPresentationState {
         SidebarWorkplaceRowPresentationState(
             workplace: workplace,
-            hasFailed: hasFailed
+            hasFailed: hasFailed,
+            now: now
         )
     }
 
@@ -380,6 +397,11 @@ struct SidebarWorkplaceRowView: View {
                     }
                     .buttonStyle(.plain)
                     .opacity(workplace.isPinned || isHovered ? 1 : 0)
+                    // opacity-0 只是视觉隐藏:命中区与无障碍元素仍在。
+                    // 不可见时同时关掉命中与 VoiceOver,避免点空白误触置顶、
+                    // 读出屏幕上并不存在的按钮;置顶入口另有右键菜单,不因此丢失可达性。
+                    .allowsHitTesting(workplace.isPinned || isHovered)
+                    .accessibilityHidden(workplace.isPinned || isHovered == false)
                     .accessibilityLabel(workplace.isPinned ? "取消置顶" : "置顶工作区")
                 }
                 if let color = rowPresentationState.statusIndicatorColor {

@@ -279,8 +279,6 @@ struct BranchCompareWindowView: View {
                 errorMessage = message
                 isLoading = false
                 hasLoadedInitialData = true
-            case .cancelled:
-                break
             }
         }
     }

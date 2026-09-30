@@ -88,10 +88,13 @@ struct WorkplaceEditService {
             name: validatedName
         )
 
-        let normalizedNewPath = URL(fileURLWithPath: newPath).standardizedFileURL.path
+        // 大小写归一比较(口径同 WorkplaceStore.renameWorkplace):默认卷大小写不敏感,
+        // 仅大小写不同的改名实际指向同一目录,严格字符串比较会误报"与其它工作区重名"。
+        let normalizedNewPath = WorkplaceStore.normalizedPath(newPath)
+        let lowercasedNewPath = normalizedNewPath.lowercased()
         guard !workplaceStore.workplaces.contains(where: {
             $0.id != workplaceID &&
-            URL(fileURLWithPath: $0.path).standardizedFileURL.path == normalizedNewPath
+            WorkplaceStore.normalizedPath($0.path).lowercased() == lowercasedNewPath
         }) else {
             throw WorkplaceStoreError.duplicatePath
         }
@@ -110,8 +113,13 @@ struct WorkplaceEditService {
         // A 内可有 A/B),子工作区记录的 localPath 不会随移动重映射,移动后它们指向已不存在
         // 的旧路径,重启时磁盘刷新会按"目录缺失"把子工作区整条记录删掉(不可恢复)。
         // 在触碰磁盘之前先 fail-closed,让用户先处理子工作区。
+        // 改名判定用大小写归一路径:isWithinDirectory 把"同一目录"也判为受管(前缀含相等),
+        // 仅大小写不同的改名在默认卷上会把工作区自己当嵌套子工作区而误报拦截。
+        // 是否真正执行 move 仍按原始字符串(记录路径字符串的规范化改名也是有效编辑)。
         let renamed = newPath != oldPath
-        if renamed, let nested = workplaceStore.workplaces.first(where: { candidate in
+        let pathsDifferIgnoringCase =
+            normalizedNewPath.lowercased() != WorkplaceStore.normalizedPath(oldPath).lowercased()
+        if renamed, pathsDifferIgnoringCase, let nested = workplaceStore.workplaces.first(where: { candidate in
             candidate.id != workplaceID
                 && LocalPathSafety.isWithinDirectory(candidate.path, rootPath: oldPath)
         }) {

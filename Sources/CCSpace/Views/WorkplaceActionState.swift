@@ -8,7 +8,6 @@ struct WorkplaceActionState {
     let workplace: Workplace
     let failedRepositories: [RepositoryConfig]
     let activeRepositoryCount: Int
-    let hasPullableRepositories: Bool
     let hasLocalRepositories: Bool
     let isBusy: Bool
     let canRetryFailedRepositories: Bool
@@ -42,7 +41,6 @@ struct WorkplaceActionState {
         hasLocalRepositories = hasLocal
         activeRepositoryCount = activeCount
         isBusy = activeCount > 0
-        hasPullableRepositories = hasLocal
 
         let failedRepositoryIDs = failedIDs
 
@@ -50,7 +48,7 @@ struct WorkplaceActionState {
             selectedRepositoryIDs.contains($0.id) && failedRepositoryIDs.contains($0.id)
         }
         canRetryFailedRepositories = !failedRepositories.isEmpty && !isBusy
-        canSyncAllRepositories = hasPullableRepositories && !isBusy
+        canSyncAllRepositories = hasLocalRepositories && !isBusy
         // 有同步态行时用"任一仓库目录在盘"推断工作区目录存在(仓库目录必然
         // 在工作区目录下),避免此前每次 body 求值走一次主线程 fileExists;
         // 没有任何仓库行的工作区无从推断,改用视图侧后台探测的缓存结果——

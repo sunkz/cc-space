@@ -177,6 +177,7 @@ struct CommitLogWindowView: View {
             branchNames = []
             remoteTrackingBranches = []
             branchMetadata = [:]
+            showingBranchPicker = false
             commits = []
             isLoading = true
             isLoadingMore = false
@@ -664,7 +665,12 @@ struct CommitLogWindowView: View {
         let hash = commit.hash
         let gitService = gitService
         let detail = await gitService.commitDetail(hash: hash, in: path)
-        guard !Task.isCancelled else { return }
+        // 取消同样要收口加载标记:ensureDetail 已把 id 置入 detailLoadingIDs,
+        // 直接 return 会让该提交永久滞留,再次点开展开被守卫跳过、UI 卡"加载中"死态。
+        guard !Task.isCancelled else {
+            detailLoadingIDs.remove(id)
+            return
+        }
         await MainActor.run {
             detailLoadingIDs.remove(id)
             if let detail {

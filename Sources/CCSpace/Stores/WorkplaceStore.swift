@@ -62,7 +62,10 @@ final class WorkplaceStore: ObservableObject {
     var rootDirectoryForCrossStoreCheck: URL { fileStore.rootDirectory }
     private var debouncedSyncStatesWriteTask: Task<Void, Never>?
     private let syncStatesDebounceInterval: Duration
-    /// 写盘失败的重试次数:成功或用户下一次变更归零,封顶见 `maxFlushRetryCount`。
+    /// 写盘失败的重试次数(sync-states 防抖写专用):成功或用户下一次
+    /// sync-states 变更归零,封顶见 `maxFlushRetryCount`。
+    /// 刻意只在 sync-states 自身写成功时归零——workplaces 单文件写成功与
+    /// sync-states 的写失败无关,共用一个预算会让"交替写两类数据"把重试永远重置、永不收敛。
     /// private(set) 仅为测试可读(断言重试有界)。
     private(set) var flushRetryCount = 0
     /// 重试上限:超过即放弃,避免"固定间隔同步写 + 一条 error 日志"永不收敛。
@@ -87,7 +90,9 @@ final class WorkplaceStore: ObservableObject {
         self.syncStatesDebounceInterval = syncStatesDebounceInterval
         self.flushRetryBaseSeconds = flushRetryBaseSeconds
         do {
-            self.workplaces = try fileStore.loadIfPresent([Workplace].self, from: "workplaces.json", default: [])
+            self.workplaces = WorkplaceStore.deduplicatedWorkplaces(
+                try fileStore.loadIfPresent([Workplace].self, from: "workplaces.json", default: [])
+            )
         } catch {
             workplaceStoreLog.error("event=load_workplaces_failed reason=\(error.localizedDescription, privacy: .public)")
             didRecoverFromCorruptFile = true
@@ -97,7 +102,7 @@ final class WorkplaceStore: ObservableObject {
                 Workplace.self,
                 from: "workplaces.json"
             ) {
-                self.workplaces = tolerated.values
+                self.workplaces = WorkplaceStore.deduplicatedWorkplaces(tolerated.values)
                 workplaceStoreLog.error("event=recovered_partial_workplaces kept=\(tolerated.values.count, privacy: .public) dropped=\(tolerated.droppedCount, privacy: .public)")
             } else {
                 self.workplaces = []
@@ -132,6 +137,14 @@ final class WorkplaceStore: ObservableObject {
     nonisolated static func deduplicatedSyncStates(_ states: [RepositorySyncState]) -> [RepositorySyncState] {
         var seenKeys = Set<String>()
         return states.filter { seenKeys.insert($0.id).inserted }
+    }
+
+    /// 按 `id` 去重保留首条(与 `deduplicatedSyncStates` 同理):手工编辑或容错
+    /// 抢救可能引入重复 id,首条占位会让 `mutateWorkplace` 的索引定位只命中第一条,
+    /// 第二条永不可达,且按 id 对位的回写/并发合并会把两行当成同一工作区。
+    nonisolated static func deduplicatedWorkplaces(_ workplaces: [Workplace]) -> [Workplace] {
+        var seenIDs = Set<UUID>()
+        return workplaces.filter { seenIDs.insert($0.id).inserted }
     }
 
     /// 启动时用文件系统事实校正 `hasLocalDirectory`。
@@ -221,7 +234,8 @@ final class WorkplaceStore: ObservableObject {
     private func persistWorkplaces(_ newWorkplaces: [Workplace]) throws {
         try fileStore.save(newWorkplaces, as: "workplaces.json")
         workplaces = newWorkplaces
-        flushRetryCount = 0
+        // 不重置 flushRetryCount:那是 sync-states 防抖写的重试预算,
+        // 与本文件的写成功与否无关(见属性注释)。
     }
 
     /// 防抖持久化:内存立即生效,写盘延后合并。
@@ -903,56 +917,38 @@ final class WorkplaceStore: ObservableObject {
             )
         }
 
-        let rootURL = URL(fileURLWithPath: trimmedRoot)
-        let fm = FileManager.default
-
-        guard let contents = try? fm.contentsOfDirectory(
-            at: rootURL,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
-        ) else {
-            return WorkplaceDiskRefreshResult(
-                workplaces: workplaces,
-                syncStates: syncStates,
-                changed: false
-            )
-        }
-
-        let diskFolders = contents.filter { url in
-            (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-        }
-
-        let diskPaths = Set(diskFolders.map { Self.normalizedPath($0.path) })
-
-        // Safety: if disk shows zero folders but we have workplaces, the root may be
-        // temporarily unavailable (e.g. network volume). Skip removal to avoid data loss.
-        if diskPaths.isEmpty && !workplaces.isEmpty {
-            return WorkplaceDiskRefreshResult(
-                workplaces: workplaces,
-                syncStates: syncStates,
-                changed: false
-            )
-        }
-
         var refreshedWorkplaces = workplaces
         var refreshedSyncStates = syncStates
         var changed = false
 
         // Remove workplaces whose folders no longer exist
         // (持锁/有瞬态进行中状态的长操作豁免:见函数注释)
-        let missing = refreshedWorkplaces.filter { workplace in
-            if diskPaths.contains(Self.normalizedPath(workplace.path)) { return false }
-            return !Self.isWorkplaceOperationInFlight(
+        // 全缺普查必须在"在飞豁免剔除之前":此前先剔除再比较总数,只要恰好有
+        // 1 个工作区在飞,根目录整体不可达(NAS 弹出等)时 allMissing 判定失效,
+        // 其余全部记录被当用户主动删除整库清掉——豁免是给误删兜底的,不能反过来
+        // 击穿兜底。
+        // 删除候选用逐记录 fileExists 探测,而非只看根目录一层的枚举集合:
+        // contentsOfDirectory 只枚举根下一级,嵌套在子目录下的工作区(换根 rebase
+        // 会产生多级路径)恒不在枚举集合里,旧实现会把"磁盘上明明还在"的工作区
+        // 当成用户删除而连记录带 sync states 一并清掉。探测失败(路径不可达)与
+        // 枚举为空同样落入候选,由 allMissing 兜底保住。
+        let fm = FileManager.default
+        let deletableCandidates = refreshedWorkplaces.filter { workplace in
+            fm.fileExists(atPath: workplace.path) == false
+        }
+        let deletableMissing = deletableCandidates.filter { workplace in
+            Self.isWorkplaceOperationInFlight(
                 workplace,
                 syncStates: refreshedSyncStates,
                 lockedPathKeys: lockedPathKeys
-            )
+            ) == false
         }
         // Safety: when *every* workplace is missing at once, that is far more likely a
         // configuration change (root path switched) or an unavailable volume than N deliberate
         // deletions. Skip the cleanup so one refresh can never wipe the whole library.
-        let allMissing = !refreshedWorkplaces.isEmpty && missing.count == refreshedWorkplaces.count
-        let removedIDs = allMissing ? Set<UUID>() : Set(missing.map(\.id))
+        let allMissing = !refreshedWorkplaces.isEmpty
+            && deletableCandidates.count == refreshedWorkplaces.count
+        let removedIDs = allMissing ? Set<UUID>() : Set(deletableMissing.map(\.id))
         if !removedIDs.isEmpty {
             refreshedWorkplaces.removeAll { removedIDs.contains($0.id) }
             refreshedSyncStates.removeAll { removedIDs.contains($0.workplaceID) }

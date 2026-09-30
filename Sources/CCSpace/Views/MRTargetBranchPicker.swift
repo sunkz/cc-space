@@ -11,6 +11,8 @@ struct MRTargetBranchPicker: View {
     let isLoading: Bool
     @Binding var showsSuggestions: Bool
     @FocusState.Binding var inputFocused: Bool
+    /// 输入的分支名已在已选列表中时的提示(随输入变化自动消失)。
+    @State private var showsDuplicateHint = false
 
     var body: some View {
         // 每遍 body 求值只计算一次建议列表:此前"可见性判断 + ForEach"各算一遍,
@@ -33,6 +35,7 @@ struct MRTargetBranchPicker: View {
                 // 输入框保持聚焦期间列表永远不再出现,连选第二条只能先点别处。
                 // 聚焦状态下的输入变化作为重开路径:清空/改动搜索词即重新浮出。
                 .onChange(of: inputText) { _, _ in
+                    showsDuplicateHint = false
                     if inputFocused {
                         showsSuggestions = true
                     }
@@ -44,6 +47,12 @@ struct MRTargetBranchPicker: View {
                             .padding(.trailing, 8)
                     }
                 }
+
+            if showsDuplicateHint {
+                Text("该分支已在列表中")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
             if showsSuggestions, !visibleSuggestions.isEmpty {
                 suggestionsList(visibleSuggestions)
@@ -173,7 +182,13 @@ struct MRTargetBranchPicker: View {
             inputText: inputText,
             existingBranches: selectedBranches
         )
-        guard state.canSubmit else { return }
+        guard state.canSubmit else {
+            // 重名此前是纯静默:已选分支会从建议列表里消失,回车后输入框既不清空
+            // 也不报错,用户只看到"没反应"。这里给一次轻量提示。
+            showsDuplicateHint = state.isDuplicate
+            return
+        }
+        showsDuplicateHint = false
         selectedBranches.append(state.trimmedBranchName)
         inputText = ""
     }

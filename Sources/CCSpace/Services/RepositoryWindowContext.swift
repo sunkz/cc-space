@@ -96,11 +96,10 @@ final class RepositoryWindowContext: ObservableObject {
     // MARK: - 分支比较 diff
 
     /// 分支比较 diff 的加载结果:成功携带 entries 与分歧统计;失败带用户文案;
-    /// 取消(窗口关闭/payload 更换)不算失败,静默忽略。
+    /// 取消(窗口关闭/payload 更换)不算失败,completion 根本不被调用,静默忽略。
     enum DiffLoadOutcome {
         case success(entries: [GitDiffEntry], divergence: GitRefDivergence?)
         case failure(message: String)
-        case cancelled
     }
 
     /// 加载 base → head 的 diff 与分歧统计;与 loadBranchContext 同一代际防过期写回。

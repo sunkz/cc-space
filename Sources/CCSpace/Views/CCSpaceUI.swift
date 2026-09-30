@@ -133,29 +133,6 @@ struct CCSpaceEmptyStateCard<Actions: View>: View {
     }
 }
 
-struct CCSpacePill: View {
-    let title: String
-    var systemImage: String?
-    var tint: Color
-
-    var body: some View {
-        Group {
-            if let systemImage {
-                Label(title, systemImage: systemImage)
-            } else {
-                Text(title)
-            }
-        }
-        .font(.caption)
-        .fontWeight(.regular)
-        .contentTransition(.numericText())
-        .padding(.horizontal, 6)
-        .padding(.vertical, 2)
-        .background(Color.primary.opacity(0.035), in: Capsule())
-        .foregroundStyle(tint == .secondary ? Color.secondary : Color.primary.opacity(0.85))
-    }
-}
-
 struct CCSpaceSectionTitle: View {
     let title: String
     var subtitle: String = ""

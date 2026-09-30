@@ -83,7 +83,7 @@ private struct StubGitService: GitServicing {
     /// 单次探测接口的桩数据;为 nil 时模拟协议默认实现(回退到分头两次查询)。
     var stubbedProbeInfo: (branches: [String], defaultBranch: String?)?
 
-    func remoteBranches(for remoteURL: String) async -> [String] {
+    func remoteBranches(for remoteURL: String) async -> [String]? {
         stubbedRemoteBranches
     }
 

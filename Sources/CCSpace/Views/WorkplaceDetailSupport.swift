@@ -220,7 +220,7 @@ struct WorkplaceDetailPresentationState {
         showsOperationProgress = isActionLocked
         canEditWorkplace = !isActionLocked
         canRefreshAllRepositories = actionState.hasLocalRepositories && !isActionLocked
-        canSyncAllRepositories = actionState.hasPullableRepositories && !isActionLocked
+        canSyncAllRepositories = actionState.hasLocalRepositories && !isActionLocked
         canPushAllRepositories = actionState.hasLocalRepositories && !isActionLocked
         canMergeDefaultBranchIntoCurrent = actionState.hasLocalRepositories && !isActionLocked
         canSwitchRepositoriesToDefaultBranch = actionState.hasLocalRepositories && !isActionLocked

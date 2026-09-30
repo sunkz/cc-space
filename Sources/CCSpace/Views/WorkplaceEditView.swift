@@ -14,6 +14,7 @@ struct WorkplaceEditView: View {
     @State private var feedback: CCSpaceFeedback?
     @State private var repositorySearchText = ""
     @State private var operationProgress: WorkplaceOperationProgress?
+    @State private var isConfirmingRepositoryRemoval = false
 
     private var presentationState: WorkplaceEditPresentationState {
         WorkplaceEditPresentationState(
@@ -68,7 +69,18 @@ struct WorkplaceEditView: View {
     @MainActor
     private func submitEdit() async {
         guard presentationState.canSubmit else { return }
+        // 取消勾选会让保存流程删除对应仓库的本地目录(含未提交改动),
+        // 表单里唯一的破坏性动作只有一条内联警告,挡不住误点——保存前强制确认。
+        guard presentationState.removedRepositoryCount > 0 else {
+            await performSave()
+            return
+        }
+        isConfirmingRepositoryRemoval = true
+    }
 
+    @MainActor
+    private func performSave() async {
+        isConfirmingRepositoryRemoval = false
         isSaving = true
         feedback = nil
         operationProgress = nil
@@ -163,6 +175,20 @@ struct WorkplaceEditView: View {
         .navigationTitle("编辑工作区")
         .ccspaceAutoDismissFeedback($feedback)
         .interactiveDismissDisabled(isSaving)
+        .confirmationDialog(
+            "确认保存这些改动？",
+            isPresented: $isConfirmingRepositoryRemoval,
+            titleVisibility: .visible
+        ) {
+            Button("移除仓库并删除本地目录", role: .destructive) {
+                Task {
+                    await performSave()
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("将移除 \(presentationState.removedRepositoryCount) 个仓库，其本地目录如已存在会一并删除（包含未提交的改动），此操作不可撤销。")
+        }
     }
 
     private func clearFeedback() {

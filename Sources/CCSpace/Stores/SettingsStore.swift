@@ -8,14 +8,11 @@ private let settingsStoreLog = Logger(
 
 enum SettingsStoreError: LocalizedError, Equatable {
     case crossStoreRootMismatch
-    case keychainDeleteFailed(reason: String)
 
     var errorDescription: String? {
         switch self {
         case .crossStoreRootMismatch:
             return "内部状态异常：设置与工作区的数据目录不一致，已取消本次操作"
-        case .keychainDeleteFailed(let reason):
-            return "清除 AI 配置失败：无法删除钥匙串中的旧 API Key（\(reason)），配置已保留，请稍后重试"
         }
     }
 }
@@ -24,10 +21,7 @@ enum SettingsStoreError: LocalizedError, Equatable {
 final class SettingsStore: ObservableObject {
     @Published private(set) var settings: AppSettings
     private let fileStore: JSONFileStore
-    private let keychain: any APIKeySecretStore
     private var debouncedSettingsWriteTask: Task<Void, Never>?
-    /// 启动一次性迁移是否已执行(见 `performLaunchMigrationIfNeeded`)。
-    private var didRunLaunchMigration = false
     /// 写盘失败的重试次数:成功或用户下一次变更归零,封顶见 `maxFlushRetryCount`。
     /// private(set) 仅为测试可读(断言重试有界)。
     private(set) var flushRetryCount = 0
@@ -40,19 +34,12 @@ final class SettingsStore: ObservableObject {
     /// 本次启动 settings.json 是否损坏并被重置为默认值。
     /// 上游 View 可据此提示用户配置已重置(而不是让用户以为自己没设置过)。
     private(set) var didRecoverFromCorruptFile = false
-    /// 最近一次钥匙串写入是否成功:false 表示 API Key 处于明文降级保存态。
-    /// @Published:View 需据此绑定"明文降级"警告横幅,降级态变化必须实时可见。
-    /// 口径是"是否处于明文降级态"而非字面"钥匙串里有 Key":配置清空后不存在
-    /// 任何密钥、也无从降级,同样取 true(见 `updateAISettings` 清空分支)。
-    @Published private(set) var apiKeyStoredInKeychain = true
 
     init(
         fileStore: JSONFileStore,
-        keychain: any APIKeySecretStore = SecurityAPIKeyStore.shared,
         flushRetryBaseSeconds: Int = 5
     ) {
         self.fileStore = fileStore
-        self.keychain = keychain
         self.flushRetryBaseSeconds = flushRetryBaseSeconds
         do {
             self.settings = try fileStore.loadIfPresent(
@@ -65,74 +52,6 @@ final class SettingsStore: ObservableObject {
             fileStore.preserveCorruptFile(named: "settings.json")
             self.settings = AppSettings(workplaceRootPath: "")
             didRecoverFromCorruptFile = true
-        }
-        // 迁移/钥匙串回读必须在**构造路径**内完成:SettingsView → AISettingsSection
-        // 的 `@State initialValue` 按构造时的 `aiSettings.apiKey` 赋值,晚于首帧的
-        // 迁移(onAppear)来不及回填——`@State` 只在首次安装取一次初值,输入框会永远
-        // 停在空串,用户随后保存会把钥匙串里的真 Key 覆盖成空(空串语义是删除)。
-        // 曾顾虑"放进 init 等于每次视图结构体重建都跑一遍",该担忧已由
-        // RootSplitView 里 `StateObject(wrappedValue:)` 的 autoclosure 消灭:
-        // 它在视图生命周期内只求值一次,本 init 只执行一次。
-        performLaunchMigrationIfNeeded()
-    }
-
-    /// 启动一次性迁移/回填(钥匙串收敛、托管态密钥回读、明文空串态标记)。
-    ///
-    /// 由 `init` 末尾调用(构造即回填,保证任何"body 期读 `aiSettings.apiKey`"的
-    /// 消费方拿到的都是完整配置),与 `JSONFileStore.cleanupStaleStagingDirectories`
-    /// 只在启动跑一次的惯例一致;幂等:重复调用由 `didRunLaunchMigration` 挡掉。
-    func performLaunchMigrationIfNeeded() {
-        guard didRunLaunchMigration == false else { return }
-        didRunLaunchMigration = true
-        migrateAPIKeyOutOfSettingsFileIfNeeded()
-    }
-
-    /// 启动时把 API Key 收敛进钥匙串:
-    /// - 明文态(旧版本 settings.json 带 apiKey):迁入钥匙串并立即重写 settings(去明文);
-    ///   钥匙串此刻仍不可用则保留明文(降级态),下次启动或下次保存再收敛。
-    /// - 托管态(文件无 apiKey):从钥匙串读回内存,保证本进程内 `settings.aiSettings.apiKey`
-    ///   与保存时同构(消费方——AI 服务、设置页——都按"完整配置"读)。
-    private func migrateAPIKeyOutOfSettingsFileIfNeeded() {
-        guard var ai = settings.aiSettings else { return }
-        if ai.apiKeyManagedExternally {
-            // 托管态:从钥匙串读回内存,保证本进程内 `settings.aiSettings.apiKey`
-            // 与保存时同构(消费方——AI 服务、设置页——都按"完整配置"读)。
-            settings.backfillAPIKeyFromKeychainIfManaged(using: keychain)
-            return
-        }
-        let plaintext = ai.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard plaintext.isEmpty == false else {
-            // 明文态但本来就是空串:标记托管(编码不会再写字段)并顺手落盘收敛,
-            // 否则每次启动都会重复走到这里改内存、文件却一直留着旧的空 apiKey 字段。
-            ai.apiKeyManagedExternally = true
-            settings.aiSettings = ai
-            do {
-                try fileStore.save(settings, as: "settings.json")
-                // 迁移只在 init 执行(彼时 flushRetryCount 恒为 0),归零是防御性写法:
-                // 万一未来在启动后复用本方法,直接写盘成功同样要归零重试预算
-                // (否则封顶后下一次 flush 失败会零重试)。
-                flushRetryCount = 0
-            } catch {
-                settingsStoreLog.error("event=empty_plaintext_api_key_rewrite_failed reason=\(error.localizedDescription, privacy: .public)")
-            }
-            return
-        }
-        do {
-            try keychain.storeAPIKey(plaintext)
-            ai.apiKeyManagedExternally = true
-            settings.aiSettings = ai
-            do {
-                try fileStore.save(settings, as: "settings.json")
-                // 同上:防御性归零(迁移仅在 init 执行,此时计数恒为 0)。
-                flushRetryCount = 0
-                settingsStoreLog.notice("event=api_key_migrated_to_keychain")
-            } catch {
-                // 迁移已写入钥匙串,落盘失败只说明明文还会多留一份,下次启动重试即可。
-                settingsStoreLog.error("event=keychain_migration_rewrite_failed reason=\(error.localizedDescription, privacy: .public)")
-            }
-        } catch {
-            apiKeyStoredInKeychain = false
-            settingsStoreLog.error("event=keychain_migration_failed reason=\(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -200,7 +119,7 @@ final class SettingsStore: ObservableObject {
     /// 此前注释写"重试一次",实现却是重试任务醒来先清句柄再 flush、失败后本方法的
     /// guard 恒为真 → 每 5s 一次同步写加一条 error 日志,永不收敛;现以计数封顶。
     /// 重试成功或下一次变更/直接写盘成功(persistSettings/Debounced、换根)会把计数
-    /// 归零重新开始;启动迁移只在 init 执行(彼时计数恒为 0),不构成归零路径。
+    /// 归零重新开始。
     private func scheduleFlushRetry() {
         guard debouncedSettingsWriteTask == nil else { return }
         guard flushRetryCount < Self.maxFlushRetryCount else {
@@ -282,8 +201,22 @@ final class SettingsStore: ObservableObject {
             try updateRootPath(path, rebasingWorkplaceStore: workplaceStore)
             return nil
         } catch {
-            return "保存失败：\(error.localizedDescription)"
+            // 经 UserFacingError 收口:换根路径失败会抛 JSONFileStore/POSIX 错误,
+            // 裸 localizedDescription 会把系统英文原文打进引导页的设置横幅。
+            return "保存失败：\(UserFacingError.message(for: error))"
         }
+    }
+
+    /// 仅清除 API Key(Base URL 与模型名保留):换 Key、或改用本地服务时的正规入口。
+    /// 设置页「清除密钥」按钮的落地点;与"清空 Key 输入框后保存"等价,
+    /// 但一键完成且不牵动其他字段的未保存修改。
+    /// 无 AI 配置(`aiSettings == nil`)时为 no-op:没有可清的 Key。
+    func clearStoredAPIKey() throws {
+        guard var ai = settings.aiSettings else { return }
+        ai.apiKey = ""
+        var updatedSettings = settings
+        updatedSettings.aiSettings = ai
+        try persistSettings(updatedSettings)
     }
 
     func updatePreferredOpenActionID(_ actionID: String?) throws {
@@ -298,89 +231,17 @@ final class SettingsStore: ObservableObject {
         try persistSettings(updatedSettings)
     }
 
-    /// 保存 AI 服务配置;传 nil 表示清除配置(钥匙串条目一并删除)。
+    /// 保存 AI 服务配置;传 nil 表示清除配置(`aiSettings` 整体落盘为 nil)。
     ///
-    /// API Key 优先落钥匙串;钥匙串不可用时降级为明文落盘(编码带 apiKey 字段),
-    /// 不静默丢用户配置。成功迁入钥匙串后,若上一轮是降级明文态,本次落盘即完成收敛。
-    /// 输入为空而钥匙串处于"已存"态时先回读确认(读失败会把空串折叠进内存),
-    /// 读不到就跳过钥匙串写入,绝不按空串删除既有 Key。
-    /// 钥匙串写入先于落盘:落盘失败(磁盘满等)时回滚内存与降级标记到旧值,
-    /// 钥匙串里可能暂存新 Key,与文件短暂不一致,由下次保存或启动迁移收敛。
+    /// API Key 明文随配置落盘,**所见即所存**:设置页首帧回显的就是已存值,
+    /// 清空输入框后保存即删除已存 Key(显式动作,与钥匙串时代需要回读保护的
+    /// 场景不同——本地文件回显不存在"读失败折叠成空串"的歧义);
+    /// 单独删除另有 `clearStoredAPIKey` 一键入口。
+    /// `persistSettings` 先写盘后改内存,失败时内存保持旧值并抛给调用方提示。
     func updateAISettings(_ aiSettings: AppSettings.AISettings?) throws {
-        let previousSettings = settings
-        let previousStoredInKeychain = apiKeyStoredInKeychain
         var updatedSettings = settings
-        var keychainWriteSucceeded = false
-        if var ai = aiSettings {
-            // 空串落钥匙串的语义是**删除**,而内存里的空串可能只是钥匙串读失败的
-            // 折叠产物(`KeychainStore.readAPIKey` 对"无条目"与锁屏/ACL 拒绝一律返回
-            // nil,上层分不出来):用户只改 Base URL 就保存,会把真 Key 永久删掉。
-            // 因此存前先回读确认——读得到就按真 Key 保存(空串只是启动回显失败,
-            // 仅凭空输入分不出"用户清空"与"没读到",宁可保留旧 Key;关闭 AI 的正规
-            // 入口是清空 Base URL 与模型名 → updateAISettings(nil));仍读不到则跳过
-            // 钥匙串写入,既不删也不覆盖,真 Key 留在钥匙串等下次回读恢复。
-            var skipKeychainWrite = false
-            if ai.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-               apiKeyStoredInKeychain {
-                if let stored = keychain.readAPIKey(),
-                   stored.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
-                    ai.apiKey = stored
-                } else {
-                    skipKeychainWrite = true
-                    ai.apiKeyManagedExternally = true
-                    settingsStoreLog.error("event=api_key_write_skipped detail=钥匙串读不到既有 Key,跳过空串写入以免误删")
-                }
-            }
-            // skipKeychainWrite 时不动钥匙串也不动降级标记:文件里本就没有明文,
-            // 真 Key 仍在钥匙串,不构成明文降级态。
-            if skipKeychainWrite == false {
-                do {
-                    try keychain.storeAPIKey(ai.apiKey)
-                    ai.apiKeyManagedExternally = true
-                    apiKeyStoredInKeychain = true
-                    keychainWriteSucceeded = true
-                } catch {
-                    ai.apiKeyManagedExternally = false
-                    apiKeyStoredInKeychain = false
-                    settingsStoreLog.error("event=keychain_store_failed reason=\(error.localizedDescription, privacy: .public)")
-                }
-            }
-            updatedSettings.aiSettings = ai
-        } else {
-            do {
-                try keychain.storeAPIKey("")
-                // 清空成功路径按真实状态归位,取 true(口径见属性声明:是否处于
-                // 明文降级态)。逐一核过消费方:① AISettingsSection 的降级横幅仅在
-                // false 时显示"API Key 正以明文保存在 settings.json 中"——此刻
-                // aiSettings 已为 nil、钥匙串条目已删,置 false 会谎报明文落盘,
-                // 是实打实的 UI 副作用;② 本方法开头的空串回读保护(仅对随后的
-                // 非空配置保存生效)在钥匙串已空时回读 nil、安全跳过,不依赖此值。
-                // 故"无密钥可存、也无明文可降级"的真实状态即"非降级态"= true。
-                apiKeyStoredInKeychain = true
-                keychainWriteSucceeded = true
-            } catch {
-                // 删除失败不能"悄悄清除":旧 Key 仍躺在钥匙串里,照常落盘
-                // aiSettings = nil 会让 storedInKeychain 与真实态背离,且用户随后
-                // 重新配置、Key 留空时会被开头的回读保护把旧 Key 无声复活。
-                // 中止本次清除并抛错(UI 经 errorDescription 可见提示),配置原样保留。
-                settingsStoreLog.error("event=keychain_delete_failed reason=\(error.localizedDescription, privacy: .public)")
-                throw SettingsStoreError.keychainDeleteFailed(reason: error.localizedDescription)
-            }
-            updatedSettings.aiSettings = nil
-        }
-        do {
-            try persistSettings(updatedSettings)
-        } catch {
-            // 落盘失败:内存与降级标记回滚到旧值,维持"内存 == 文件"的一致口径。
-            settings = previousSettings
-            apiKeyStoredInKeychain = previousStoredInKeychain
-            if keychainWriteSucceeded {
-                settingsStoreLog.error("event=ai_settings_persist_failed detail=密钥已写入钥匙串但配置保存失败 reason=\(error.localizedDescription, privacy: .public)")
-            } else {
-                settingsStoreLog.error("event=ai_settings_persist_failed reason=\(error.localizedDescription, privacy: .public)")
-            }
-            throw error
-        }
+        updatedSettings.aiSettings = aiSettings
+        try persistSettings(updatedSettings)
     }
 
     func updateHasCompletedOnboarding(_ value: Bool) throws {

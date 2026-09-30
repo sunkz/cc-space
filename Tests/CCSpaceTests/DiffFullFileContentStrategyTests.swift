@@ -128,7 +128,7 @@ private final class FullFileContentStubGitService: GitServicing, @unchecked Send
     func remoteBranchExists(branch: String, remoteURL: String) async -> Bool { false }
     func mergeDefaultBranchIntoCurrent(in directory: String) async throws -> GitMergeDefaultBranchOutcome { .skipped }
     func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] { [] }
-    func remoteBranches(for remoteURL: String) async -> [String] { [] }
+    func remoteBranches(for remoteURL: String) async -> [String]? { [] }
     func remoteURL(in directory: String) async -> String? { nil }
     func defaultBranch(for remoteURL: String) async -> String? { nil }
 }

@@ -4,8 +4,8 @@ import XCTest
 @MainActor
 final class DiskRefreshServiceTests: XCTestCase {
     func test_refreshCleansMissingWorkplacesAndDeduplicatesRepositories() async throws {
-        let appSupportRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let appSupportRoot = makeTestRootURL()
+        let workspaceRoot = makeTestRootURL()
         try FileManager.default.createDirectory(
             at: workspaceRoot,
             withIntermediateDirectories: true,
@@ -134,8 +134,8 @@ final class DiskRefreshServiceTests: XCTestCase {
     /// 去重硬删除仓库后,必须立即清理工作区对它的引用(选中列表与 sync state),
     /// 不能等下次启动 prune——期间 UI 会展示指向已删仓库的悬空引用。
     func test_refreshPrunesWorkplaceReferencesAfterDeduplicationRemovesRepository() async throws {
-        let appSupportRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let appSupportRoot = makeTestRootURL()
+        let workspaceRoot = makeTestRootURL()
         let workplaceURL = workspaceRoot.appendingPathComponent("existing")
         try FileManager.default.createDirectory(
             at: workplaceURL.appendingPathComponent("blog"),
@@ -217,8 +217,8 @@ final class DiskRefreshServiceTests: XCTestCase {
     }
 
     func test_refreshDoesNotApplyStaleSnapshotOverNewerSyncState() async throws {
-        let appSupportRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let appSupportRoot = makeTestRootURL()
+        let workspaceRoot = makeTestRootURL()
         try FileManager.default.createDirectory(
             at: workspaceRoot,
             withIntermediateDirectories: true,
@@ -296,8 +296,8 @@ final class DiskRefreshServiceTests: XCTestCase {
     }
 
     func test_refreshRetriesUntilSnapshotStabilizesThenApplies() async throws {
-        let appSupportRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let appSupportRoot = makeTestRootURL()
+        let workspaceRoot = makeTestRootURL()
         try FileManager.default.createDirectory(
             at: workspaceRoot,
             withIntermediateDirectories: true,

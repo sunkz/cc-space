@@ -37,6 +37,48 @@ struct GitProcessRunner {
         gitURL?.path
     }
 
+    /// 组装 git 子进程的环境变量(纯函数,便于单测——不碰进程级 setenv)。
+    ///
+    /// 先剥掉继承环境里的 git 覆盖变量,再合并调用方注入项,最后写死安全/分类固定项。
+    static func childEnvironment(
+        inherited: [String: String],
+        additional: [String: String] = [:]
+    ) -> [String: String] {
+        var environment = inherited
+        // 剥掉调用方环境里的 git 覆盖变量:app 若从 git shell 函数(别名/wrapper)里
+        // 启动,GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE 会随继承进入每个子进程并**压过**
+        // `-C <目录>` 定位——所有 git 操作都被指向启动它的那个仓库,且因为命令"成功
+        // 执行"了,错误完全不可归因。GIT_CONFIG*/GIT_SSH_COMMAND 同理论外部 system
+        // 配置可绕过下方固定项(GIT_SSH_COMMAND 在下面单独追加处理,不在此剔除)。
+        for key in [
+            "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR",
+            "GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT",
+        ] {
+            environment.removeValue(forKey: key)
+        }
+        environment.merge(additional) { _, injected in injected }
+        environment["GIT_TERMINAL_PROMPT"] = "0"
+        // 固定非交互 ssh:用户已有 GIT_SSH_COMMAND 时**追加** -o BatchMode=yes 而非
+        // 整体覆盖——用户可能借它指定自定义密钥/端口/代理,整体覆盖会把配置静默丢弃,
+        // clone/pull 认证失败且无从排查。BatchMode 仍保证不弹交互提示。
+        if let existingSSHCommand = environment["GIT_SSH_COMMAND"],
+           existingSSHCommand.trimmingCharacters(in: .whitespaces).isEmpty == false {
+            environment["GIT_SSH_COMMAND"] = existingSSHCommand + " -o BatchMode=yes"
+        } else {
+            environment["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes"
+        }
+        // 固定 git 输出语言为英文:全项目的错误分类(pull 策略回退、分支缺失判定、
+        // stash 恢复决策、localizeMessage 之外的子串匹配)都依赖英文文案子串。
+        // 不设防时用户 shell 里一个 LANG=zh_CN 就能让整套分类逻辑静默失效。
+        environment["LC_ALL"] = "C"
+        // 安全兜底:只放行白名单传输协议。git 对用户直接发起的命令默认允许 ext::
+        // 等可执行任意命令的传输形式,用户配置的远端 URL 会原样进入 argv;
+        // Service 层入口另有 URL 校验(GitURLParser.validateRemoteURL),这里双保险。
+        environment["GIT_ALLOW_PROTOCOL"] = "https:http:ssh:git:file"
+        return environment
+    }
+
     func run(
         arguments: [String],
         captureStdout: Bool,
@@ -74,27 +116,10 @@ struct GitProcessRunner {
         process.arguments = arguments
         process.currentDirectoryURL = URL(fileURLWithPath: NSTemporaryDirectory())
 
-        var environment = ProcessInfo.processInfo.environment
-        environment.merge(additionalEnvironment) { _, injected in injected }
-        environment["GIT_TERMINAL_PROMPT"] = "0"
-        // 固定非交互 ssh:用户已有 GIT_SSH_COMMAND 时**追加** -o BatchMode=yes 而非
-        // 整体覆盖——用户可能借它指定自定义密钥/端口/代理,整体覆盖会把配置静默丢弃,
-        // clone/pull 认证失败且无从排查。BatchMode 仍保证不弹交互提示。
-        if let existingSSHCommand = environment["GIT_SSH_COMMAND"],
-           existingSSHCommand.trimmingCharacters(in: .whitespaces).isEmpty == false {
-            environment["GIT_SSH_COMMAND"] = existingSSHCommand + " -o BatchMode=yes"
-        } else {
-            environment["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes"
-        }
-        // 固定 git 输出语言为英文:全项目的错误分类(pull 策略回退、分支缺失判定、
-        // stash 恢复决策、localizeMessage 之外的子串匹配)都依赖英文文案子串。
-        // 不设防时用户 shell 里一个 LANG=zh_CN 就能让整套分类逻辑静默失效。
-        environment["LC_ALL"] = "C"
-        // 安全兜底:只放行白名单传输协议。git 对用户直接发起的命令默认允许 ext::
-        // 等可执行任意命令的传输形式,用户配置的远端 URL 会原样进入 argv;
-        // Service 层入口另有 URL 校验(GitURLParser.validateRemoteURL),这里双保险。
-        environment["GIT_ALLOW_PROTOCOL"] = "https:http:ssh:git:file"
-        process.environment = environment
+        process.environment = Self.childEnvironment(
+            inherited: ProcessInfo.processInfo.environment,
+            additional: additionalEnvironment
+        )
 
         let stdoutPipe = captureStdout ? Pipe() : nil
         let stderrPipe = captureStderr ? Pipe() : nil

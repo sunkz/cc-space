@@ -377,7 +377,7 @@ final class GitServicePullAllBranchesTests: XCTestCase {
     }
 
     func makeTestEnvironment() throws -> TestEnv {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
 
         // 每用例独立的空配置文件:GIT_CONFIG_GLOBAL/SYSTEM 指向它们,

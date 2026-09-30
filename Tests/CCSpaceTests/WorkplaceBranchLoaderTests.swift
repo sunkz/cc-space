@@ -61,7 +61,7 @@ private actor WorkplaceBranchLoaderGitServiceSpy: GitServicing {
     func remoteBranchExists(branch: String, remoteURL: String) async -> Bool { false }
     func mergeDefaultBranchIntoCurrent(in directory: String) async throws -> GitMergeDefaultBranchOutcome { .merged }
     func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] { [] }
-    func remoteBranches(for remoteURL: String) async -> [String] { [] }
+    func remoteBranches(for remoteURL: String) async -> [String]? { [] }
 
     func setBranches(_ branches: [String], for directory: String) {
         branchesByDirectory[directory] = branches
@@ -78,7 +78,7 @@ private actor WorkplaceBranchLoaderGitServiceSpy: GitServicing {
 
 final class WorkplaceBranchLoaderTests: XCTestCase {
     func test_loaderLimitsConcurrentGitRequests() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         try FileManager.default.createDirectory(
             at: root,
             withIntermediateDirectories: true,
@@ -124,7 +124,7 @@ final class WorkplaceBranchLoaderTests: XCTestCase {
     }
 
     func test_loaderFallsBackToCurrentBranchAndSkipsMissingLocalDirectories() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         try FileManager.default.createDirectory(
             at: root,
             withIntermediateDirectories: true,

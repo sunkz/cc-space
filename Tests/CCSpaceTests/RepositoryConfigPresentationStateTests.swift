@@ -46,6 +46,61 @@ final class RepositoryConfigPresentationStateTests: XCTestCase {
         XCTAssertEqual(state.emptySubtitle, "试试仓库名称或地址中的关键词。")
     }
 
+    func test_backToTopOnlyAppearsWhenFilteredListExceedsThreshold() {
+        let threshold = RepositorySearchPresentationState.backToTopThreshold
+        let repositories = (0..<threshold).map { index in
+            makeRepository(name: "repo-\(index)", url: "git@github.com:org/repo-\(index).git")
+        }
+
+        // 恰好等于阈值:滚不出首屏,不显示。
+        XCTAssertFalse(
+            RepositorySearchPresentationState(repositories: repositories, searchText: "").showsBackToTop
+        )
+        let oneMore = repositories + [
+            makeRepository(name: "extra", url: "git@github.com:org/extra.git"),
+        ]
+        XCTAssertTrue(
+            RepositorySearchPresentationState(repositories: oneMore, searchText: "").showsBackToTop
+        )
+        // 搜索收窄到阈值以内:即使总数超阈值也不显示(按过滤后条数判断)。
+        XCTAssertFalse(
+            RepositorySearchPresentationState(repositories: oneMore, searchText: "extra").showsBackToTop
+        )
+    }
+
+    func test_branchPillGroupKeepsAllBranchesWhenWithinThreshold() {
+        let state = RepositoryBranchPillGroupPresentationState(
+            branches: ["develop", "release", "staging"]
+        )
+
+        XCTAssertEqual(state.visibleBranches, ["develop", "release", "staging"])
+        XCTAssertTrue(state.overflowBranches.isEmpty)
+        XCTAssertNil(state.overflowCountText)
+        XCTAssertNil(state.overflowQuickHelpText)
+    }
+
+    func test_branchPillGroupCollapsesOverflowIntoCountPill() {
+        let state = RepositoryBranchPillGroupPresentationState(
+            branches: ["develop", "release", "staging", "hotfix", "next"]
+        )
+
+        XCTAssertEqual(state.visibleBranches, ["develop", "release", "staging"])
+        XCTAssertEqual(state.overflowBranches, ["hotfix", "next"])
+        XCTAssertEqual(state.overflowCountText, "+2")
+        XCTAssertEqual(
+            state.overflowQuickHelpText,
+            "MR 目标分支（已折叠）：\nhotfix\nnext",
+            "折叠胶囊的悬停提示须逐条列出被折叠的分支"
+        )
+    }
+
+    func test_branchPillGroupWithNoBranchesIsEmpty() {
+        let state = RepositoryBranchPillGroupPresentationState(branches: [])
+
+        XCTAssertTrue(state.visibleBranches.isEmpty)
+        XCTAssertNil(state.overflowCountText)
+    }
+
     func test_addStateTrimsWhitespaceBeforeAllowingSubmit() {
         XCTAssertFalse(RepositoryAddPresentationState(gitURL: "   ").canSubmit)
         XCTAssertTrue(RepositoryAddPresentationState(gitURL: " git@github.com:org/blog.git ").canSubmit)
@@ -236,6 +291,11 @@ final class RepositoryConfigPresentationStateTests: XCTestCase {
         XCTAssertFalse(duplicateState.canSubmit)
         XCTAssertTrue(validState.canSubmit)
         XCTAssertEqual(validState.trimmedBranchName, "staging")
+        // isDuplicate 与"空输入"必须可区分:重名时视图要给一次可见提示,
+        // 空输入则什么都不该说。
+        XCTAssertTrue(duplicateState.isDuplicate)
+        XCTAssertFalse(emptyState.isDuplicate)
+        XCTAssertFalse(validState.isDuplicate)
     }
 
     private func makeRepository(name: String, url: String) -> RepositoryConfig {

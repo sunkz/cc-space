@@ -57,7 +57,9 @@ enum SettingsTab: Hashable {
 
     var title: String {
         switch self {
-        case .general: return "设置"
+        // 设置页内部的页签不自称"设置":分段控件上 [设置][AI] 是自指,
+        // 改为[通用][AI]与"根目录/仓库/引导"的内容范围一致。
+        case .general: return "通用"
         case .ai: return "AI"
         }
     }
@@ -72,8 +74,11 @@ enum SettingsTab: Hashable {
 
     /// 原生分段控件(NSSegmentedControl)的段标题:段标签渲染不了 SF Symbols,
     /// 有图标的页签用 Unicode 星号「✦」前缀替代。
-    var pickerTitle: String {
-        iconSystemName == nil ? title : "✦ \(title)"
+    /// `showingUnsavedChanges` 时追加「•」——段标签只能用字符表达未保存标记
+    /// (在哪几个页签显示由 `SettingsTabPresentationState.pickerTitle(for:)` 收敛)。
+    func pickerTitle(showingUnsavedChanges: Bool = false) -> String {
+        let base = iconSystemName == nil ? title : "✦ \(title)"
+        return showingUnsavedChanges ? "\(base) •" : base
     }
 }
 
@@ -82,6 +87,14 @@ struct SettingsTabPresentationState {
     static let allTabs: [SettingsTab] = [.general, .ai]
 
     let selectedTab: SettingsTab
+    /// AI 表单是否存在未保存修改(由 AISettingsSection 上报、RootSplitView 持有)。
+    /// 通用页签没有表单输入,标记只落在 AI 页签上。
+    let showsUnsavedChanges: Bool
+
+    init(selectedTab: SettingsTab, showsUnsavedChanges: Bool = false) {
+        self.selectedTab = selectedTab
+        self.showsUnsavedChanges = showsUnsavedChanges
+    }
 
     func isSelected(_ tab: SettingsTab) -> Bool {
         tab == selectedTab
@@ -90,89 +103,52 @@ struct SettingsTabPresentationState {
     func accessibilityLabel(for tab: SettingsTab) -> String {
         isSelected(tab) ? "\(tab.title)（当前页签）" : tab.title
     }
+
+    /// 分段控件的段标题:未保存「•」标记只跟随 AI 页签,通用页签恒无。
+    func pickerTitle(for tab: SettingsTab) -> String {
+        tab.pickerTitle(showingUnsavedChanges: showsUnsavedChanges && tab == .ai)
+    }
 }
 
-/// 设置页「Git 状态检测」区块的展示状态,由检测原始结果推导。
-struct GitEnvironmentPresentationState {
-    /// git 环境状态:检测中 / 可用 / 不可用。
-    enum Availability: Equatable {
-        case checking
-        case available
-        case unavailable
+/// 设置页 AI 表单的展示状态(纯逻辑,便于测试):
+/// 与已存配置逐字段比对得出"是否有未保存修改"(驱动保存按钮禁用与页签「•」标记),
+/// 以及动作(测试连接/拉模型)的前置校验文案。
+struct AISettingsFormPresentationState {
+    let isDirty: Bool
+
+    init(baseURL: String, modelName: String, apiKey: String, stored: AppSettings.AISettings?) {
+        let trimmedBaseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedModelName = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let stored else {
+            // 从未配置过:三个输入全空即"无修改",任一非空即在新增配置。
+            isDirty = trimmedBaseURL.isEmpty == false
+                || trimmedModelName.isEmpty == false
+                || trimmedAPIKey.isEmpty == false
+            return
+        }
+        // 输入框回显的初值就来自 stored,按 trim 后比对——
+        // 用户在输入框两端多敲了空格不算修改,保存时也会被 trim 掉。
+        isDirty = trimmedBaseURL != stored.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            || trimmedModelName != stored.modelName.trimmingCharacters(in: .whitespacesAndNewlines)
+            || trimmedAPIKey != stored.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    let availability: Availability
-    /// `git --version` 输出;检测中或无结果时为 nil。
-    let versionDisplay: String?
-    /// 探测到的 git 可执行文件路径;检测中或未找到时为 nil。
-    let executablePathDisplay: String?
-
-    init(info: GitEnvironmentInfo?, isChecking: Bool) {
-        if isChecking {
-            availability = .checking
-        } else if let info, info.isAvailable {
-            availability = .available
-        } else {
-            availability = .unavailable
+    /// 动作前置校验:返回 nil 表示通过,否则为要展示的错误文案。
+    /// API Key 恒可选——Ollama/LM Studio 等本地服务不需要密钥,
+    /// 缺 Key 由服务端 401 原样反馈,拦在门口反而配置不了本地服务。
+    static func actionValidationError(
+        baseURL: String,
+        modelName: String,
+        requireModel: Bool
+    ) -> String? {
+        if baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "请先填写 Base URL"
         }
-
-        let trimmedVersion = info?.version?.trimmingCharacters(in: .whitespacesAndNewlines)
-        versionDisplay = trimmedVersion?.isEmpty == false ? trimmedVersion : nil
-
-        let trimmedPath = info?.executablePath?.trimmingCharacters(in: .whitespacesAndNewlines)
-        executablePathDisplay = trimmedPath?.isEmpty == false ? trimmedPath : nil
-    }
-
-    /// 从 `git --version` 输出提取的简短版本号(如 "2.39.5");无法解析时为 nil。
-    var shortVersionDisplay: String? {
-        // 输出形如 "git version 2.39.5 (Apple Git-150)",第三个词是版本号。
-        guard let versionDisplay else { return nil }
-        let tokens = versionDisplay.components(separatedBy: .whitespaces)
-        guard tokens.count >= 3, tokens[0] == "git", tokens[1] == "version" else {
-            return nil
+        if requireModel, modelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "请先填写模型名"
         }
-        let candidate = tokens[2]
-        let isVersionNumber = candidate.isEmpty == false
-            && candidate.allSatisfy { $0.isNumber || $0 == "." }
-        return isVersionNumber ? candidate : nil
-    }
-
-    /// 工具栏紧凑文案:可用时为 "git <版本号>",不可用时为 "git 不可用";检测中为 nil(仅图标)。
-    var compactLabel: String? {
-        switch availability {
-        case .checking:
-            return nil
-        case .available:
-            if let shortVersionDisplay {
-                return "git \(shortVersionDisplay)"
-            }
-            return "git 可用"
-        case .unavailable:
-            return "git 不可用"
-        }
-    }
-
-    /// 悬停提示文案,含完整版本、可执行文件路径与操作说明。
-    var quickHelpText: String {
-        switch availability {
-        case .checking:
-            return "正在检测 git 环境…"
-        case .available:
-            var lines = ["git 可用"]
-            if let versionDisplay {
-                lines.append("版本：\(versionDisplay)")
-            }
-            if let executablePathDisplay {
-                lines.append("路径：\(executablePathDisplay)")
-            }
-            lines.append("点击重新检测")
-            return lines.joined(separator: "\n")
-        case .unavailable:
-            var lines = ["未检测到可用的 git，可安装 Xcode Command Line Tools 后重新检测"]
-            if let executablePathDisplay {
-                lines.append("路径：\(executablePathDisplay)")
-            }
-            return lines.joined(separator: "\n")
-        }
+        return nil
     }
 }

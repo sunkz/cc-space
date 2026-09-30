@@ -3,7 +3,7 @@ import XCTest
 
 final class JSONFileStoreTests: XCTestCase {
     func test_roundTripsRepositories() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let store = JSONFileStore(rootDirectory: root)
         let items = [
             RepositoryConfig(
@@ -22,7 +22,7 @@ final class JSONFileStoreTests: XCTestCase {
     }
 
     func test_loadIfPresentReturnsDefaultWhenFileMissing() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let store = JSONFileStore(rootDirectory: root)
         let defaultValue = AppSettings(workplaceRootPath: "/tmp/workplaces")
 
@@ -36,7 +36,7 @@ final class JSONFileStoreTests: XCTestCase {
     }
 
     func test_rollbackRestoresOriginalOnPartialWriteFailure() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let store = JSONFileStore(rootDirectory: root)
 
         let original = [
@@ -64,7 +64,7 @@ final class JSONFileStoreTests: XCTestCase {
     }
 
     func test_atomicMultiDocumentWriteIsAllOrNothing() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let store = JSONFileStore(rootDirectory: root)
 
         let items1 = [
@@ -94,7 +94,7 @@ final class JSONFileStoreTests: XCTestCase {
     // MARK: - rename(2) 原子覆盖
 
     func test_atomicReplaceOverwritesExistingDestinationAtomically() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let destination = root.appendingPathComponent("target.json")
         let staged = root.appendingPathComponent("staged.json")
@@ -108,7 +108,7 @@ final class JSONFileStoreTests: XCTestCase {
     }
 
     func test_atomicReplaceThrowsPosixErrorWhenSourceMissing() {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let missing = root.appendingPathComponent("does-not-exist.json")
         let destination = root.appendingPathComponent("target.json")
@@ -117,7 +117,7 @@ final class JSONFileStoreTests: XCTestCase {
     }
 
     func test_saveOverwritePreserves0600Permissions() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let store = JSONFileStore(rootDirectory: root)
         let settings = AppSettings(workplaceRootPath: "/tmp/workplaces")
 
@@ -135,7 +135,7 @@ final class JSONFileStoreTests: XCTestCase {
     // MARK: - 启动清理对备份的保全
 
     func test_cleanupStaleStagingDirectoriesRescuesBackupBeforeDeletion() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let fileManager = FileManager.default
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
 
@@ -171,7 +171,7 @@ final class JSONFileStoreTests: XCTestCase {
     }
 
     func test_cleanupStaleStagingDirectoriesLeavesFreshStagingAlone() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let fileManager = FileManager.default
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
         let freshStaging = root.appendingPathComponent(".ccspace-json-write-\(UUID().uuidString)", isDirectory: true)
@@ -183,7 +183,7 @@ final class JSONFileStoreTests: XCTestCase {
     }
 
     func test_cleanupStaleStagingDirectoriesKeepsStagingWhenBackupRescueFails() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let fileManager = FileManager.default
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
 
@@ -211,7 +211,7 @@ final class JSONFileStoreTests: XCTestCase {
     // MARK: - 多文档事务的崩溃收敛(意图清单)
 
     func test_saveMultiDocumentLeavesNoTransactionManifestOrStaging() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let store = JSONFileStore(rootDirectory: root)
 
         let doc1 = try store.document(for: AppSettings(workplaceRootPath: "/a"), as: "settings.json")
@@ -224,7 +224,7 @@ final class JSONFileStoreTests: XCTestCase {
     }
 
     func test_startupRecoveryRollsBackInterruptedMultiDocumentCommit() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let fileManager = FileManager.default
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
 
@@ -252,7 +252,7 @@ final class JSONFileStoreTests: XCTestCase {
     }
 
     func test_startupRecoveryRollsBackNewlyCreatedDocumentsOfInterruptedCommit() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let fileManager = FileManager.default
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
 
@@ -282,7 +282,7 @@ final class JSONFileStoreTests: XCTestCase {
     }
 
     func test_startupRecoveryForwardRollsCompletedCommitWithStaleManifest() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let fileManager = FileManager.default
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
 
@@ -306,7 +306,7 @@ final class JSONFileStoreTests: XCTestCase {
     }
 
     func test_startupRecoveryLeavesFreshManifestAlone() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let fileManager = FileManager.default
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
 
@@ -355,7 +355,7 @@ final class JSONFileStoreTests: XCTestCase {
     // MARK: - rename 前 fsync
 
     func test_fsyncFileSucceedsOnExistingFileAndThrowsOnMissing() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let fileURL = root.appendingPathComponent("data.json")
         try Data("{}".utf8).write(to: fileURL)
@@ -364,6 +364,20 @@ final class JSONFileStoreTests: XCTestCase {
 
         XCTAssertThrowsError(
             try JSONFileStore.fsyncFile(atPath: root.appendingPathComponent("missing.json").path)
+        )
+    }
+
+    /// 目录 fsync:open 需以 O_RDONLY(非 FREAD)才能对目录生效;不存在的路径必须抛错。
+    /// 生产路径以 `try?` 调用(刷写失败降级不阻断提交),故这里只断言 API 语义本身。
+    func test_fsyncDirectorySucceedsOnExistingDirectoryAndThrowsOnMissing() throws {
+        let root = makeTestRootURL()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try JSONFileStore.fsyncDirectory(atPath: root.path)
+
+        XCTAssertThrowsError(
+            try JSONFileStore.fsyncDirectory(atPath: root.appendingPathComponent("missing-dir").path)
         )
     }
 }

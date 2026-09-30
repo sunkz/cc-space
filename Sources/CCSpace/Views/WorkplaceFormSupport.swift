@@ -299,6 +299,9 @@ struct WorkplaceCreateSeedApplicationState: Equatable {
 struct WorkplaceEditPresentationState {
     let canSubmit: Bool
     let selectedRepositorySubtitle: String
+    /// 相对原选中集合被取消勾选的仓库数:>0 意味着保存会连带删除其本地目录,
+    /// 视图据此在提交前强制二次确认。
+    let removedRepositoryCount: Int
     let removalWarningFeedback: CCSpaceFeedback?
     let changeSummaryFeedback: CCSpaceFeedback?
     let branchChangeFeedback: CCSpaceFeedback?
@@ -332,6 +335,7 @@ struct WorkplaceEditPresentationState {
             hasChanges &&
             branchValidationError == nil
         selectedRepositorySubtitle = selectedRepositoryIDs.isEmpty ? "" : "\(selectedRepositoryIDs.count) 个已选"
+        removedRepositoryCount = removedCount
         removalWarningFeedback =
             removedCount > 0
             ? CCSpaceFeedback(style: .warning, message: "取消勾选后，如本地目录已存在，将一并删除对应本地文件。")

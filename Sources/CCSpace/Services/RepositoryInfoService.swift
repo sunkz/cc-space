@@ -35,6 +35,7 @@ struct RepositoryInfoService: FileSystemServicing {
 
     /// 可切换的远端分支列表:优先读本地 origin(与实际仓库一致),
     /// 无本地远端配置时回退到仓库配置地址;无法确定远端时返回 nil。
+    /// 列表为 nil 表示"探测失败"(区别于空数组的"远端确无分支"),调用方可据此保留旧缓存。
     func remoteBranchSuggestions(localPath: String, configuredURL: String?) async -> [String]? {
         let localOrigin = await gitService.remoteURL(in: localPath)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -55,8 +56,8 @@ struct RepositoryInfoService: FileSystemServicing {
         await gitService.defaultBranch(for: remoteURL)
     }
 
-    /// 远端分支列表。
-    func remoteBranches(for remoteURL: String) async -> [String] {
+    /// 远端分支列表;`nil` 表示探测失败(调用方保留旧缓存),`[]` 是远端确无分支。
+    func remoteBranches(for remoteURL: String) async -> [String]? {
         await gitService.remoteBranches(for: remoteURL)
     }
 

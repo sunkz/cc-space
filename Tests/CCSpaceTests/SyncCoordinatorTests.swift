@@ -83,7 +83,7 @@ struct CloneConcurrencyGitServiceSpy: GitServicing {
     func remoteBranchExists(branch: String, remoteURL: String) async -> Bool { false }
     func mergeDefaultBranchIntoCurrent(in directory: String) async throws -> GitMergeDefaultBranchOutcome { .merged }
     func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] { [] }
-    func remoteBranches(for remoteURL: String) async -> [String] { [] }
+    func remoteBranches(for remoteURL: String) async -> [String]? { [] }
 }
 
 struct PullConcurrencyGitServiceSpy: GitServicing {
@@ -128,7 +128,7 @@ struct PullConcurrencyGitServiceSpy: GitServicing {
     func remoteBranchExists(branch: String, remoteURL: String) async -> Bool { false }
     func mergeDefaultBranchIntoCurrent(in directory: String) async throws -> GitMergeDefaultBranchOutcome { .merged }
     func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] { [] }
-    func remoteBranches(for remoteURL: String) async -> [String] { [] }
+    func remoteBranches(for remoteURL: String) async -> [String]? { [] }
 }
 
 struct GitServiceStub: GitServicing {
@@ -228,7 +228,7 @@ struct GitServiceStub: GitServicing {
     }
 
     func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] { [] }
-    func remoteBranches(for remoteURL: String) async -> [String] { [] }
+    func remoteBranches(for remoteURL: String) async -> [String]? { [] }
 }
 
 @MainActor
@@ -372,8 +372,8 @@ final class SyncCoordinatorTests: XCTestCase {
     }
 
     func test_pullRepositoriesLimitsConcurrentGitOperations() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
+        let workspaceRoot = makeTestRootURL()
         defer {
             try? FileManager.default.removeItem(at: root)
             try? FileManager.default.removeItem(at: workspaceRoot)
@@ -444,8 +444,8 @@ final class SyncCoordinatorTests: XCTestCase {
     /// 曾有版本在取消时跳过剩余仓库的任务调度,那些行永远等不到终态回写,
     /// isBusy 恒真把详情页与分支面板整体锁死(所有分支置灰不可点)。
     func test_pullRepositoriesCancellationLeavesNoRowStuckInPulling() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
+        let workspaceRoot = makeTestRootURL()
         defer {
             try? FileManager.default.removeItem(at: root)
             try? FileManager.default.removeItem(at: workspaceRoot)
@@ -506,8 +506,8 @@ final class SyncCoordinatorTests: XCTestCase {
     }
 
     func test_pullUpdatesStatusToSuccessAndSetsLastSyncedAt() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
+        let workspaceRoot = makeTestRootURL()
         defer {
             try? FileManager.default.removeItem(at: root)
             try? FileManager.default.removeItem(at: workspaceRoot)
@@ -554,8 +554,8 @@ final class SyncCoordinatorTests: XCTestCase {
     }
 
     func test_pullSetsFailedStatusWithErrorOnFailure() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
+        let workspaceRoot = makeTestRootURL()
         defer {
             try? FileManager.default.removeItem(at: root)
             try? FileManager.default.removeItem(at: workspaceRoot)
@@ -603,8 +603,8 @@ final class SyncCoordinatorTests: XCTestCase {
     }
 
     func test_pullMarksRepositoryFailedWhenBranchStatusCannotBeResolved() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
+        let workspaceRoot = makeTestRootURL()
         defer {
             try? FileManager.default.removeItem(at: root)
             try? FileManager.default.removeItem(at: workspaceRoot)
@@ -659,8 +659,8 @@ final class SyncCoordinatorTests: XCTestCase {
     }
 
     func test_pullSkipsRepositoryWhenNoRemoteTrackingBranch() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
+        let workspaceRoot = makeTestRootURL()
         defer {
             try? FileManager.default.removeItem(at: root)
             try? FileManager.default.removeItem(at: workspaceRoot)
@@ -715,8 +715,8 @@ final class SyncCoordinatorTests: XCTestCase {
     }
 
     func test_pullSkipsNonSuccessRepositories() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
+        let workspaceRoot = makeTestRootURL()
         defer {
             try? FileManager.default.removeItem(at: root)
             try? FileManager.default.removeItem(at: workspaceRoot)
@@ -770,8 +770,8 @@ final class SyncCoordinatorTests: XCTestCase {
     }
 
     func test_pullSkipsRepositoryWithoutTrackingBranchAndPreservesStatus() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
+        let workspaceRoot = makeTestRootURL()
         defer {
             try? FileManager.default.removeItem(at: root)
             try? FileManager.default.removeItem(at: workspaceRoot)
@@ -833,7 +833,7 @@ final class SyncCoordinatorTests: XCTestCase {
     }
 
     func test_pullSkipsFailedRepositoryWithoutTrackingBranch() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         defer { try? FileManager.default.removeItem(at: root) }
         let fileStore = JSONFileStore(rootDirectory: root)
         let store = WorkplaceStore(fileStore: fileStore)
@@ -897,8 +897,8 @@ final class SyncCoordinatorTests: XCTestCase {
     }
 
     func test_replaceSyncStatesReplacesTargetWorkplaceOnly() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let workspaceRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
+        let workspaceRoot = makeTestRootURL()
         defer {
             try? FileManager.default.removeItem(at: root)
             try? FileManager.default.removeItem(at: workspaceRoot)
@@ -964,7 +964,7 @@ final class SyncCoordinatorTests: XCTestCase {
         )
         let stub = PullAllBranchesGitServiceStub(outcomeMap: ["/tmp/repo-a": outcomeForRepoA])
         let coordinator = SyncCoordinator(gitService: stub, fileSystemService: FileSystemService())
-        let storeRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let storeRoot = makeTestRootURL()
         defer { try? FileManager.default.removeItem(at: storeRoot) }
         let store = WorkplaceStore(fileStore: JSONFileStore(rootDirectory: storeRoot))
         let workplaceID = UUID()
@@ -1015,7 +1015,7 @@ struct PullAllBranchesGitServiceStub: GitServicing {
     func remoteBranchExists(branch: String, remoteURL: String) async -> Bool { false }
     func mergeDefaultBranchIntoCurrent(in directory: String) async throws -> GitMergeDefaultBranchOutcome { .merged }
     func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] { [] }
-    func remoteBranches(for remoteURL: String) async -> [String] { [] }
+    func remoteBranches(for remoteURL: String) async -> [String]? { [] }
 
     func pullAllBranches(in directory: String) async throws -> GitPullAllBranchesOutcome {
         if let outcome = outcomeMap[directory] {
@@ -1031,5 +1031,5 @@ struct PullAllBranchesGitServiceStub: GitServicing {
 }
 
 private func tempWorkplaceRoot() -> URL {
-    FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    makeTestRootURL()
 }

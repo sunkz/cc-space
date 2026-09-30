@@ -215,6 +215,9 @@ struct EditRepositorySheetView: View {
         defer { isLoadingRemoteBranches = false }
         let branches = await infoService.remoteBranches(for: gitURL)
         guard Task.isCancelled == false else { return }
+        // nil = 本次探测失败(区别于 [] 的"远端确无分支"):保留现有建议名单,
+        // 不把在弹层里已可用的列表一次抖动打成空(与仓库行 stale 缓存同口径)。
+        guard let branches else { return }
         let defaultBranch = effectiveDefaultBranch
         // 归一排序(localizedStandardCompare)放到后台做:分支上千时不卡弹层主线程,
         // 与 BranchListNormalization 的"加载时归一一次"约定一致。

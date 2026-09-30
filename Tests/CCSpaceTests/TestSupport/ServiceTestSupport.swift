@@ -8,9 +8,15 @@ import XCTest
 /// 改成共享固定根统一治理;但固定根下**每次调用仍分独立 UUID 子目录**——
 /// 此前"每次调用先清空整个根"会把更早测试遗留的后台 detached 写入(同步协调器/
 /// 刷新计算器的迟到落盘)连带删掉,产生跨用例的偶发失败。
-/// 现在只在进程内首次调用时清一次陈旧残留,各用例互不删文件。
+/// 现在只在进程内首次调用时清一次陈旧残留,各用例互不删文件;
+/// 残留判定额外按 `pid-<n>` 目录名排除仍存活的进程根,使同机并发的两个测试进程互不侵犯。
 private let serviceTestBaseRoot = FileManager.default.temporaryDirectory
     .appendingPathComponent("ccspace-service-tests", isDirectory: true)
+
+/// 本进程的测试根:按 pid 分目录,使并发运行的两个测试进程(同机双跑、CI 矩阵)
+/// 天然互不重叠——对方按日期做的陈旧清理不再可能删掉本进程正在使用的根。
+private let serviceTestProcessRoot = serviceTestBaseRoot
+    .appendingPathComponent("pid-\(getpid())", isDirectory: true)
 
 /// 进程启动时刻,作为陈旧残留清理的判定基准。
 /// 此前用固定"-1 小时"阈值:连续两轮测试间隔不足 1 小时时,上一轮的残留永远清不掉。
@@ -42,11 +48,11 @@ func makeServiceStores() throws -> (
     workspaceRoot: URL
 ) {
     let fileManager = FileManager.default
-    let caseRoot = serviceTestBaseRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let caseRoot = serviceTestProcessRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
     if serviceTestCleanupFlag.setIfFirst() {
-        // 只清创建时间早于本进程启动的目录(上一轮崩溃/正常退出留下的残留),
-        // 不碰本进程正在使用的根——后者可能还有后台 detached 写入
-        // (同步协调器/刷新计算器的迟到落盘)未完成。
+        // 清的是**其它进程**留下的陈旧目录:创建时间早于本进程启动,且对应 pid 已不在。
+        // pid 存活判定挡住同机并发场景——仅按日期判断会删掉另一个正在跑的测试进程的文件。
+        // 无法解析 pid 的目录(旧版本遗留的裸 UUID 根)退回纯日期判定。
         let cutoff = serviceTestProcessStartDate
         if let entries = try? fileManager.contentsOfDirectory(
             at: serviceTestBaseRoot,
@@ -55,9 +61,12 @@ func makeServiceStores() throws -> (
             for entry in entries {
                 let createdAt = (try? entry.resourceValues(forKeys: [.creationDateKey]))?.creationDate
                     ?? .distantPast
-                if createdAt < cutoff {
-                    try? fileManager.removeItem(at: entry)
+                guard createdAt < cutoff else { continue }
+                if let ownerPid = serviceTestProcessID(ofRootNamed: entry.lastPathComponent),
+                   kill(ownerPid, 0) == 0 {
+                    continue
                 }
+                try? fileManager.removeItem(at: entry)
             }
         }
     }
@@ -75,6 +84,12 @@ func makeServiceStores() throws -> (
         workplaceStore: WorkplaceStore(fileStore: fileStore),
         workspaceRoot: workspaceRoot
     )
+}
+
+/// 从 `pid-<n>` 形态的测试根目录名解析归属进程;非该形态返回 nil。
+private func serviceTestProcessID(ofRootNamed name: String) -> Int32? {
+    guard name.hasPrefix("pid-") else { return nil }
+    return Int32(name.dropFirst(4))
 }
 
 /// 断言异步表达式抛出了**指定类型**的错误。

@@ -132,8 +132,27 @@ struct SyncCoordinator: Sendable {
                         )
                     }
                     let state: RepositorySyncState
-                    // 走到这里说明该仓库的克隆真正开始执行(路径合法、未被取消),
-                    // 登记为"已启动":只有这些目录允许被编辑回滚清理。
+                    // 登记"已启动"前查一次存在性:路径已存在说明该目录不是本次克隆
+                    // 创建的(可能是用户既有同名目录)。此时若照常登记,编辑回滚会按
+                    // startedClonePaths 把别人的目录整棵 rm -rf(数据丢失)。probe 与
+                    // clone 之间的极窄竞态窗口内目录恰好被外部创建时,git clone 自己会
+                    // 因 destination exists 失败,但目录仍会被登记后删除——该窗口以毫秒
+                    // 计且需要用户脚本级时机,接受为残余风险。
+                    let targetPreExists = FileManager.default.fileExists(atPath: localPath)
+                    if targetPreExists {
+                        await progressTracker.didFinish(repositoryName: repositoryName)
+                        return RepositorySyncState(
+                            workplaceID: workplaceID,
+                            repositoryID: repositoryID,
+                            status: .failed,
+                            localPath: localPath,
+                            lastError: "目标目录已存在且不是本次克隆创建的,为避免误删既有数据已中止克隆；请调整仓库名或手动处理同名目录后重试",
+                            lastSyncedAt: nil,
+                            hasLocalDirectory: false
+                        )
+                    }
+                    // 走到这里说明该仓库的克隆真正开始执行(路径合法、未被取消、
+                    // 目录将由本次克隆创建),登记为"已启动":只有这些目录允许被编辑回滚清理。
                     await onCloneStarted?(localPath)
                     do {
                         try await gitService.clone(repositoryURL: repositoryURL, into: localPath)
@@ -195,6 +214,10 @@ struct SyncCoordinator: Sendable {
                 nextRepositoryIndex += 1
                 addTask(for: repository)
             }
+            // 取消后 drain 可能"正常"结束(在飞子任务全部越过检查点、未加入的不再补),
+            // 残缺 states 直接 return 会被调用方当成功落库(半创建工作区)。终检一次,
+            // 把取消如实抛给调用方的清理路径。
+            try Task.checkCancellation()
             return states
         }
     }

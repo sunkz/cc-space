@@ -63,19 +63,16 @@ struct DiskRefreshService {
                 continue
             }
 
-            workplaceStore.applyDiskRefreshResult(refreshResults.workplaceResult)
-            repositoryStore.applyDeduplicationResult(refreshResults.repositoryResult)
-            // 去重硬删除仓库后立即清理工作区对它的引用(选中/置顶/同步态),
-            // 而不是等下次启动 pruneReferencesToRepositories——期间 UI 会展示悬空引用。
-            if refreshResults.repositoryResult.changed {
-                do {
-                    try workplaceStore.pruneReferencesToRepositories(
-                        validRepositoryIDs: Set(repositoryStore.repositories.map(\.id))
-                    )
-                } catch {
-                    // 清理失败不影响本次刷新结果,留痕后由下次启动对账兜底。
-                    diskRefreshLog.error("event=post_dedup_prune_failed reason=\(error.localizedDescription)")
-                }
+            // 刷新结果与去重硬删除(及其引用清理)单批原子提交,见
+            // RepositoryStore.commitDiskRefresh 的说明。
+            do {
+                try repositoryStore.commitDiskRefresh(
+                    workplaceResult: refreshResults.workplaceResult,
+                    repositoryResult: refreshResults.repositoryResult,
+                    workplaceStore: workplaceStore
+                )
+            } catch {
+                diskRefreshLog.error("event=refresh_apply_failed reason=\(error.localizedDescription, privacy: .public)")
             }
             return
         }

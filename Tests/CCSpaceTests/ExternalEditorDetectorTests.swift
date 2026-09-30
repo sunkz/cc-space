@@ -22,7 +22,7 @@ final class ExternalEditorDetectorTests: XCTestCase {
     }
 
     func test_detectFindsApplicationInFallbackSearchRoots() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         let appURL = try createFakeApp(
             named: "IntelliJ IDEA.app",
             bundleIdentifier: "com.jetbrains.intellij",
@@ -43,7 +43,7 @@ final class ExternalEditorDetectorTests: XCTestCase {
     }
 
     func test_detectIgnoresFallbackApplicationWithUnexpectedBundleIdentifier() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         try createFakeApp(
             named: "IntelliJ IDEA.app",
             bundleIdentifier: "com.example.not-idea",

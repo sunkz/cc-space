@@ -71,6 +71,10 @@ struct WorkplaceDetailView: View {
     @State private var manualRefreshSeed = 0
     @State private var pendingRefreshFeedback: CCSpaceFeedback?
     @State private var branchRefreshTask: Task<Void, Never>?
+    /// 分支刷新任务代际:任务体末尾只在"自己仍是最新一次排程"时才复位句柄。
+    /// 否则被取消的旧任务晚于视图复现后的新任务收尾时,会把**新任务**的句柄抹成
+    /// nil,下次排程再起一个并发加载器(同 RootSplitView 的 refreshGeneration 防线)。
+    @State private var branchRefreshGeneration: UInt64 = 0
     @State private var hasQueuedBranchRefresh = false
     @State private var lastFocusRefreshTime: Date?
     @State private var hostWindow: NSWindow?
@@ -593,6 +597,8 @@ struct WorkplaceDetailView: View {
             return
         }
 
+        branchRefreshGeneration += 1
+        let generation = branchRefreshGeneration
         branchRefreshTask = Task { @MainActor in
             var didLoadSnapshots = false
             repeat {
@@ -603,13 +609,17 @@ struct WorkplaceDetailView: View {
             // 手动刷新的反馈在刷新真正完成后展示,避免"已刷新"先于刷新发生;
             // 本轮全部被动作锁/非活跃跳过时不展示,防止误报。任务被取消时保留
             // 待展示反馈,交给下一次排队加载(如锁释放兜底补刷)消费。
-            if Task.isCancelled == false, let pending = pendingRefreshFeedback {
-                if didLoadSnapshots {
-                    feedback = pending
+            // 反馈与句柄复位都以"未被取消"为前提:被取消说明已有更新的排程接管,
+            // 旧任务不得回写 @State,更不能把新任务句柄抹成 nil(代际守卫)。
+            if Task.isCancelled == false, generation == branchRefreshGeneration {
+                if let pending = pendingRefreshFeedback {
+                    if didLoadSnapshots {
+                        feedback = pending
+                    }
+                    pendingRefreshFeedback = nil
                 }
-                pendingRefreshFeedback = nil
+                branchRefreshTask = nil
             }
-            branchRefreshTask = nil
         }
     }
 

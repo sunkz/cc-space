@@ -185,6 +185,11 @@ struct WorkplaceRepositoryRowView: View {
                     }
                     .buttonStyle(.plain)
                     .opacity(isPinned || isHovered ? 1 : 0)
+                    // opacity-0 只隐藏视觉:命中区与无障碍元素还在。不可见时一并关掉,
+                    // 否则会点空白误触置顶、VoiceOver 读出屏幕上不存在的按钮;
+                    // 置顶入口在溢出菜单与右键菜单里常驻(actionMenuContent),可达性不受影响。
+                    .allowsHitTesting(isPinned || isHovered)
+                    .accessibilityHidden(isPinned || isHovered == false)
                     .accessibilityLabel(isPinned ? "取消置顶" : "置顶仓库")
 
                     HStack(alignment: .center, spacing: 8) {
@@ -606,12 +611,20 @@ struct WorkplaceRepositoryRowView: View {
             // 旧注释"已回到全局并发执行器,不在主线程"的前提不成立,勿再据此
             // 论证"无需 detached"。归一下沉进 Task.detached:上千分支的排序
             // 不能留在主线程,与 AddRepositorySheetView 同口径。)
-            let normalized: [String]? = await Task.detached(priority: .userInitiated) {
-                branches.map(BranchListNormalization.remoteBranches)
-            }.value
+            // branches 为 nil = 本次探测失败(区别于 [] 的"远端确无分支"):
+            // 沿用旧名单,失败只由加载态收口体现,不把 stale-while-revalidate
+            // 的缓存一次网络抖动打成空列表。
+            var normalized: [String]?
+            if let branches {
+                normalized = await Task.detached(priority: .userInitiated) {
+                    BranchListNormalization.remoteBranches(branches)
+                }.value
+            }
             await MainActor.run {
                 guard generation == remoteBranchesGeneration else { return }
-                remoteBranches = normalized
+                if let normalized {
+                    remoteBranches = normalized
+                }
                 isLoadingRemoteBranches = false
             }
         }

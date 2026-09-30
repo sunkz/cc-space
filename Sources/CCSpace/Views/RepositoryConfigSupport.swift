@@ -8,6 +8,9 @@ enum RepositoryListLayout {
 }
 
 struct RepositorySearchPresentationState {
+    /// 「回到顶部」按钮的出现阈值:列表(过滤后)超出阈值、确实可能滚出首屏才值得出现。
+    static let backToTopThreshold = 8
+
     let filteredRepositories: [RepositoryConfig]
     let emptyTitle: String
     let emptySubtitle: String
@@ -31,6 +34,43 @@ struct RepositorySearchPresentationState {
         }
         emptyTitle = "未找到匹配仓库"
         emptySubtitle = "试试仓库名称或地址中的关键词。"
+    }
+
+    /// 「回到顶部」是否值得出现:按**过滤后**的条数判断——搜索收窄到几条时
+    /// 列表滚不出首屏,按钮没有意义(此前用原始总数,搜索态也会显示)。
+    var showsBackToTop: Bool {
+        filteredRepositories.count > Self.backToTopThreshold
+    }
+}
+
+/// 仓库行 MR 目标分支胶囊的折叠展示(纯逻辑,便于测试):
+/// 分支多时平铺会把右侧操作按钮挤出行外(HStack 不换行),
+/// 超过 `maxVisible` 条时只展示前几条,其余折叠为「+N」(悬停列出明细)。
+struct RepositoryBranchPillGroupPresentationState {
+    static let maxVisible = 3
+
+    let visibleBranches: [String]
+    let overflowBranches: [String]
+
+    init(branches: [String]) {
+        if branches.count > Self.maxVisible {
+            visibleBranches = Array(branches.prefix(Self.maxVisible))
+            overflowBranches = Array(branches.dropFirst(Self.maxVisible))
+        } else {
+            visibleBranches = branches
+            overflowBranches = []
+        }
+    }
+
+    /// 折叠胶囊的标题:nil 表示无需折叠。
+    var overflowCountText: String? {
+        overflowBranches.isEmpty ? nil : "+\(overflowBranches.count)"
+    }
+
+    /// 折叠胶囊的悬停提示:逐条列出被折叠的分支名。
+    var overflowQuickHelpText: String? {
+        guard overflowBranches.isEmpty == false else { return nil }
+        return (["MR 目标分支（已折叠）："] + overflowBranches).joined(separator: "\n")
     }
 }
 
@@ -127,10 +167,14 @@ struct RepositoryDeletePresentationState: Equatable {
 struct MRTargetBranchAddPresentationState {
     let canSubmit: Bool
     let trimmedBranchName: String
+    /// 输入非空但与已选分支重名:与"什么都没输入"共用过 canSubmit=false,
+    /// 视图需要区分二者才能给重名一次可见反馈。
+    let isDuplicate: Bool
 
     init(inputText: String, existingBranches: [String]) {
         trimmedBranchName = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        canSubmit = !trimmedBranchName.isEmpty && !existingBranches.contains(trimmedBranchName)
+        isDuplicate = !trimmedBranchName.isEmpty && existingBranches.contains(trimmedBranchName)
+        canSubmit = !trimmedBranchName.isEmpty && !isDuplicate
     }
 }
 

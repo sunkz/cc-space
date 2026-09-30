@@ -198,7 +198,7 @@ private actor WorkplaceRuntimeGitServiceSpy: GitServicing {
     }
 
     func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] { [] }
-    func remoteBranches(for remoteURL: String) async -> [String] { [] }
+    func remoteBranches(for remoteURL: String) async -> [String]? { [] }
 
     func cloneDirectories() async -> [String] {
         cloneCalls.map(\.directory)
@@ -423,7 +423,7 @@ private final class ConcurrentPushGitServiceSpy: GitServicing, @unchecked Sendab
     }
 
     func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] { [] }
-    func remoteBranches(for remoteURL: String) async -> [String] { [] }
+    func remoteBranches(for remoteURL: String) async -> [String]? { [] }
 
     func maxActiveCount() async -> Int {
         await recorder.maxActiveCount()
@@ -2093,7 +2093,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         let repositoryStore = stores.repositoryStore
         let workplaceStore = stores.workplaceStore
         let workspaceRoot = stores.workspaceRoot
-        let otherRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let otherRoot = makeTestRootURL()
 
         try repositoryStore.addRepository(gitURL: "git@github.com:org/api.git")
         let repository = try XCTUnwrap(repositoryStore.repositories.first)

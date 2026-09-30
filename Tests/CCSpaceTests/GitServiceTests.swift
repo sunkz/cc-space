@@ -878,7 +878,13 @@ final class GitServiceTests: XCTestCase {
         let branches = await service.remoteBranches(for: bareRemote.path)
 
         // 返回去掉 refs/heads/ 前缀的裸分支名。
-        XCTAssertEqual(Set(branches), ["main", "feature/demo"])
+        XCTAssertEqual(Set(try XCTUnwrap(branches)), ["main", "feature/demo"])
+        // 探测失败与"远端无分支"必须可区分:不可达地址返回 nil,而不是空的 []。
+        let unreachable = await service.remoteBranches(
+            for: URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("no-such-remote-\(UUID().uuidString)").path
+        )
+        XCTAssertNil(unreachable)
     }
 
     func test_discardChangesRestoresModifiedTrackedFile() async throws {
@@ -1799,7 +1805,7 @@ final class GitServiceTests: XCTestCase {
     /// `defer { try? FileManager.default.removeItem(at: root) }`,
     /// 否则一轮测试会在系统临时目录泄漏几十个含完整 git 仓库的目录。
     private func makeTempRoot() throws -> URL {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = makeTestRootURL()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root
     }

@@ -29,11 +29,14 @@ struct SidebarView: View {
         // body 顶部各取一次沿渲染路径复用,避免一次渲染重复过滤/排序、逐行重建 Set。
         let state = presentationState
         let failedIDs = failedWorkplaceIDs
+        // 相对时间基准整轮渲染只取一次:逐行各取 Date() 会让同一屏里的"3 小时前"
+        // 跨在阈值两侧(相邻行显示不一致),且每次 body 求值都重复构造日期。
+        let currentTime = Date()
         return VStack(spacing: 0) {
             List(selection: $appViewModel.sidebarSelection) {
                 Section {
                     ForEach(state.activeWorkplaces) { workplace in
-                        workplaceRow(workplace, failedWorkplaceIDs: failedIDs)
+                        workplaceRow(workplace, failedWorkplaceIDs: failedIDs, now: currentTime)
                             .tag(SidebarSelection.workplace(workplace.id))
                     }
                 } header: {
@@ -55,7 +58,10 @@ struct SidebarView: View {
                             } label: {
                                 Image(systemName: "arrow.up.arrow.down")
                                     .font(.system(size: 11, weight: .bold))
-                                    .foregroundStyle(.secondary)
+                                    // borderless Menu 的 label 不认 foregroundStyle(连显式
+                                    // Color 都会被静默忽略,实测渲染成主色近黑),只认按钮级
+                                    // tint;必须用 tint 才与右侧新建按钮同样是次级灰。
+                                    .tint(.secondary)
                             }
                             .menuStyle(.borderlessButton)
                             .menuIndicator(.hidden)
@@ -78,6 +84,9 @@ struct SidebarView: View {
                             // 预期行为且没有对应菜单项告知。Cmd+Shift+N 与"新增"语义一致。
                             .keyboardShortcut("n", modifiers: [.command, .shift])
                             .accessibilityLabel("新增工作区")
+                            // 图标按钮没有可见文字,不悬浮不知道是干嘛的、也不知道有快捷键;
+                            // 提示语沿用界面既有叫法「创建工作区」,顺带亮出 ⌘⇧N。
+                            .ccspaceQuickHelp("创建工作区（⌘⇧N）")
                         }
                         // 修正 header 与行的尾随缩进差,使新建按钮与行尾置顶图标中心线上下对齐(-9 为离屏实测值)。
                         .offset(x: -9)
@@ -89,7 +98,7 @@ struct SidebarView: View {
                 if !state.archivedWorkplaces.isEmpty {
                     Section("已归档") {
                         ForEach(state.archivedWorkplaces) { workplace in
-                            workplaceRow(workplace, failedWorkplaceIDs: failedIDs)
+                            workplaceRow(workplace, failedWorkplaceIDs: failedIDs, now: currentTime)
                                 .tag(SidebarSelection.workplace(workplace.id))
                         }
                     }
@@ -113,6 +122,9 @@ struct SidebarView: View {
                                 }
                             }
                     }
+                    // macOS 惯例的"偏好设置"快捷键;菜单栏没有对应 App 菜单项,
+                    // 挂在按钮上让 ⌘, 有落点(设置页已打开时为无害 no-op)。
+                    .keyboardShortcut(",", modifiers: .command)
                     .help("设置")
                     .accessibilityLabel("设置")
                 }
@@ -123,13 +135,15 @@ struct SidebarView: View {
     @ViewBuilder
     private func workplaceRow(
         _ workplace: Workplace,
-        failedWorkplaceIDs: Set<UUID>
+        failedWorkplaceIDs: Set<UUID>,
+        now: Date
     ) -> some View {
         let branchName = workplace.branch?.trimmingCharacters(in: .whitespacesAndNewlines)
 
         SidebarWorkplaceRowView(
             workplace: workplace,
             hasFailed: failedWorkplaceIDs.contains(workplace.id),
+            now: now,
             branchName: branchName,
             onTogglePinned: onTogglePinned,
             onDuplicateWorkplace: onDuplicateWorkplace,

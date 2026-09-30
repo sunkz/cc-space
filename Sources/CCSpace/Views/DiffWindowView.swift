@@ -651,14 +651,7 @@ private struct WindowBecomeKeyObserver: NSViewRepresentable {
         private var observer: (token: NSObjectProtocol, window: NSWindow)?
 
         override func viewDidMoveToWindow() {
-            if let observer {
-                NotificationCenter.default.removeObserver(
-                    observer.token,
-                    name: NSWindow.didBecomeKeyNotification,
-                    object: observer.window
-                )
-                self.observer = nil
-            }
+            removeExistingObserver()
             guard let window else { return }
             let token = NotificationCenter.default.addObserver(
                 forName: NSWindow.didBecomeKeyNotification,
@@ -670,6 +663,27 @@ private struct WindowBecomeKeyObserver: NSViewRepresentable {
                 }
             }
             observer = (token, window)
+        }
+
+        // SwiftUI 释放承载视图不保证回调 viewDidMoveToWindow(nil):若不在 deinit 兜底
+        // 注销,每次 Diff/提交记录/分支比较窗口开关都会残留一条 block 注册(经典
+        // AppKit block-observer 泄漏),多个窗口类型共用时按窗口数累积。
+        deinit {
+            // AppKit 视图 dealloc 发生在主线程(对象由主线程释放),
+            // assumeIsolated 只是向编译器固化这一既有事实,非运行时赌注。
+            MainActor.assumeIsolated {
+                removeExistingObserver()
+            }
+        }
+
+        private func removeExistingObserver() {
+            guard let observer else { return }
+            NotificationCenter.default.removeObserver(
+                observer.token,
+                name: NSWindow.didBecomeKeyNotification,
+                object: observer.window
+            )
+            self.observer = nil
         }
     }
 }

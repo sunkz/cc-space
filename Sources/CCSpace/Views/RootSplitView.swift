@@ -982,7 +982,7 @@ struct RootSplitView: View {
 
                     // 图标没有文字基线,整行按 .center 对齐:标识(15pt 墨迹)与 13pt 的
                     // 版本号文字自然居中,不需要为字号变化维护魔法偏移。
-                    HStack(alignment: .center, spacing: 10) {
+                    HStack(alignment: .center, spacing: 6) {
                         // GitHub 标识代替原来的「获取更新 ↗」文字:系统符号库没有
                         // GitHub 标识(见 GitHubMarkShape),且工具栏越短越好——
                         // 完整文案(含"发现新版本 vX.Y.Z")走悬浮提示与无障碍名称。
@@ -991,6 +991,11 @@ struct RootSplitView: View {
                             GitHubMarkShape()
                                 .fill(updateButtonState.usesAccentTint ? Color.accentColor : Color.primary)
                                 .frame(width: 15, height: 15)
+                                // Shape 的默认命中区只覆盖墨迹,标识外圈的留白(圆角四角、
+                                // 尾巴细线之间)点击会落空——表现为"有时点了没反应"。
+                                // 撑成 23×23 矩形命中区:与文字的实际间距仍是原来的 10pt。
+                                .frame(width: 23, height: 23)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         // 图标按钮没有可见文字,靠 providesLabel 把文案挂成无障碍名称;
@@ -1053,7 +1058,15 @@ struct RootSplitView: View {
     }
 
     private func openReleasesPage() {
-        NSWorkspace.shared.open(updateChecker.releasesURL)
+        // open 返回 false 是"浏览器根本没起来"(默认浏览器异常等),与命中区落空的
+        // 表现相同;静默失败无法区分,所以给出可见提示并附上可手动访问的地址。
+        if !NSWorkspace.shared.open(updateChecker.releasesURL) {
+            appearanceFeedback = CCSpaceFeedback(
+                style: .error,
+                message: "打开 GitHub Releases 失败",
+                details: "请检查系统默认浏览器设置，或手动访问 \(updateChecker.releasesURL.absoluteString)"
+            )
+        }
     }
 
     @MainActor

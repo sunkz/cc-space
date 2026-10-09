@@ -158,7 +158,7 @@ final class RepositoryWindowContextTests: XCTestCase {
         XCTAssertNil(divergence)
     }
 
-    func test_loadCommits_probesExtraCommitAndMissingDirectoryBlocksStaleWriteBack() async throws {
+    func test_loadCommits_passesPageRequestAndMissingDirectoryBlocksStaleWriteBack() async throws {
         let stub = WindowContextGitStub()
         let context = RepositoryWindowContext(gitService: stub)
         let box = WindowContextCompletionBox()
@@ -166,51 +166,80 @@ final class RepositoryWindowContextTests: XCTestCase {
         let entries = (1...3).map { index in
             GitCommitEntry(hash: "commit-\(index)", subject: "标题 \(index)", author: "tester", date: .distantPast)
         }
-        await stub.setCommits(entries, for: directory)
+        await stub.setCommitLogPage(
+            GitCommitLogPage(commits: Array(entries.prefix(2)), hasMore: true),
+            for: directory
+        )
 
-        let fullLoaded = expectation(description: "全量提交加载完成")
-        context.loadCommits(directory: directory, limit: 2, rev: "feature/x", unpushedOnly: false) { outcome in
+        let pageLoaded = expectation(description: "搜索态分页加载完成")
+        context.loadCommits(
+            request: CommitLogPageRequest(
+                directory: directory,
+                searchText: "关键词",
+                skip: 4,
+                count: 2,
+                rev: "feature/x",
+                unpushedOnly: false
+            )
+        ) { outcome in
             box.logOutcomes.append(outcome)
-            fullLoaded.fulfill()
+            pageLoaded.fulfill()
         }
-        await fulfillment(of: [fullLoaded], timeout: 5.0)
-        guard case let .success(commits, hasMore) = box.logOutcomes.first, hasMore else {
+        await fulfillment(of: [pageLoaded], timeout: 5.0)
+        guard case let .success(commits, hasMore)? = box.logOutcomes.first, hasMore else {
             XCTFail("期望 hasMore=true 的成功加载")
             return
         }
-        XCTAssertEqual(commits.count, 3)
-        let recentRequests = await stub.recentCommitRequests
-        XCTAssertEqual(recentRequests.count, 1)
-        XCTAssertEqual(recentRequests[0].count, 3, "内部应多取一条探测是否有更多")
-        XCTAssertEqual(recentRequests[0].rev, "feature/x")
+        XCTAssertEqual(commits.map(\.hash), ["commit-1", "commit-2"], "服务层返回的整页原样交回视图")
+        // 搜索与游标都必须原样下推:窗口不再自己算 limit,也不在内存里筛。
+        let requests = await stub.commitLogPageRequests
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests[0].searchText, "关键词")
+        XCTAssertEqual(requests[0].skip, 4)
+        XCTAssertEqual(requests[0].count, 2)
+        XCTAssertEqual(requests[0].rev, "feature/x")
+        XCTAssertFalse(requests[0].unpushedOnly)
 
-        await stub.setUnpushedCommits(Array(entries.prefix(2)), for: directory)
+        await stub.setCommitLogPage(
+            GitCommitLogPage(commits: Array(entries.prefix(2)), hasMore: false),
+            for: directory
+        )
         let unpushedLoaded = expectation(description: "未推送提交加载完成")
-        context.loadCommits(directory: directory, limit: 2, rev: nil, unpushedOnly: true) { outcome in
+        context.loadCommits(
+            request: CommitLogPageRequest(
+                directory: directory, searchText: nil, skip: 0, count: 2, rev: nil, unpushedOnly: true
+            )
+        ) { outcome in
             box.logOutcomes.append(outcome)
             unpushedLoaded.fulfill()
         }
         await fulfillment(of: [unpushedLoaded], timeout: 5.0)
-        guard case let .success(unpushedCommits, unpushedHasMore) = box.logOutcomes[1], unpushedHasMore == false else {
+        guard case let .success(unpushedCommits, unpushedHasMore)? = box.logOutcomes.last,
+              unpushedHasMore == false else {
             XCTFail("期望 hasMore=false 的未推送加载")
             return
         }
         XCTAssertEqual(unpushedCommits.count, 2)
-        let unpushedRequests = await stub.unpushedCommitRequests
-        XCTAssertEqual(unpushedRequests.count, 1)
-        XCTAssertEqual(unpushedRequests[0].count, 3)
+        let unpushedRequests = await stub.commitLogPageRequests
+        XCTAssertEqual(unpushedRequests.count, 2)
+        XCTAssertTrue(unpushedRequests[1].unpushedOnly)
+        XCTAssertNil(unpushedRequests[1].searchText)
 
         // 目录缺失是硬失败;目录探测已移入 Task.detached,结局异步送达,
         // 用等待而非调用点同步断言。入口代际递增须拦下在途旧加载的写回。
         await stub.setCallDelay(nanoseconds: 100_000_000)
-        context.loadCommits(directory: directory, limit: 2, rev: nil, unpushedOnly: false) { outcome in
+        context.loadCommits(
+            request: CommitLogPageRequest(directory: directory, searchText: nil, skip: 0, count: 2, rev: nil, unpushedOnly: false)
+        ) { outcome in
             box.logOutcomes.append(outcome)
         }
         let missingDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("ccspace-missing-\(UUID().uuidString)")
             .path
         let missingLoaded = expectation(description: "目录缺失结局送达")
-        context.loadCommits(directory: missingDirectory, limit: 2, rev: nil, unpushedOnly: false) { outcome in
+        context.loadCommits(
+            request: CommitLogPageRequest(directory: missingDirectory, searchText: nil, skip: 0, count: 2, rev: nil, unpushedOnly: false)
+        ) { outcome in
             box.logOutcomes.append(outcome)
             missingLoaded.fulfill()
         }
@@ -252,10 +281,8 @@ private actor WindowContextGitStub: GitServicing {
     private var diffEntriesByDirectory: [String: [GitDiffEntry]] = [:]
     private var diffErrorMessageByDirectory: [String: String] = [:]
     private var divergenceResult: GitRefDivergence?
-    private var commitsByDirectory: [String: [GitCommitEntry]] = [:]
-    private var unpushedCommitsByDirectory: [String: [GitCommitEntry]] = [:]
-    private(set) var recentCommitRequests: [(count: Int, rev: String?)] = []
-    private(set) var unpushedCommitRequests: [(count: Int, rev: String?)] = []
+    private var commitLogPageByDirectory: [String: GitCommitLogPage] = [:]
+    private(set) var commitLogPageRequests: [CommitLogPageRequest] = []
 
     // 协议必需(无默认实现)的成员
     func clone(repositoryURL: String, into directory: String) async throws {}
@@ -270,9 +297,7 @@ private actor WindowContextGitStub: GitServicing {
     func checkoutBranch(_ branch: String, in directory: String) async throws {}
     func createLocalBranch(_ branch: String, in directory: String) async throws {}
     func mergeDefaultBranchIntoCurrent(in directory: String) async throws -> GitMergeDefaultBranchOutcome { .merged }
-    func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] {
-        await recentCommits(in: directory, count: count, rev: nil)
-    }
+    func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] { [] }
     func remoteBranches(for remoteURL: String) async -> [String]? { [] }
 
     // RepositoryWindowContext 实际使用的通道
@@ -309,16 +334,10 @@ private actor WindowContextGitStub: GitServicing {
         divergenceResult
     }
 
-    func recentCommits(in directory: String, count: Int, rev: String?) async -> [GitCommitEntry] {
-        recentCommitRequests.append((count: count, rev: rev))
+    func commitLogPage(_ request: CommitLogPageRequest) async -> GitCommitLogPage {
+        commitLogPageRequests.append(request)
         await sleepIfDelayed()
-        return commitsByDirectory[directory] ?? []
-    }
-
-    func unpushedCommits(in directory: String, count: Int, rev: String?) async -> [GitCommitEntry] {
-        unpushedCommitRequests.append((count: count, rev: rev))
-        await sleepIfDelayed()
-        return unpushedCommitsByDirectory[directory] ?? []
+        return commitLogPageByDirectory[request.directory] ?? .empty
     }
 
     // 配置入口
@@ -358,12 +377,8 @@ private actor WindowContextGitStub: GitServicing {
         divergenceResult = divergence
     }
 
-    func setCommits(_ commits: [GitCommitEntry], for directory: String) {
-        commitsByDirectory[directory] = commits
-    }
-
-    func setUnpushedCommits(_ commits: [GitCommitEntry], for directory: String) {
-        unpushedCommitsByDirectory[directory] = commits
+    func setCommitLogPage(_ page: GitCommitLogPage, for directory: String) {
+        commitLogPageByDirectory[directory] = page
     }
 
     private func sleepIfDelayed() async {

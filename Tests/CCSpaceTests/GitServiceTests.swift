@@ -1801,6 +1801,221 @@ final class GitServiceTests: XCTestCase {
         XCTAssertFalse(GitService.isSafeRefName("a:b"), "冒号有 refspec 语义,会被改写为查找远程分支")
     }
 
+    // MARK: - 提交记录分页搜索(commitLogPage)
+
+    /// 搜索/分页用例的共享夹具:8 个提交由旧到新 c1…c8,用 `--date` 钉住作者时间,
+    /// 使"按作者时间倒序"与 git 自身的遍历顺序一致(同秒提交会让并集排序不确定)。
+    /// 覆盖点:正文独命中(c3)、作者独命中(c4)、说明与作者双命中(c7)、
+    /// 字面量与正则的差异对(c1/c2),以及可被 rev 排除的新尾部。
+    private func makeCommitSearchRepository(at repository: URL) throws {
+        _ = try shell(["git", "init", repository.path])
+        _ = try shell(["git", "-C", repository.path, "config", "user.email", "test@example.com"])
+        _ = try shell(["git", "-C", repository.path, "config", "user.name", "test"])
+
+        var index = 0
+        func commit(subject: String, author: String? = nil, body: String? = nil) throws {
+            index += 1
+            var arguments = ["-C", repository.path, "commit", "--allow-empty"]
+            arguments.append("--date=2020-01-0\(index)T00:00:00")
+            if let author {
+                arguments.append("--author=\(author)")
+            }
+            arguments.append(contentsOf: ["-m", subject])
+            if let body {
+                arguments.append(contentsOf: ["-m", body])
+            }
+            _ = try shell(["git"] + arguments)
+        }
+
+        try commit(subject: "axb pattern")
+        try commit(subject: "a.b literal dot")
+        try commit(subject: "filler three", body: "只在正文出现的深层关键字说明")
+        try commit(subject: "filler four", author: "Shen Ceng <sc@example.com>")
+        try commit(subject: "filler five")
+        try commit(subject: "filler six")
+        try commit(subject: "double hit commit", author: "Hit Double <hd@example.com>")
+        try commit(subject: "latest touch")
+    }
+
+    private func makePageRequest(
+        directory: String,
+        searchText: String? = nil,
+        skip: Int = 0,
+        count: Int = 20,
+        rev: String? = nil,
+        unpushedOnly: Bool = false
+    ) -> CommitLogPageRequest {
+        CommitLogPageRequest(
+            directory: directory,
+            searchText: searchText,
+            skip: skip,
+            count: count,
+            rev: rev,
+            unpushedOnly: unpushedOnly
+        )
+    }
+
+    func test_commitLogPageSearchFindsMatchDeeperThanTheFirstPage() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = root.appendingPathComponent("repo")
+        try makeCommitSearchRepository(at: repository)
+
+        let service = makeIsolatedService()
+        // 命中提交 c3 在"由新到旧"的第 6 位:关键词若只在内存里过滤,
+        // 一页 2 条是永远搜不到它的——这正是本次要修掉的行为。
+        let page = await service.commitLogPage(
+            makePageRequest(directory: repository.path, searchText: "深层关键字", count: 2)
+        )
+        XCTAssertEqual(page.commits.map(\.subject), ["filler three"], "git 侧搜索应命中提交正文里的关键词")
+        XCTAssertFalse(page.hasMore)
+    }
+
+    func test_commitLogPageSearchMatchesAuthorAndDeduplicatesAcrossLists() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = root.appendingPathComponent("repo")
+        try makeCommitSearchRepository(at: repository)
+
+        let service = makeIsolatedService()
+        // 作者独命中:说明里没有 "Shen"。
+        let byAuthor = await service.commitLogPage(makePageRequest(directory: repository.path, searchText: "Shen"))
+        XCTAssertEqual(byAuthor.commits.map(\.subject), ["filler four"])
+
+        // 说明与作者同时命中的提交只能出现一次
+        // (`--grep` 与 `--author` 在 git 里是与语义,并集由两路查询拼出)。
+        let both = await service.commitLogPage(makePageRequest(directory: repository.path, searchText: "hit"))
+        XCTAssertEqual(both.commits.map(\.subject), ["double hit commit"])
+    }
+
+    func test_commitLogPageSearchTreatsKeywordAsFixedString() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = root.appendingPathComponent("repo")
+        try makeCommitSearchRepository(at: repository)
+
+        let service = makeIsolatedService()
+        // "a.b" 按字面量只该命中 c2;若漏掉 `-F`,正则会连带匹配 "axb"(c1)。
+        let page = await service.commitLogPage(makePageRequest(directory: repository.path, searchText: "a.b"))
+        XCTAssertEqual(page.commits.map(\.subject), ["a.b literal dot"])
+    }
+
+    func test_commitLogPageSearchResolvesCommitID() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = root.appendingPathComponent("repo")
+        try makeCommitSearchRepository(at: repository)
+        let fullHash = try shell(["git", "-C", repository.path, "rev-parse", "HEAD~2"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let shortHash = try shell(["git", "-C", repository.path, "rev-parse", "--short=8", "HEAD~2"]).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let service = makeIsolatedService()
+        // `--grep` 匹配不到哈希,形如 object ID 的关键词另走一路直达查询。
+        let byFullHash = await service.commitLogPage(makePageRequest(directory: repository.path, searchText: fullHash))
+        XCTAssertEqual(byFullHash.commits.map(\.subject), ["filler six"])
+
+        let byShortHash = await service.commitLogPage(makePageRequest(directory: repository.path, searchText: shortHash))
+        XCTAssertEqual(byShortHash.commits.map(\.hash), [fullHash])
+    }
+
+    func test_commitLogPagePagesWithCursorWithoutGapsOrDuplicates() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = root.appendingPathComponent("repo")
+        try makeCommitSearchRepository(at: repository)
+
+        let service = makeIsolatedService()
+        var subjects: [String] = []
+        var skip = 0
+        var more = true
+        var rounds = 0
+        while more, rounds < 10 {
+            rounds += 1
+            let page = await service.commitLogPage(
+                makePageRequest(directory: repository.path, skip: skip, count: 2)
+            )
+            subjects.append(contentsOf: page.commits.map(\.subject))
+            skip += page.commits.count
+            more = page.hasMore
+        }
+        XCTAssertEqual(
+            subjects,
+            ["latest touch", "double hit commit", "filler six", "filler five", "filler four", "filler three", "a.b literal dot", "axb pattern"],
+            "游标分页须无空洞、无重复地走完全部历史"
+        )
+        XCTAssertEqual(rounds, 4)
+    }
+
+    func test_commitLogPageSearchPagesOverTheMatchedSubset() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = root.appendingPathComponent("repo")
+        try makeCommitSearchRepository(at: repository)
+
+        let service = makeIsolatedService()
+        // "filler" 命中 c3…c6 四条,按作者时间倒序即 c6、c5、c4、c3。
+        let first = await service.commitLogPage(makePageRequest(directory: repository.path, searchText: "filler", count: 2))
+        XCTAssertEqual(first.commits.map(\.subject), ["filler six", "filler five"])
+        XCTAssertTrue(first.hasMore)
+
+        let second = await service.commitLogPage(
+            makePageRequest(directory: repository.path, searchText: "filler", skip: 2, count: 2)
+        )
+        XCTAssertEqual(second.commits.map(\.subject), ["filler four", "filler three"])
+        XCTAssertFalse(second.hasMore)
+    }
+
+    func test_commitLogPageSearchIsScopedToRevAndUnpushedRange() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = root.appendingPathComponent("repo")
+        let bareRemote = root.appendingPathComponent("remote.git")
+        try makeCommitSearchRepository(at: repository)
+        _ = try shell(["git", "-C", repository.path, "branch", "-m", "main"])
+        _ = try shell(["git", "init", "--bare", bareRemote.path])
+        _ = try shell(["git", "-C", repository.path, "remote", "add", "origin", bareRemote.path])
+        // 只把 c1…c5 推上去,再把本地分支放回顶端:c6…c8 因此是"领先上游"的未推送区间。
+        let tip = try shell(["git", "-C", repository.path, "rev-parse", "HEAD"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        _ = try shell(["git", "-C", repository.path, "reset", "--hard", "HEAD~3"])
+        _ = try shell(["git", "-C", repository.path, "push", "-u", "origin", "main"])
+        _ = try shell(["git", "-C", repository.path, "reset", "--hard", tip])
+        _ = try shell(["git", "-C", repository.path, "branch", "early", "HEAD~3"])
+
+        let service = makeIsolatedService()
+        // rev 视图同样界定搜索范围:early 停在 c5,c7 的命中不该出现。
+        let onEarly = await service.commitLogPage(
+            makePageRequest(directory: repository.path, searchText: "double hit", rev: "early")
+        )
+        XCTAssertTrue(onEarly.commits.isEmpty, "搜索必须限制在所选分支的历史内")
+
+        let onMain = await service.commitLogPage(
+            makePageRequest(directory: repository.path, searchText: "double hit", rev: "main")
+        )
+        XCTAssertEqual(onMain.commits.map(\.subject), ["double hit commit"])
+
+        // 关键词搜索叠"仅看未推送":只在 `<rev>@{u}..<rev>` 区间里搜。
+        let unpushedOnly = await service.commitLogPage(
+            makePageRequest(directory: repository.path, searchText: "filler", unpushedOnly: true)
+        )
+        XCTAssertEqual(unpushedOnly.commits.map(\.subject), ["filler six"])
+
+        // "仅看未推送"下不做 commit ID 直达:c3 已推送,若仍被哈希命中列进结果,
+        // 就等于把 range 之外的提交混进了"未推送"列表。
+        let pushedHash = try shell(["git", "-C", repository.path, "rev-parse", "HEAD~5"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let hashWhileUnpushed = await service.commitLogPage(
+            makePageRequest(directory: repository.path, searchText: pushedHash, unpushedOnly: true)
+        )
+        XCTAssertTrue(hashWhileUnpushed.commits.isEmpty)
+    }
+
+    func test_normalizedCommitLogSearchTextCollapsesNewlinesAndBlanks() {
+        XCTAssertNil(GitService.normalizedCommitLogSearchText(nil))
+        XCTAssertNil(GitService.normalizedCommitLogSearchText(""))
+        XCTAssertNil(GitService.normalizedCommitLogSearchText("   \t  "), "全空白等同不过滤")
+        XCTAssertEqual(GitService.normalizedCommitLogSearchText("  登录 "), "登录")
+        // `--grep` 的模式串按行匹配,带换行只会永远落空,折成空格。
+        XCTAssertEqual(GitService.normalizedCommitLogSearchText("a\nb\r\nc"), "a b c")
+    }
+
     /// 建立本用例专属的临时根;调用方必须紧跟
     /// `defer { try? FileManager.default.removeItem(at: root) }`,
     /// 否则一轮测试会在系统临时目录泄漏几十个含完整 git 仓库的目录。

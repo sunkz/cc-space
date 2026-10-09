@@ -231,6 +231,9 @@ protocol GitServicing: Sendable {
     func recentCommits(in directory: String, count: Int, rev: String?) async -> [GitCommitEntry]
     /// 指定 ref 领先其上游的提交(`<rev>@{u}..<rev>`);ref 无上游或执行失败时返回空。
     func unpushedCommits(in directory: String, count: Int, rev: String?) async -> [GitCommitEntry]
+    /// 提交记录窗口的分页查询:关键词过滤与偏移(`--skip`)都下推到 git,
+    /// 因此能命中尚未加载进内存的历史提交,而不是只在已加载的首页里筛。
+    func commitLogPage(_ request: CommitLogPageRequest) async -> GitCommitLogPage
     /// 远端分支名单;`nil` 表示探测失败(URL 非法/网络失败),空数组是"远端确无分支"。
     /// 调用方据此区分:stale-while-revalidate 的展示方在 nil 时保留旧缓存。
     func remoteBranches(for remoteURL: String) async -> [String]?
@@ -347,6 +350,20 @@ extension GitServicing {
     func unpushedCommits(in directory: String, count: Int, rev: String?) async -> [GitCommitEntry] {
         await unpushedCommits(in: directory, count: count)
     }
+    /// 测试替身回退通道:按 skip/count 切片既有全量查询,**不做关键词过滤**
+    /// (桩里没有可搜的历史)。真实 GitService 覆写本方法并把搜索下推到 git;
+    /// 搜索语义的用例请对 GitService 跑真实仓库。
+    func commitLogPage(_ request: CommitLogPageRequest) async -> GitCommitLogPage {
+        let headCount = max(0, request.skip) + max(1, request.count) + 1
+        let fetched: [GitCommitEntry]
+        if request.unpushedOnly {
+            fetched = await unpushedCommits(in: request.directory, count: headCount, rev: request.rev)
+        } else {
+            fetched = await recentCommits(in: request.directory, count: headCount, rev: request.rev)
+        }
+        let page = Array(fetched.dropFirst(max(0, request.skip)).prefix(max(1, request.count)))
+        return GitCommitLogPage(commits: page, hasMore: fetched.count > max(0, request.skip) + max(1, request.count))
+    }
     func probeRemoteInfo(for remoteURL: String) async -> (branches: [String], defaultBranch: String?) {
         async let branchesTask = remoteBranches(for: remoteURL)
         async let defaultBranchTask = defaultBranch(for: remoteURL)
@@ -407,6 +424,28 @@ struct GitCommitEntry: Identifiable, Equatable {
 
     /// 是否包含变更统计(用于 UI 决定是否展示统计行)。
     var hasStats: Bool { filesChanged != nil }
+}
+
+/// 提交记录窗口的分页查询参数。
+struct CommitLogPageRequest: Equatable {
+    let directory: String
+    /// 搜索关键词;`nil` 或归一后为空表示不过滤。非空时过滤下推到 git,
+    /// 命中范围是整条提交说明(标题+正文)、作者,以及形如 object ID 的关键词。
+    let searchText: String?
+    /// 结果级偏移(`--skip`),即上一页之前的命中数/已加载条数。
+    let skip: Int
+    /// 页大小;内部多取一条探测是否还有更多。
+    let count: Int
+    let rev: String?
+    let unpushedOnly: Bool
+}
+
+/// 一页提交记录 + 是否还有下一页。
+struct GitCommitLogPage: Equatable {
+    let commits: [GitCommitEntry]
+    let hasMore: Bool
+
+    static let empty = GitCommitLogPage(commits: [], hasMore: false)
 }
 
 /// 单个提交的完整详情(`git show -s` 按需取,不进列表日志格式,避免多行正文破坏行解析)。
@@ -1896,10 +1935,7 @@ struct GitService: GitServicing {
     func recentCommits(in directory: String, count: Int, rev: String?) async -> [GitCommitEntry] {
         if let rev, !Self.isSafeRefName(rev) { return [] }
         // 读取失败与"无提交"都返回 []:提交列表空态已由 UI 区分,与 unpushedCommits 同款取舍。
-        guard let output = await commitLogOutput(in: directory, count: count, range: rev) else {
-            return []
-        }
-        return Self.parseCommitLog(output)
+        return await commitLogEntries(in: directory, count: count, skip: 0, range: rev, options: [])
     }
 
     func unpushedCommits(in directory: String, count: Int) async -> [GitCommitEntry] {
@@ -1909,15 +1945,117 @@ struct GitService: GitServicing {
     func unpushedCommits(in directory: String, count: Int, rev: String?) async -> [GitCommitEntry] {
         if let rev, !Self.isSafeRefName(rev) { return [] }
         // 无上游分支时 `@{u}` 解析失败,返回空;调用方以 hasRemoteTrackingBranch 区分展示。
-        let range = rev.map { "\($0)@{u}..\($0)" } ?? "@{u}..HEAD"
-        guard let output = await commitLogOutput(in: directory, count: count, range: range) else {
+        let range = Self.commitLogRange(rev: rev, unpushedOnly: true)
+        return await commitLogEntries(in: directory, count: count, skip: 0, range: range, options: [])
+    }
+
+    func commitLogPage(_ request: CommitLogPageRequest) async -> GitCommitLogPage {
+        if let rev = request.rev, !Self.isSafeRefName(rev) { return .empty }
+        let count = max(1, request.count)
+        let skip = max(0, request.skip)
+        let range = Self.commitLogRange(rev: request.rev, unpushedOnly: request.unpushedOnly)
+
+        guard let searchText = Self.normalizedCommitLogSearchText(request.searchText) else {
+            // 非搜索态:`--skip` 在 git 侧过滤之后生效,是精确的结果级游标,
+            // 每页只取 pageSize+1 条,翻页不必从仓库头重拉。
+            let entries = await commitLogEntries(in: request.directory, count: count + 1, skip: skip, range: range, options: [])
+            return GitCommitLogPage(commits: Array(entries.prefix(count)), hasMore: entries.count > count)
+        }
+
+        // 搜索态:`--grep` 与 `--author` 混用是**与**语义(git 2.54 实测,并非直觉上的"或"),
+        // "说明或作者任一命中"只能两路查询再在内存取并集。两路都用作者时间倒序,
+        // 并集第 skip+count 名之前的命中必然落在各自前缀里,故各取 headCount 条即可。
+        let headCount = skip + count + 1
+        async let messageMatches = commitLogEntries(
+            in: request.directory,
+            count: headCount,
+            skip: 0,
+            range: range,
+            options: Self.commitLogSearchOptions(pattern: "--grep=\(searchText)")
+        )
+        async let authorMatches = commitLogEntries(
+            in: request.directory,
+            count: headCount,
+            skip: 0,
+            range: range,
+            options: Self.commitLogSearchOptions(pattern: "--author=\(searchText)")
+        )
+        // 关键词形如 object ID 时补一路直达查询:`--grep` 匹配不到哈希。
+        // "仅看未推送"下不做这路:未推送集合由 range 严格界定,把仓库里任意
+        // 可解析的同名对象塞进结果集会破坏该筛选的语义。
+        var lists: [[GitCommitEntry]] = [await messageMatches, await authorMatches]
+        if request.unpushedOnly == false, Self.isHexObjectID(searchText, maxLength: 64) {
+            lists.append(await commitLogEntries(in: request.directory, count: 1, skip: 0, range: searchText, options: []))
+        }
+        return Self.mergeCommitLogMatches(lists, skip: skip, count: count)
+    }
+
+    /// 提交日志的 revs 范围:"仅看未推送"取 `<rev>@{u}..<rev>`(未指定 rev 时 `@{u}..HEAD`),
+    /// 否则取指定 ref;两者皆无时为 nil(从 HEAD 走全部历史)。
+    private static func commitLogRange(rev: String?, unpushedOnly: Bool) -> String? {
+        guard unpushedOnly else { return rev }
+        return rev.map { "\($0)@{u}..\($0)" } ?? "@{u}..HEAD"
+    }
+
+    /// 搜索关键词归一:换行折成空格(`--grep` 的模式串按行匹配,带换行只会永远落空),
+    /// 去首尾空白;归一后为空返回 nil 表示不过滤。
+    /// 标记为 internal:纯函数,单测直接覆盖。
+    static func normalizedCommitLogSearchText(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let collapsed = raw
+            .split(whereSeparator: \.isNewline)
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespaces)
+        return collapsed.isEmpty ? nil : collapsed
+    }
+
+    /// 搜索态附加给 `git log` 的选项。`-F` 让关键词按字面量子串匹配(UI 的搜索语义如此,
+    /// 也免得用户输入的 `(`/`[` 被当正则;git 2.54 实测它同时作用于 `--grep` 与 `--author`),
+    /// `-i` 忽略大小写,`--author-date-order` 把两路结果钉到与列表展示同一个时间键,
+    /// 并集分页窗口才稳定。
+    private static func commitLogSearchOptions(pattern: String) -> [String] {
+        ["-F", "-i", "--author-date-order", pattern]
+    }
+
+    /// 合并多路命中:按哈希去重、按作者时间倒序(同刻按哈希),再取并集窗口 [skip, skip+count)。
+    private static func mergeCommitLogMatches(_ lists: [[GitCommitEntry]], skip: Int, count: Int) -> GitCommitLogPage {
+        var seen: Set<String> = []
+        var merged: [GitCommitEntry] = []
+        for list in lists {
+            for entry in list where seen.insert(entry.hash).inserted {
+                merged.append(entry)
+            }
+        }
+        merged.sort { lhs, rhs in
+            lhs.date == rhs.date ? lhs.hash < rhs.hash : lhs.date > rhs.date
+        }
+        let window = Array(merged.dropFirst(skip).prefix(count))
+        return GitCommitLogPage(commits: window, hasMore: merged.count > skip + count)
+    }
+
+    /// 取一页 `git log` 并解析;读取失败与"无提交"都返回 []。
+    private func commitLogEntries(
+        in directory: String,
+        count: Int,
+        skip: Int,
+        range: String?,
+        options: [String]
+    ) async -> [GitCommitEntry] {
+        guard let output = await commitLogOutput(in: directory, count: count, skip: skip, range: range, options: options) else {
             return []
         }
         return Self.parseCommitLog(output)
     }
 
-    /// 执行 `git log` 并返回原始输出;`range` 为可选的提交范围(如 "@{u}..HEAD")。
-    private func commitLogOutput(in directory: String, count: Int, range: String?) async -> String? {
+    /// 执行 `git log` 并返回原始输出;`range` 为可选的提交范围(如 "@{u}..HEAD")，
+    /// `skip` 是结果级偏移，`options` 是搜索态附加的过滤选项。
+    private func commitLogOutput(
+        in directory: String,
+        count: Int,
+        skip: Int = 0,
+        range: String?,
+        options: [String] = []
+    ) async -> String? {
         // 钳制到至少 1:count <= 0 会拼出 `git log -0`,git 直接报错。
         let clampedCount = max(1, count)
         let fieldSeparator = "\u{1F}"
@@ -1926,9 +2064,13 @@ struct GitService: GitServicing {
             "-C", directory,
             "log",
             "--format=\(format)",
-            "--numstat",
-            "-\(clampedCount)",
         ]
+        arguments.append(contentsOf: options)
+        if skip > 0 {
+            arguments.append("--skip=\(skip)")
+        }
+        arguments.append("--numstat")
+        arguments.append("-\(clampedCount)")
         if let range {
             // 注意:rev range 必须直接作为 revs 参数,不能放在 `--` 之后(`--` 后是路径语义)。
             arguments.append(range)

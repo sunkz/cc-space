@@ -25,7 +25,21 @@ final class CommitLogPresentationStateTests: XCTestCase {
         ]
     }
 
-    func test_emptySearchReturnsAllCommits() {
+    func test_commitsArePassedThroughUnfiltered() {
+        // 关键词过滤已下推到 git:展示层再筛一遍会把 git 命中的**正文**提交判掉
+        // (本类型只持有 subject/author/hash)。因此列表原样透传,与搜索词无关。
+        let state = CommitLogPresentationState(
+            commits: makeCommits(),
+            searchText: "不存在",
+            scope: .all,
+            hasUpstream: true
+        )
+
+        XCTAssertEqual(state.visibleCommits.count, 2)
+        XCTAssertEqual(state.countLabel, "匹配 2 条提交")
+    }
+
+    func test_emptySearchUsesPlainCountLabel() {
         let state = CommitLogPresentationState(
             commits: makeCommits(),
             searchText: "   ",
@@ -33,36 +47,30 @@ final class CommitLogPresentationStateTests: XCTestCase {
             hasUpstream: true
         )
 
-        XCTAssertEqual(state.filteredCommits.count, 2)
+        XCTAssertEqual(state.visibleCommits.count, 2)
         XCTAssertEqual(state.countLabel, "2 条提交")
-        XCTAssertEqual(state.emptyTitle, "未找到匹配提交")
     }
 
-    func test_searchMatchesSubjectAuthorAndHashCaseInsensitively() {
-        let commits = makeCommits()
-
-        let bySubject = CommitLogPresentationState(
-            commits: commits, searchText: "登录", scope: .all, hasUpstream: true
-        )
-        XCTAssertEqual(bySubject.filteredCommits.map(\.hash), ["aaaaaa1111111111"])
-
-        let byAuthor = CommitLogPresentationState(
-            commits: commits, searchText: "alice", scope: .all, hasUpstream: true
-        )
-        XCTAssertEqual(byAuthor.filteredCommits.map(\.hash), ["bbbbbb2222222222"])
-
-        // hash 前缀(不区分大小写)也可命中。
-        let byHash = CommitLogPresentationState(
-            commits: commits, searchText: "AAAAAA", scope: .all, hasUpstream: true
-        )
-        XCTAssertEqual(byHash.filteredCommits.map(\.hash), ["aaaaaa1111111111"])
-
+    func test_searchEmptyTextTellsUserTheWholeHistoryWasSearched() {
         let noMatch = CommitLogPresentationState(
-            commits: commits, searchText: "不存在", scope: .all, hasUpstream: true
+            commits: [],
+            searchText: "不存在",
+            scope: .all,
+            hasUpstream: true
         )
-        XCTAssertTrue(noMatch.filteredCommits.isEmpty)
+        XCTAssertTrue(noMatch.visibleCommits.isEmpty)
         XCTAssertEqual(noMatch.emptyTitle, "未找到匹配提交")
-        XCTAssertEqual(noMatch.emptySubtitle, "试试提交说明、作者或 commit ID 中的关键词。")
+        XCTAssertTrue(noMatch.emptySubtitle.contains("全部历史"))
+
+        // 搜索态优先于"没有未推送的提交":空列表在勾选筛选时同样该说明搜过什么。
+        let unpushedNoMatch = CommitLogPresentationState(
+            commits: [],
+            searchText: "不存在",
+            scope: .unpushedOnly,
+            hasUpstream: true
+        )
+        XCTAssertEqual(unpushedNoMatch.emptyTitle, "未找到匹配提交")
+        XCTAssertEqual(unpushedNoMatch.countLabel, "匹配 0 条未推送提交")
     }
 
     func test_unpushedScopeUsesDedicatedCountLabelAndEmptyText() {
@@ -80,7 +88,7 @@ final class CommitLogPresentationStateTests: XCTestCase {
             scope: .unpushedOnly,
             hasUpstream: true
         )
-        XCTAssertTrue(empty.filteredCommits.isEmpty)
+        XCTAssertTrue(empty.visibleCommits.isEmpty)
         XCTAssertEqual(empty.emptyTitle, "没有未推送的提交")
         XCTAssertEqual(empty.emptySubtitle, "当前分支的提交都已推送到远端")
 

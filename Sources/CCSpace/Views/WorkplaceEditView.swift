@@ -15,6 +15,9 @@ struct WorkplaceEditView: View {
     @State private var repositorySearchText = ""
     @State private var operationProgress: WorkplaceOperationProgress?
     @State private var isConfirmingRepositoryRemoval = false
+    /// 进行中的保存任务:新增仓库会克隆,单仓最长 600 秒才超时,
+    /// 没有句柄就没有中止通道,用户只能对着 `interactiveDismissDisabled` 的弹窗干等。
+    @State private var saveTask: Task<Void, Never>?
 
     private var presentationState: WorkplaceEditPresentationState {
         WorkplaceEditPresentationState(
@@ -61,11 +64,6 @@ struct WorkplaceEditView: View {
         WorkplaceFormTextNormalization.normalizedOptionalText(branch)
     }
 
-    private var progressPresentationState: WorkplaceFormProgressPresentationState? {
-        guard let operationProgress else { return nil }
-        return WorkplaceFormProgressPresentationState(progress: operationProgress)
-    }
-
     @MainActor
     private func submitEdit() async {
         guard presentationState.canSubmit else { return }
@@ -87,6 +85,7 @@ struct WorkplaceEditView: View {
         defer {
             isSaving = false
             operationProgress = nil
+            saveTask = nil
         }
 
         do {
@@ -99,6 +98,10 @@ struct WorkplaceEditView: View {
                 }
             )
             dismiss()
+        } catch is CancellationError {
+            // 取消路径:Service 的 catch 已把本次改动整体回滚(删掉已启动的克隆目录、
+            // 恢复改名/分支/被移出的仓库),这里只反馈并留在弹窗里让用户改完再存。
+            feedback = CCSpaceFeedback(style: .info, message: "已中止保存，工作区已回滚到改动前的状态")
         } catch {
             feedback = CCSpaceFeedbackFactory.actionError(
                 action: "保存工作区",
@@ -160,12 +163,19 @@ struct WorkplaceEditView: View {
                 submittingTitle: "保存中",
                 isSubmitting: isSaving,
                 isSubmitDisabled: !presentationState.canSubmit,
-                progress: progressPresentationState,
+                progress: operationProgress,
+                // 保存中取消按钮改用作"中止":中止走 saveTask?.cancel() 的回滚通道,
+                // 而不是留下半途改动直接关窗。
+                isCancelDisabledWhileSubmitting: false,
                 onCancel: {
-                    dismiss()
+                    if isSaving {
+                        saveTask?.cancel()
+                    } else {
+                        dismiss()
+                    }
                 },
                 onSubmit: {
-                    Task {
+                    saveTask = Task {
                         await submitEdit()
                     }
                 }
@@ -181,7 +191,7 @@ struct WorkplaceEditView: View {
             titleVisibility: .visible
         ) {
             Button("移除仓库并删除本地目录", role: .destructive) {
-                Task {
+                saveTask = Task {
                     await performSave()
                 }
             }

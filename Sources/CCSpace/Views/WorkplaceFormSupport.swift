@@ -143,16 +143,19 @@ struct WorkplaceFormProgressPresentationState: Equatable {
     let completedCount: Int
     let totalCount: Int
     let countLabel: String
+    /// 本步骤已进行时间,如「已进行 1 分 12 秒」。
+    let elapsedLabel: String
 
     var fractionCompleted: Double {
         guard totalCount > 0 else { return 0 }
         return Double(completedCount) / Double(totalCount)
     }
 
-    init(progress: WorkplaceOperationProgress) {
+    init(progress: WorkplaceOperationProgress, now: Date = Date()) {
         completedCount = progress.completedCount
         totalCount = progress.totalCount
         countLabel = "\(progress.completedCount)/\(progress.totalCount)"
+        elapsedLabel = Self.elapsedLabel(from: progress.startedAt, to: now)
 
         let repositorySummary = Self.repositorySummary(
             from: progress.activeRepositoryNames
@@ -184,6 +187,20 @@ struct WorkplaceFormProgressPresentationState: Equatable {
                     "目标分支：\(branch)"
                 }
         }
+    }
+
+    /// 进行时间文案:秒 → 分秒 → 小时分三档,向下取整(宁可少报不多报)。
+    /// 未来时刻(时钟回拨/NTP 校时)按 0 秒处理,不显示负数。
+    static func elapsedLabel(from startedAt: Date, to now: Date) -> String {
+        let elapsedSeconds = max(0, Int(now.timeIntervalSince(startedAt)))
+        if elapsedSeconds < 60 {
+            return "已进行 \(elapsedSeconds) 秒"
+        }
+        let minutes = elapsedSeconds / 60
+        if minutes < 60 {
+            return "已进行 \(minutes) 分 \(elapsedSeconds % 60) 秒"
+        }
+        return "已进行 \(minutes / 60) 小时 \(minutes % 60) 分"
     }
 
     private static func repositorySummary(from repositoryNames: [String]) -> String? {

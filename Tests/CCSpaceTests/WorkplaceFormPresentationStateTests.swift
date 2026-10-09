@@ -315,6 +315,42 @@ final class WorkplaceFormPresentationStateTests: XCTestCase {
         XCTAssertEqual(state.countLabel, "2/5")
     }
 
+    /// 长克隆的可感知性:进行时间按"当前步骤开始时刻 → 现在"计算,
+    /// 三档文案(秒/分秒/小时分),时钟回拨或未来时刻不显示负数。
+    func test_formProgressElapsedLabelUsesThreeBuckets() {
+        let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        func label(_ elapsed: TimeInterval) -> String {
+            WorkplaceFormProgressPresentationState.elapsedLabel(
+                from: startedAt,
+                to: startedAt.addingTimeInterval(elapsed)
+            )
+        }
+
+        XCTAssertEqual(label(0), "已进行 0 秒")
+        XCTAssertEqual(label(59.9), "已进行 59 秒")
+        XCTAssertEqual(label(60), "已进行 1 分 0 秒")
+        XCTAssertEqual(label(125), "已进行 2 分 5 秒")
+        XCTAssertEqual(label(3_725), "已进行 1 小时 2 分")
+        // 系统时钟被校准到开始时刻之前:按 0 秒处理,不给用户看到"已进行 -3 秒"
+        XCTAssertEqual(label(-3), "已进行 0 秒")
+    }
+
+    func test_formProgressStateCarriesStartedAtIntoElapsedLabel() {
+        let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let state = WorkplaceFormProgressPresentationState(
+            progress: WorkplaceOperationProgress(
+                step: .cloningRepositories,
+                completedCount: 0,
+                totalCount: 2,
+                activeRepositoryNames: ["api"],
+                startedAt: startedAt
+            ),
+            now: startedAt.addingTimeInterval(45)
+        )
+
+        XCTAssertEqual(state.elapsedLabel, "已进行 45 秒")
+    }
+
     func test_editStateBuildsSelectionSummaryAndRemovalWarning() {
         let retainedRepositoryID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
         let removedRepositoryID = UUID(uuidString: "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC")!

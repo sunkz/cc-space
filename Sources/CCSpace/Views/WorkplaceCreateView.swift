@@ -54,11 +54,6 @@ struct WorkplaceCreateView: View {
         )
     }
 
-    private var progressPresentationState: WorkplaceFormProgressPresentationState? {
-        guard let operationProgress else { return nil }
-        return WorkplaceFormProgressPresentationState(progress: operationProgress)
-    }
-
     @MainActor
     private func submitCreate() async {
         guard presentationState.canSubmit else { return }
@@ -148,7 +143,7 @@ struct WorkplaceCreateView: View {
                 submittingTitle: "创建中",
                 isSubmitting: isSubmitting,
                 isSubmitDisabled: !presentationState.canSubmit,
-                progress: progressPresentationState,
+                progress: operationProgress,
                 // 提交中保留取消:onCancel 里走 submitTask?.cancel() 的清理通道,
                 // 禁用反而让用户对着 interactiveDismissDisabled 的弹窗干等。
                 isCancelDisabledWhileSubmitting: false,

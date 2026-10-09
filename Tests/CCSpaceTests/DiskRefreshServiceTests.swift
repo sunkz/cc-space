@@ -283,7 +283,7 @@ final class DiskRefreshServiceTests: XCTestCase {
         workplaceStore.updateSyncState(updatedState)
 
         await gate.release()
-        await refreshTask.value
+        _ = await refreshTask.value
 
         let persistedState = try XCTUnwrap(
             workplaceStore.syncStates.first {
@@ -382,6 +382,123 @@ final class DiskRefreshServiceTests: XCTestCase {
         )
         XCTAssertTrue(persistedPresent.hasLocalDirectory)
         XCTAssertFalse(persistedAbsent.hasLocalDirectory)
+    }
+
+    /// 用户手动把 git 仓库拷进工作区目录后,下一次磁盘刷新要把它纳入列表:
+    /// 新建仓库配置 + 生成同步态行 + 加入工作区选中集合(远端地址走真实 git 命令读取)。
+    func test_refreshImportsRepositoryCopiedIntoWorkplaceDirectory() async throws {
+        let appSupportRoot = makeTestRootURL()
+        let workspaceRoot = makeTestRootURL()
+        let workplaceURL = workspaceRoot.appendingPathComponent("existing")
+        let clonedURL = workplaceURL.appendingPathComponent("blog")
+        // 模拟"拷贝进来的仓库":真实 init 一个仓库并配好 origin
+        let copiedURL = workplaceURL.appendingPathComponent("copied-repo")
+        try FileManager.default.createDirectory(at: copiedURL, withIntermediateDirectories: true)
+        _ = try ShellHelper.run(["git", "-C", copiedURL.path, "init"])
+        _ = try ShellHelper.run([
+            "git", "-C", copiedURL.path, "remote", "add", "origin", "git@github.com:org/copied.git",
+        ])
+
+        let fileStore = JSONFileStore(rootDirectory: appSupportRoot)
+        let now = Date()
+        let repository = RepositoryConfig(
+            id: UUID(),
+            gitURL: "git@github.com:org/blog.git",
+            repoName: "blog",
+            createdAt: now,
+            updatedAt: now
+        )
+        try fileStore.save([repository], as: "repositories.json")
+        let workplace = Workplace(
+            id: UUID(),
+            name: "existing",
+            path: workplaceURL.path,
+            selectedRepositoryIDs: [repository.id],
+            createdAt: now,
+            updatedAt: now
+        )
+        try fileStore.save([workplace], as: "workplaces.json")
+        try fileStore.save([RepositorySyncState(
+            workplaceID: workplace.id,
+            repositoryID: repository.id,
+            status: .success,
+            localPath: clonedURL.path,
+            hasLocalDirectory: true
+        )], as: "sync-states.json")
+
+        let repositoryStore = RepositoryStore(fileStore: fileStore)
+        let workplaceStore = WorkplaceStore(fileStore: fileStore)
+        let service = DiskRefreshService(
+            workplaceStore: workplaceStore,
+            repositoryStore: repositoryStore
+        )
+
+        let outcome = await service.refresh(rootPath: workspaceRoot.path)
+        XCTAssertEqual(outcome.importedRepositoryCount, 1)
+
+        let imported = try XCTUnwrap(
+            repositoryStore.repositories.first { $0.repoName == "copied-repo" }
+        )
+        XCTAssertEqual(imported.gitURL, "git@github.com:org/copied.git")
+        let importedState = try XCTUnwrap(
+            workplaceStore.syncStates.first { $0.repositoryID == imported.id }
+        )
+        XCTAssertEqual(importedState.localPath, copiedURL.path)
+        XCTAssertEqual(importedState.status, .idle)
+        XCTAssertTrue(importedState.hasLocalDirectory)
+        XCTAssertEqual(
+            workplaceStore.workplaces.first?.selectedRepositoryIDs,
+            [repository.id, imported.id]
+        )
+
+        // 幂等:再刷一轮不得重复建行或重复建配置
+        let secondOutcome = await service.refresh(rootPath: workspaceRoot.path)
+        XCTAssertEqual(secondOutcome.importedRepositoryCount, 0)
+        XCTAssertEqual(repositoryStore.repositories.count, 2)
+        XCTAssertEqual(workplaceStore.syncStates.count, 2)
+
+        // 三份文档都已落盘:重启后行还在
+        let reloadedWorkplaceStore = WorkplaceStore(fileStore: fileStore)
+        XCTAssertEqual(reloadedWorkplaceStore.syncStates.count, 2)
+        XCTAssertEqual(
+            reloadedWorkplaceStore.workplaces.first?.selectedRepositoryIDs,
+            [repository.id, imported.id]
+        )
+    }
+
+    /// 纯本地仓库(没有 origin)进不了以 gitURL 为唯一键的仓库池:按既有口径
+    /// 跳过并留痕,不得因此污染配置。
+    func test_refreshSkipsCopiedRepositoryWithoutOrigin() async throws {
+        let appSupportRoot = makeTestRootURL()
+        let workspaceRoot = makeTestRootURL()
+        let workplaceURL = workspaceRoot.appendingPathComponent("existing")
+        let localOnlyURL = workplaceURL.appendingPathComponent("local-only")
+        try FileManager.default.createDirectory(at: localOnlyURL, withIntermediateDirectories: true)
+        _ = try ShellHelper.run(["git", "-C", localOnlyURL.path, "init"])
+
+        let fileStore = JSONFileStore(rootDirectory: appSupportRoot)
+        let now = Date()
+        let workplace = Workplace(
+            id: UUID(),
+            name: "existing",
+            path: workplaceURL.path,
+            selectedRepositoryIDs: [],
+            createdAt: now,
+            updatedAt: now
+        )
+        try fileStore.save([workplace], as: "workplaces.json")
+
+        let repositoryStore = RepositoryStore(fileStore: fileStore)
+        let workplaceStore = WorkplaceStore(fileStore: fileStore)
+        let service = DiskRefreshService(
+            workplaceStore: workplaceStore,
+            repositoryStore: repositoryStore
+        )
+
+        let outcome = await service.refresh(rootPath: workspaceRoot.path)
+        XCTAssertEqual(outcome.importedRepositoryCount, 0)
+        XCTAssertTrue(repositoryStore.repositories.isEmpty)
+        XCTAssertTrue(workplaceStore.syncStates.isEmpty)
     }
 }
 

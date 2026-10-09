@@ -56,6 +56,51 @@ final class RootSplitViewSupportTests: XCTestCase {
         XCTAssertTrue(state.shouldInvalidateBranchesAfterRefresh)
     }
 
+    func test_diskRefreshStateForcedRefreshCannotOutweighMissingPreconditions() {
+        let forced = RootSplitDiskRefreshState(
+            route: .workplaces,
+            selectedWorkplaceID: UUID(),
+            scenePhase: .active,
+            rootPath: "/tmp/workspaces",
+            force: true
+        )
+        // 定时/前台刷新默认让位在飞任务,只有用户显式点刷新才顶掉它。
+        let scheduled = RootSplitDiskRefreshState(
+            route: .workplaces,
+            selectedWorkplaceID: UUID(),
+            scenePhase: .active,
+            rootPath: "/tmp/workspaces"
+        )
+        // 根目录为空时 force 也不该顶掉在飞任务:没有可扫的根,取消只会白打断一轮。
+        let forcedWithoutRoot = RootSplitDiskRefreshState(
+            route: .workplaces,
+            selectedWorkplaceID: UUID(),
+            scenePhase: .active,
+            rootPath: "   ",
+            force: true
+        )
+
+        XCTAssertTrue(forced.canScheduleRefresh)
+        XCTAssertTrue(forced.shouldTakeOverInFlightRefresh)
+        XCTAssertFalse(scheduled.shouldTakeOverInFlightRefresh)
+        XCTAssertFalse(forcedWithoutRoot.canScheduleRefresh)
+        XCTAssertFalse(forcedWithoutRoot.shouldTakeOverInFlightRefresh)
+    }
+
+    func test_diskRefreshStateKeepsForcedRefreshAlreadyInFlight() {
+        let state = RootSplitDiskRefreshState(
+            route: .workplaces,
+            selectedWorkplaceID: UUID(),
+            scenePhase: .active,
+            rootPath: "/tmp/workspaces",
+            force: true,
+            hasForcedRefreshInFlight: true
+        )
+
+        // 上一轮显式刷新还在扫目录:再点一次不顶掉它,否则反复点击会让发现阶段永远跑不完。
+        XCTAssertFalse(state.shouldTakeOverInFlightRefresh)
+    }
+
     func test_runtimeServiceFactoryPassesTrimmedSettingsRootPath() {
         let fileStore = JSONFileStore(
             rootDirectory: makeTestRootURL()

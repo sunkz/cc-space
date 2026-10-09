@@ -231,7 +231,9 @@ struct WorkplaceDetailPresentationState {
         canOpenDirectory = actionState.canOpenDirectory
         canDeleteWorkplace = !isActionLocked
         editHelp = isActionLocked ? "工作区操作进行中" : "编辑工作区名称、分支和仓库配置"
-        refreshHelp = isActionLocked ? "工作区操作进行中" : "重新读取所有仓库的本地 Git 状态"
+        refreshHelp = isActionLocked
+            ? "工作区操作进行中"
+            : "重新读取所有仓库的本地 Git 状态，并纳入目录里新拷入的仓库"
         syncHelp = isActionLocked ? "工作区操作进行中" : "Pull 所有仓库：从远端拉取最新代码并合并到当前分支"
         pushHelp = isActionLocked ? "工作区操作进行中" : "Push 所有仓库：将未推送的提交推送到远端"
         mergeDefaultBranchHelp = isActionLocked ? "工作区操作进行中" : "合并所有仓库的默认分支到当前分支（等同于 git merge main）"

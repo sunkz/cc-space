@@ -44,6 +44,8 @@ struct WorkplaceDetailActions {
     let onSwitchAllRepositoriesToDefaultBranch: () -> Void
     let onSwitchAllRepositoriesToWorkBranch: () -> Void
     let onRefreshStatuses: () -> Void
+    /// 扫描工作区目录,把用户手动拷入、列表里还没有的 Git 仓库纳入进来。
+    let onDiskRefresh: () -> Void
     let onCancelAction: () -> Void
 }
 
@@ -781,6 +783,9 @@ struct WorkplaceDetailView: View {
             pendingRefreshFeedback = WorkplaceDetailFeedbackFactory.refreshAllRepositoryStatuses(
                 repositoryCount: syncStates.filter(\.hasLocalDirectory).count
             )
+            // 整区刷新顺带扫一次目录:用户手动拷进来的仓库否则要等 App 切回前台
+            // 或 120 秒定时刷新才出现,点「刷新」却刷不出来最容易被当成没生效。
+            actions.onDiskRefresh()
         }
         actions.onRefreshStatuses()
         manualRefreshSeed += 1

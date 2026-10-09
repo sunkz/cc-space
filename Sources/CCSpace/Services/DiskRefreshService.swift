@@ -16,6 +16,11 @@ struct DiskRefreshComputationResult: Sendable {
     let repositoryResult: RepositoryDeduplicationResult
 }
 
+struct DiskRefreshOutcome: Sendable, Equatable {
+    /// 本轮从磁盘发现并纳入工作区列表的 Git 仓库数(手动拷入的目录)。
+    let importedRepositoryCount: Int
+}
+
 @MainActor
 struct DiskRefreshService {
     typealias RefreshCalculator = @Sendable (DiskRefreshStoreSnapshot, String) async -> DiskRefreshComputationResult
@@ -23,6 +28,8 @@ struct DiskRefreshService {
     let workplaceStore: WorkplaceStore
     let repositoryStore: RepositoryStore
     private let refreshCalculator: RefreshCalculator
+    /// 读候选目录的 origin 地址用(GitServicing 是 Sendable,可在后台等待)。
+    private let gitService: GitServicing
 
     /// 快照不等价时的重试上限。活跃工作区里每次 pull/push 的预标瞬态都会让快照
     /// 不等价，上限过低会让刷新被抖动耗尽而整体放弃（功能事实上不生效）。
@@ -31,19 +38,24 @@ struct DiskRefreshService {
     init(
         workplaceStore: WorkplaceStore,
         repositoryStore: RepositoryStore,
+        gitService: GitServicing = GitService(),
         refreshCalculator: @escaping RefreshCalculator = DiskRefreshService.defaultRefreshCalculator
     ) {
         self.workplaceStore = workplaceStore
         self.repositoryStore = repositoryStore
+        self.gitService = gitService
         self.refreshCalculator = refreshCalculator
     }
 
-    func refresh(rootPath: String) async {
+    @discardableResult
+    func refresh(rootPath: String) async -> DiskRefreshOutcome {
         var retryCount = 0
         while Task.isCancelled == false {
             let snapshot = currentSnapshot()
             let refreshResults = await refreshCalculator(snapshot, rootPath)
-            guard Task.isCancelled == false else { return }
+            guard Task.isCancelled == false else {
+                return DiskRefreshOutcome(importedRepositoryCount: 0)
+            }
             retryCount += 1
             guard snapshot == currentSnapshot() else {
                 // 预算要足够宽松:活跃工作区里每次 pull/push 的预标瞬态都会让快照
@@ -52,13 +64,13 @@ struct DiskRefreshService {
                 guard retryCount <= Self.snapshotRetryBudget else {
                     // 放弃前必须留痕:此前静默 return,刷新被整体跳过而无人知晓。
                     diskRefreshLog.notice("event=refresh_abandoned reason=snapshot_keeps_changing retries=\(retryCount)")
-                    return
+                    return DiskRefreshOutcome(importedRepositoryCount: 0)
                 }
                 do {
                     try await Task.sleep(for: .milliseconds(100 * retryCount))
                 } catch {
                     // 取消不是"重试仍不一致",直接退出,不要把取消信号吞掉。
-                    return
+                    return DiskRefreshOutcome(importedRepositoryCount: 0)
                 }
                 continue
             }
@@ -74,7 +86,56 @@ struct DiskRefreshService {
             } catch {
                 diskRefreshLog.error("event=refresh_apply_failed reason=\(error.localizedDescription, privacy: .public)")
             }
-            return
+            // 校正之后再做发现:上一步可能刚删掉目录已不存在的工作区记录,
+            // 发现阶段的工作区集合要以刷新后的状态为准。
+            let importedCount = await importDiscoveredRepositories()
+            return DiskRefreshOutcome(importedRepositoryCount: importedCount)
+        }
+        return DiskRefreshOutcome(importedRepositoryCount: 0)
+    }
+
+    /// 把工作区目录里手动拷入、列表尚未记录的 Git 仓库纳入列表。
+    ///
+    /// 只有"候选枚举 + 逐个读 origin"这段在后台(每个候选一次 git 进程),
+    /// 计划生成与落盘回到主 actor,基于此刻的 Store 状态重算(见
+    /// RepositoryStore.commitImportedRepositories)。
+    private func importDiscoveredRepositories() async -> Int {
+        let snapshot = currentSnapshot()
+        let lockedPathKeys = await RepositoryOperationLock.shared.inFlightPathKeys()
+        let candidates = await Task.detached(priority: .utility) {
+            ExternalRepositoryImport.candidates(
+                workplaces: snapshot.workplace.workplaces,
+                syncStates: snapshot.workplace.syncStates,
+                lockedPathKeys: lockedPathKeys
+            )
+        }.value
+        guard candidates.isEmpty == false else { return 0 }
+
+        var discovered: [DiscoveredGitRepository] = []
+        discovered.reserveCapacity(candidates.count)
+        for candidate in candidates {
+            guard Task.isCancelled == false else { return 0 }
+            guard let gitURL = await gitService.remoteURL(in: candidate.path) else {
+                // 无 origin 的纯本地仓库进不了仓库池(它以 gitURL 为唯一键),留痕跳过。
+                diskRefreshLog.notice("event=external_repo_skipped reason=no_origin path=\(candidate.path)")
+                continue
+            }
+            discovered.append(DiscoveredGitRepository(
+                workplaceID: candidate.workplaceID,
+                path: candidate.path,
+                folderName: candidate.folderName,
+                gitURL: gitURL
+            ))
+        }
+
+        do {
+            return try repositoryStore.commitImportedRepositories(
+                discovered: discovered,
+                workplaceStore: workplaceStore
+            )
+        } catch {
+            diskRefreshLog.error("event=external_repo_import_failed reason=\(error.localizedDescription, privacy: .public)")
+            return 0
         }
     }
 

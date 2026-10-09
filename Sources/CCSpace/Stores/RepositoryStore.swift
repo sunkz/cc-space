@@ -213,7 +213,9 @@ final class RepositoryStore: ObservableObject {
         try persistRepositories(updatedRepositories)
     }
 
-    nonisolated private static func gitURLsMatch(_ lhs: String, _ rhs: String) -> Bool {
+    /// internal:磁盘发现导入(`commitImportedRepositories`)要用同一套 URL 归一化口径
+    /// 判断"这个远端是否已在仓库池里",另写一份必然与这里的规则漂移。
+    nonisolated static func gitURLsMatch(_ lhs: String, _ rhs: String) -> Bool {
         normalizedGitURLForComparison(lhs) == normalizedGitURLForComparison(rhs)
     }
 
@@ -413,6 +415,53 @@ final class RepositoryStore: ObservableObject {
                 syncStates: filteredSyncStates
             )
         }
+    }
+
+    /// 提交磁盘发现导入:以**调用时刻**的三个 Store 内存状态重新生成计划,
+    /// 再把 repositories/workplaces/sync-states 一次原子落盘。
+    ///
+    /// 重新生成(而不是套用后台算好的结果)是必须的:候选枚举 + 逐个读远端地址
+    /// 期间,用户可能增删仓库或工作区,套用旧快照会把并发的写入整体覆写回盘。
+    /// 导入只做追加,复用同一 URL 的既有配置,不删任何东西。
+    /// - Returns: 实际纳入列表的仓库数;0 表示本轮没有可导入的目录。
+    func commitImportedRepositories(
+        discovered: [DiscoveredGitRepository],
+        workplaceStore: WorkplaceStore
+    ) throws -> Int {
+        guard discovered.isEmpty == false else { return 0 }
+        guard repositoryStoreRootsMatch(workplaceStore) else {
+            throw RepositoryStoreError.crossStoreRootMismatch
+        }
+        let result = ExternalRepositoryImport.importPlan(
+            discovered: discovered,
+            workplaces: workplaceStore.workplaces,
+            syncStates: workplaceStore.syncStates,
+            repositories: repositories
+        )
+        // 跳过必须留痕:用户视角是"拷进去的仓库怎么没出现",没有日志就无从回答原因。
+        for skip in result.skips {
+            repositoryStoreLog.notice(
+                "event=external_repo_import_skipped reason=\(skip.reason.rawValue) path=\(skip.path)"
+            )
+        }
+        guard result.changed else { return 0 }
+
+        var documents = [try fileStore.document(for: result.repositories, as: "repositories.json")]
+        documents += try workplaceStore.persistenceDocuments(
+            workplaces: result.workplaces,
+            syncStates: result.syncStates
+        )
+        try fileStore.save(documents)
+
+        repositories = result.repositories
+        workplaceStore.applyPersistedState(
+            workplaces: result.workplaces,
+            syncStates: result.syncStates
+        )
+        repositoryStoreLog.notice(
+            "event=external_repo_imported count=\(result.importedCount, privacy: .public)"
+        )
+        return result.importedCount
     }
 
     private func repositoryStoreRootsMatch(_ workplaceStore: WorkplaceStore) -> Bool {

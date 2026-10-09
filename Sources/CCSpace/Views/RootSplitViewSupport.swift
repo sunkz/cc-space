@@ -58,18 +58,29 @@ struct RootSplitDiskRefreshState {
     let normalizedRootPath: String
     let canScheduleRefresh: Bool
     let shouldInvalidateBranchesAfterRefresh: Bool
+    /// 是否顶掉正在跑的刷新任务。定时/前台刷新让位在飞任务即可;
+    /// 用户显式点「刷新」时不能白等下一次轮询——旧任务多半卡在重试或 git 进程上,
+    /// 换新世代重跑(旧任务返回时因世代不符不会碰句柄与分支缓存)。
+    /// 但已经有一轮**显式**刷新在跑时不再重开:发现阶段要逐个目录起 git 进程,
+    /// 反复点击会不断取消重扫,反而永远跑不完。
+    let shouldTakeOverInFlightRefresh: Bool
 
     init(
         route: AppRoute,
         selectedWorkplaceID: UUID?,
         scenePhase: ScenePhase,
-        rootPath: String
+        rootPath: String,
+        force: Bool = false,
+        hasForcedRefreshInFlight: Bool = false
     ) {
         let trimmedRootPath = rootPath.trimmingCharacters(in: .whitespacesAndNewlines)
 
         normalizedRootPath = trimmedRootPath
         canScheduleRefresh = scenePhase == .active && trimmedRootPath.isEmpty == false
         shouldInvalidateBranchesAfterRefresh = route == .workplaces && selectedWorkplaceID != nil
+        shouldTakeOverInFlightRefresh = force
+            && canScheduleRefresh
+            && hasForcedRefreshInFlight == false
     }
 }
 

@@ -16,6 +16,8 @@ struct RootSplitView: View {
     /// 磁盘刷新任务世代号:被取消的旧任务晚于新任务返回时,若无条件清 refreshTask
     /// 会把**新任务**的句柄抹掉,后续调度 guard 放行、并发磁盘刷新。
     @State private var refreshGeneration: UInt64 = 0
+    /// 在飞的磁盘刷新是否由用户显式触发(供"再点一次刷新"判断要不要重开一轮)。
+    @State private var isInFlightDiskRefreshForced = false
     /// 设置页当前页签:tab 栏挂在标题栏 principal 位置,状态放在根视图共享给 SettingsView。
     @State private var settingsTab: SettingsTab = .general
     /// AI 表单是否存在未保存修改:跨视图上报链 AISettingsSection → SettingsView →
@@ -97,7 +99,8 @@ struct RootSplitView: View {
     private var diskRefreshService: DiskRefreshService {
         DiskRefreshService(
             workplaceStore: workplaceStore,
-            repositoryStore: repositoryStore
+            repositoryStore: repositoryStore,
+            gitService: gitService
         )
     }
 
@@ -341,6 +344,7 @@ struct RootSplitView: View {
             .onDisappear {
                 refreshTask?.cancel()
                 refreshTask = nil
+                isInFlightDiskRefreshForced = false
             }
             // 外观保存失败等根级操作的可见提示:挂顶层 overlay,任意路由下都能呈现。
             .overlay(alignment: .top) {
@@ -867,6 +871,9 @@ struct RootSplitView: View {
             onRefreshStatuses: {
                 workplaceStore.clearFailedStatusesWhereDirectoryExists(workplaceID: workplace.id)
             },
+            onDiskRefresh: {
+                scheduleDiskRefresh(force: true)
+            },
             onCancelAction: {
                 detailActionCoordinator.cancelRunningAction()
             }
@@ -1237,26 +1244,41 @@ struct RootSplitView: View {
     }
 
     @MainActor
-    private func scheduleDiskRefresh() {
+    private func scheduleDiskRefresh(force: Bool = false) {
         let refreshState = RootSplitDiskRefreshState(
             route: appViewModel.route,
             selectedWorkplaceID: appViewModel.selectedWorkplaceID,
             scenePhase: mirroredScenePhase,
-            rootPath: settingsStore.settings.workplaceRootPath
+            rootPath: settingsStore.settings.workplaceRootPath,
+            force: force,
+            hasForcedRefreshInFlight: isInFlightDiskRefreshForced
         )
 
-        guard refreshTask == nil else { return }
+        if refreshState.shouldTakeOverInFlightRefresh {
+            refreshTask?.cancel()
+            refreshTask = nil
+        } else {
+            guard refreshTask == nil else { return }
+        }
         guard refreshState.canScheduleRefresh else { return }
 
         let shouldInvalidateBranches = refreshState.shouldInvalidateBranchesAfterRefresh
         let rootPath = refreshState.normalizedRootPath
         refreshGeneration += 1
         let generation = refreshGeneration
+        isInFlightDiskRefreshForced = force
         refreshTask = Task {
-            await diskRefreshService.refresh(rootPath: rootPath)
+            let outcome = await diskRefreshService.refresh(rootPath: rootPath)
+            if outcome.importedRepositoryCount > 0 {
+                // 仓库是"自己冒出来"的,不给提示用户只会看到一个没配过的仓库出现在列表里。
+                appearanceFeedback = CCSpaceFeedbackFactory.actionSuccess(
+                    "已自动纳入 \(outcome.importedRepositoryCount) 个拷入工作区目录的 Git 仓库"
+                )
+            }
             let isCurrentGeneration = refreshGeneration == generation
             if isCurrentGeneration {
                 refreshTask = nil
+                isInFlightDiskRefreshForced = false
                 // 被取消的旧任务绝不能触碰句柄与分支缓存:它返回时新任务可能正在跑,
                 // 清句柄会导致下一轮调度与前一轮并发。
                 if Task.isCancelled == false, shouldInvalidateBranches {

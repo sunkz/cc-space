@@ -221,6 +221,34 @@ final class RootSplitViewSupportTests: XCTestCase {
         XCTAssertEqual(coordinator.branchRefreshSeed, 1)
     }
 
+    /// 分支面板行内"向该分支创建 MR":不 Push、不改 git 状态,
+    /// 只解析链接并打开浏览器,也不触发分支快照重载。
+    func test_runCreateMergeRequestForBranchOpensURLWithoutPush() async throws {
+        let coordinator = WorkplaceDetailActionCoordinator()
+        let mergeRequestURL = try XCTUnwrap(URL(string: "https://example.com/compare/main...feature"))
+        var openedURLs: [URL] = []
+
+        RootSplitWorkplaceActions.runCreateMergeRequestForBranch(
+            coordinator: coordinator,
+            repositoryName: "api",
+            resolveMergeRequestURL: {
+                mergeRequestURL
+            },
+            openInBrowser: { url in
+                openedURLs.append(url)
+            }
+        )
+
+        await waitUntil(coordinator.isRunningAction == false)
+
+        XCTAssertEqual(openedURLs, [mergeRequestURL])
+        XCTAssertEqual(
+            coordinator.feedback,
+            CCSpaceFeedback(style: .success, message: "已打开 api 的 MR 创建页")
+        )
+        XCTAssertEqual(coordinator.branchRefreshSeed, 0)
+    }
+
     func test_createSheetPresentationKeepsDuplicateSeedSelections() {
         let repositoryID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
         let seed = WorkplaceCreateSeed(

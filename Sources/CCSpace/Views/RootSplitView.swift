@@ -696,6 +696,25 @@ struct RootSplitView: View {
                     }
                 )
             },
+            onCreateMergeRequestForBranch: { state, repository, targetBranch in
+                // 分支面板行内入口:当前分支为源、该行分支为目标。不 Push——
+                // 非当前分支无法复用"push 当前分支"逻辑,链接生成后由托管平台校验。
+                RootSplitWorkplaceActions.runCreateMergeRequestForBranch(
+                    coordinator: detailActionCoordinator,
+                    repositoryName: repository.repoName,
+                    resolveMergeRequestURL: {
+                        try await MergeRequestService.createURL(
+                            repository: repository,
+                            syncState: state,
+                            gitService: gitService,
+                            targetBranch: targetBranch
+                        )
+                    },
+                    openInBrowser: { mergeRequestURL in
+                        try WorkplaceSystemActions.openInBrowser(mergeRequestURL)
+                    }
+                )
+            },
             onOpenRepositoryWeb: { syncState, repository in
                 RootSplitWorkplaceActions.runOpenRepositoryWeb(
                     coordinator: detailActionCoordinator,

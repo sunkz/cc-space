@@ -35,6 +35,9 @@ struct BranchListPopoverView: View {
     let onDeleteBranch: ((String, String?) -> Void)?
     /// 删除远端分支(切换模式远端页签提供,收还原后的裸名);对比模式为 nil。
     let onDeleteRemoteBranch: ((String) -> Void)?
+    /// 以当前分支为源、向指定分支创建 MR(切换模式各行提供,收还原后的裸名目标分支);
+    /// nil(对比模式/无宿主入口)时行内不提供按钮。
+    var onCreateMergeRequestForBranch: ((String) -> Void)? = nil
     /// 本地分支元数据(最后提交时间 / 领先落后),供行内角标与按活动排序;空字典时行内不展示元数据。
     var branchMetadata: [String: GitBranchMetadata] = [:]
     /// 仓库默认分支(裸名,如 main):远端页签该行是保护分支,不提供删除入口。
@@ -303,6 +306,9 @@ struct BranchListPopoverView: View {
         // ➕ 新建入口:切换模式两个页签都给。本地页签基线即该行分支;
         // 远端页签基线为 origin/展示名对应的裸名(创建前先 fetch 刷新引用)。
         let showsCreateButton = mode == .switchBranch
+        // "向该分支创建 MR"入口:仅切换模式且宿主提供回调时给;对比模式与无宿主的
+        // 调用点(如提交记录窗口的分支切换器)不提供。
+        let showsMergeRequestButton = mode == .switchBranch && onCreateMergeRequestForBranch != nil
         return ForEach(branches, id: \.self) { branch in
             BranchSwitchRow(
                 branch: branch,
@@ -312,6 +318,7 @@ struct BranchListPopoverView: View {
                 pickHint: pickHint,
                 showsSwitchButton: mode == .switchBranch,
                 showsCreateButton: showsCreateButton,
+                showsMergeRequestButton: showsMergeRequestButton,
                 onDelete: deleteAction(for: branch, remote: remote),
                 metadata: source == .local ? branchMetadata[branch] : nil,
                 showsLeadingIcon: source == .local
@@ -321,6 +328,10 @@ struct BranchListPopoverView: View {
             } onCreateFromHere: {
                 // 同一时刻只允许一行展开;点当前展开行则收起。
                 creatingFromBranch = creatingFromBranch == branch ? nil : branch
+            } onCreateMergeRequestForBranch: {
+                // 上抛的是目标分支裸名(远端行经展示名还原),与切换动作同一还原口径。
+                dismissPopover()
+                onCreateMergeRequestForBranch?(pickPayload(for: branch, remote: remote))
             }
             // 输入行插在该分支下方展示,原行保留(替换会把分支名整个挡掉)。
             if showsCreateButton, creatingFromBranch == branch {
@@ -481,6 +492,9 @@ struct BranchSwitchRow: View {
     var showsSwitchButton: Bool = false
     /// true(切换模式本地页签)时行尾提供 ➕,点击后在该行下方插入输入行。
     var showsCreateButton: Bool = false
+    /// true(切换模式且宿主提供回调)时行内提供"向该分支创建 MR"按钮;
+    /// 当前分支行不显示——源分支与目标分支不能相同。
+    var showsMergeRequestButton: Bool = false
     /// 删除入口回调;nil(对比模式或不可删的行,如本地当前分支)时按钮隐藏。
     var onDelete: (() -> Void)? = nil
     /// 该分支的元数据(最后提交时间 / 领先落后);nil(远端页签/元数据未加载)时不展示角标。
@@ -491,6 +505,8 @@ struct BranchSwitchRow: View {
     let onSwitch: () -> Void
     /// 行尾 ➕ 点击:宿主把该行切换为输入框。
     var onCreateFromHere: (() -> Void)? = nil
+    /// "向该分支创建 MR"点击:宿主以当前分支为源、本行为目标生成 MR 链接并打开浏览器。
+    var onCreateMergeRequestForBranch: (() -> Void)? = nil
     @State private var resetTask: Task<Void, Never>?
     @State private var isDeleteHovering = false
 
@@ -570,6 +586,9 @@ struct BranchSwitchRow: View {
             Spacer(minLength: 6)
             metadataView
             // 行内操作簇:图标统一 20×20 定尺、间距 2,悬停高亮块跨行对齐。
+            // 动作图标一律 label 墨色——此前用 .secondary 灰,在切换按钮的 accent 蓝对比下
+            // 退化成"状态点缀",用户反馈"看着像不可点击"(10-10 O2 方案:统一加深,
+            // 悬停浅底由 .borderless 系统样式提供,删除悬停转红保留)。
             HStack(spacing: 2) {
                 // 显式切换入口,行内动作之首(紧靠元数据);当前分支与禁用态(如正在同步)不提供。
                 if showsSwitchButton, isCurrentBranch == false, isDisabled == false {
@@ -582,6 +601,21 @@ struct BranchSwitchRow: View {
                     .buttonStyle(.borderless)
                     .ccspaceQuickHelp("切换到此分支", providesLabel: true)
                     .accessibilityLabel("切换到此分支")
+                }
+                // 向该分支创建 MR(当前分支 → 该行分支,直接打开网页、不含 Push;
+                // 带 Push 的当前分支 MR 入口在仓库行工具栏)。当前分支行不显示:
+                // 源与目标同分支无法建 MR。
+                if showsMergeRequestButton, isCurrentBranch == false {
+                    Button(action: { onCreateMergeRequestForBranch?() }) {
+                        Image(systemName: "arrow.up.right.square")
+                            .font(.caption)
+                            .foregroundStyle(Color(nsColor: .labelColor))
+                            .frame(width: 20, height: 20)
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(isDisabled)
+                    .ccspaceQuickHelp("以当前分支向该分支创建 MR", providesLabel: true)
+                    .accessibilityLabel("向该分支创建 MR")
                 }
                 // 复制分支名到剪贴板。
                 Button {
@@ -598,7 +632,7 @@ struct BranchSwitchRow: View {
                 } label: {
                     Image(systemName: copiedBranch == branch ? "checkmark" : "doc.on.doc")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color(nsColor: .labelColor))
                         .frame(width: 20, height: 20)
                 }
                 .buttonStyle(.borderless)
@@ -609,7 +643,7 @@ struct BranchSwitchRow: View {
                     Button(action: { onDelete?() }) {
                         Image(systemName: "trash")
                             .font(.caption)
-                            .foregroundStyle(isDeleteHovering ? Color.red : Color.secondary)
+                            .foregroundStyle(isDeleteHovering ? Color.red : Color(nsColor: .labelColor))
                             .frame(width: 20, height: 20)
                     }
                     .buttonStyle(.borderless)
@@ -623,7 +657,7 @@ struct BranchSwitchRow: View {
                     Button(action: { onCreateFromHere?() }) {
                         Image(systemName: "plus")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Color(nsColor: .labelColor))
                             .frame(width: 20, height: 20)
                     }
                     .buttonStyle(.borderless)
@@ -880,6 +914,7 @@ extension BranchListPopoverView {
         onCreateBranch: @escaping (String, BranchBaseKind) -> Void,
         onDeleteBranch: @escaping (String, String?) -> Void,
         onDeleteRemoteBranch: @escaping (String) -> Void,
+        onCreateMergeRequestForBranch: ((String) -> Void)? = nil,
         branchMetadata: [String: GitBranchMetadata] = [:],
         defaultBranch: String? = nil,
         onLoadBranchMetadata: (() -> Void)? = nil,
@@ -898,6 +933,7 @@ extension BranchListPopoverView {
             onCreateBranch: onCreateBranch,
             onDeleteBranch: onDeleteBranch,
             onDeleteRemoteBranch: onDeleteRemoteBranch,
+            onCreateMergeRequestForBranch: onCreateMergeRequestForBranch,
             branchMetadata: branchMetadata,
             defaultBranch: defaultBranch,
             onLoadBranchMetadata: onLoadBranchMetadata,

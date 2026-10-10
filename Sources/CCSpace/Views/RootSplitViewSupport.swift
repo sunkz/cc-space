@@ -238,4 +238,26 @@ enum RootSplitWorkplaceActions {
             try openInBrowser(mergeRequestURL)
         }
     }
+
+    /// 分支面板行内"向该分支创建 MR"(当前分支为源、指定分支为目标):
+    /// 与工具栏入口的区别是**不先 Push**——目标分支多半非当前检出,push 无从谈起,
+    /// 分支未推送时由托管平台页面报错兜底;纯打开链接不改 git 状态,故不触发分支快照重载。
+    @MainActor
+    static func runCreateMergeRequestForBranch(
+        coordinator: WorkplaceDetailActionCoordinator,
+        repositoryName: String,
+        resolveMergeRequestURL: @escaping @MainActor () async throws -> URL,
+        openInBrowser: @escaping @MainActor (URL) throws -> Void
+    ) {
+        coordinator.run(
+            actionName: "创建 MR",
+            successFeedback: {
+                WorkplaceDetailFeedbackFactory.openMergeRequest(
+                    repositoryName: repositoryName
+                )
+            }
+        ) {
+            try openInBrowser(await resolveMergeRequestURL())
+        }
+    }
 }

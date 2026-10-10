@@ -32,6 +32,8 @@ struct WorkplaceDetailActions {
     let onSwitchRepositoryToWorkBranch: (RepositorySyncState, String) -> Void
     let onMergeRepositoryDefaultBranchIntoCurrent: (RepositorySyncState, String) -> Void
     let onCreateMergeRequest: (RepositorySyncState, RepositoryConfig, String?) -> Void
+    /// 分支面板行内"向该分支创建 MR"（目标分支为末参，当前分支为源，不 Push）。
+    let onCreateMergeRequestForBranch: (RepositorySyncState, RepositoryConfig, String) -> Void
     /// 在浏览器打开仓库主页(仓库行右键/⋯ 菜单)。
     let onOpenRepositoryWeb: (RepositorySyncState, RepositoryConfig) -> Void
     let onDeleteRepository: (RepositorySyncState, String) -> Void
@@ -731,6 +733,9 @@ struct WorkplaceDetailView: View {
             },
             onCreateMergeRequest: { repository, targetBranch in
                 actions.onCreateMergeRequest(state, repository, targetBranch)
+            },
+            onCreateMergeRequestForBranch: { repository, targetBranch in
+                actions.onCreateMergeRequestForBranch(state, repository, targetBranch)
             },
             onOpenRepositoryWeb: { repository in
                 actions.onOpenRepositoryWeb(state, repository)

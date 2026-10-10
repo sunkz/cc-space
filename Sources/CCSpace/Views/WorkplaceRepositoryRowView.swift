@@ -25,6 +25,8 @@ struct WorkplaceRepositoryRowView: View {
     let showsWorkBranchAction: Bool
     let onMergeDefaultBranchIntoCurrent: () -> Void
     let onCreateMergeRequest: (RepositoryConfig, String?) -> Void
+    /// 分支面板行内"向该分支创建 MR":以当前分支为源、参数分支为目标直接打开网页(不 Push)。
+    let onCreateMergeRequestForBranch: (RepositoryConfig, String) -> Void
     /// 在浏览器打开仓库主页(右键/⋯ 菜单),URL 解析与失败反馈由宿主协调器承担。
     let onOpenRepositoryWeb: (RepositoryConfig) -> Void
     let actionsDisabled: Bool
@@ -146,7 +148,7 @@ struct WorkplaceRepositoryRowView: View {
         if availableBranches.isEmpty {
             return "当前分支，暂无可切换的本地分支"
         }
-        return "当前分支，点击可切换本地/远端分支或新建分支"
+        return "当前分支，点击可切换本地/远端分支、新建分支或创建 MR"
     }
 
     private var branchPillState: WorkplaceRepositoryBranchPillState? {
@@ -241,6 +243,12 @@ struct WorkplaceRepositoryRowView: View {
                                     // 被删分支从列表消失(与 Stash 列表行为一致)。
                                     onDeleteBranch: onDeleteBranch,
                                     onDeleteRemoteBranch: onDeleteRemoteBranch,
+                                    onCreateMergeRequestForBranch: { targetBranch in
+                                        guard let repository else { return }
+                                        // 直关已由面板内容完成,此处 binding 写入仅兑底同步。
+                                        showingBranchMenu = false
+                                        onCreateMergeRequestForBranch(repository, targetBranch)
+                                    },
                                     branchMetadata: branchMetadata,
                                     defaultBranch: repository?.defaultBranch?
                                         .trimmingCharacters(in: .whitespacesAndNewlines),

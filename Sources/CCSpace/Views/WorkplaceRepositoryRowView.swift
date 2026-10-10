@@ -245,9 +245,12 @@ struct WorkplaceRepositoryRowView: View {
                                     // 被删分支从列表消失(与 Stash 列表行为一致)。
                                     onDeleteBranch: onDeleteBranch,
                                     onDeleteRemoteBranch: onDeleteRemoteBranch,
-                                    onCreateMergeRequestForBranch: { targetBranch in
+                                    // repository 为 nil(配置已被删/未纳管)时传 nil 回调:
+                                    // 面板按"回调为 nil"隐藏 MR 按钮,而不是画出按钮点了没反应
+                                    // (guard-return 静默失效是 review P2 指出的问题)。
+                                    onCreateMergeRequestForBranch: repository == nil ? nil : { targetBranch in
                                         guard let repository else { return }
-                                        // 直关已由面板内容完成,此处 binding 写入仅兑底同步。
+                                        // 直关已由面板内容完成,此处 binding 写入仅兜底同步。
                                         showingBranchMenu = false
                                         onCreateMergeRequestForBranch(repository, targetBranch)
                                     },
@@ -779,6 +782,8 @@ struct WorkplaceRepositoryRowView: View {
 
     /// 仓库级常用链接子菜单:仅配置了链接的行渲染。只依赖仓库配置、
     /// 不需要本地目录,与"在浏览器打开仓库"同一放置口径(未克隆也可用)。
+    /// 操作锁定期置灰:开链走详情协调器,忙时点击会被静默丢弃——
+    /// 与其"点了没反应",不如让按钮显式不可用(10-10 review P2 修复)。
     @ViewBuilder
     private func commonLinksMenuItem() -> some View {
         if let repository, repository.links.isEmpty == false {
@@ -789,6 +794,7 @@ struct WorkplaceRepositoryRowView: View {
             } label: {
                 Label("常用链接", systemImage: "link")
             }
+            .disabled(actionsDisabled)
         }
     }
 

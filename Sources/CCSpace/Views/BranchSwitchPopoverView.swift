@@ -573,6 +573,8 @@ struct BranchSwitchRow: View {
                 // 当前分支标识(C6):accent 蓝 + 半粗字重,行内零色块。
                 .fontWeight(isCurrentBranch ? .semibold : .regular)
                 .foregroundStyle(isCurrentBranch ? Color.accentColor : Color(nsColor: .labelColor))
+                // 标识纯视觉化后,读屏也要能拿到"当前分支"语义(10-10 review 修复)。
+                .accessibilityLabel(isCurrentBranch ? "\(branch)，当前分支" : branch)
                 .ccspaceQuickHelp(nameHelp)
             Spacer(minLength: 6)
             metadataView
@@ -628,6 +630,7 @@ struct BranchSwitchRow: View {
                 }
                 .buttonStyle(.borderless)
                 .ccspaceQuickHelp("复制分支名", providesLabel: true)
+                .accessibilityLabel("复制分支名")
                 // 删除分支(可用性由宿主 deleteAction 决定,当前本地分支收不到回调);
                 // 悬停转红提示破坏性。
                 if onDelete != nil {

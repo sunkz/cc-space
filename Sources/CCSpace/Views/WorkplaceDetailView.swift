@@ -252,7 +252,7 @@ struct WorkplaceDetailView: View {
             branchToolbarItems(state)
             openActionToolbarItem(state)
             if workplace.links.isEmpty == false {
-                commonLinksToolbarItem()
+                commonLinksToolbarItem(state.isActionLocked)
             }
             deleteToolbarItem(state)
         }
@@ -555,7 +555,9 @@ struct WorkplaceDetailView: View {
 
     /// 工作区级常用链接工具栏入口:仅在配置了链接时渲染。菜单项点击上抛宿主,
     /// URL 解析与失败反馈走协调器(与"打开仓库主页"同一口径)。
-    private func commonLinksToolbarItem() -> some ToolbarContent {
+    /// 操作锁定期置灰:开链走协调器,忙时点击被静默丢弃,置灰比"点了没反应"诚实
+    /// (10-10 review P2 修复)。
+    private func commonLinksToolbarItem(_ isActionLocked: Bool) -> some ToolbarContent {
         ToolbarItem(placement: .primaryAction) {
             Menu {
                 ForEach(workplace.links) { link in
@@ -568,6 +570,7 @@ struct WorkplaceDetailView: View {
             .menuIndicator(.hidden)
             .accessibilityLabel("常用链接")
             .ccspaceToolbarActionButton(prominent: true)
+            .disabled(isActionLocked)
             .ccspaceQuickHelp("打开本工作区的常用链接")
         }
     }

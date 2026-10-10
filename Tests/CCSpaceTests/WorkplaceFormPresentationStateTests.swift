@@ -490,6 +490,18 @@ final class WorkplaceFormPresentationStateTests: XCTestCase {
         XCTAssertNil(BranchNameValidation.validate("   "))
     }
 
+    /// 列表可视高度按行数贴合、封顶 6 行:ScrollView 贪吃,固定 maxHeight
+    /// 会让一两行也占满整块,把常用链接重新推出弹窗(10-10 review P1 回归锁)。
+    func test_formListHeightFitsRowCountAndCapsAtSix() {
+        XCTAssertEqual(FormListMetrics.listHeight(rowCount: 0), 0)
+        XCTAssertEqual(
+            FormListMetrics.listHeight(rowCount: 2),
+            2 * FormListMetrics.rowHeight + 1 * FormListMetrics.rowSpacing
+        )
+        XCTAssertEqual(FormListMetrics.listHeight(rowCount: 6), FormListMetrics.listMaxHeight)
+        XCTAssertEqual(FormListMetrics.listHeight(rowCount: 50), FormListMetrics.listMaxHeight)
+    }
+
     private func makeRepository(
         repoName: String,
         id: UUID = UUID()

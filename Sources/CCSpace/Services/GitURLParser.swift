@@ -14,7 +14,9 @@ enum GitURLParser {
         guard trimmed.hasPrefix("-") == false else {
             throw gitURLParserError("仓库地址不合法：不能以 - 开头")
         }
-        guard trimmed.contains(where: { $0.asciiValue != nil && ($0 < " " || $0 == "\u{7f}") }) == false else {
+        // 控制字符拦截覆盖全部 Unicode Cc(此前只查 ASCII,U+0085 NEL 等
+        // 可躲过词法防线进入 argv,10-10 review 修复)。
+        guard trimmed.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) == false else {
             throw gitURLParserError("仓库地址不合法：包含控制字符")
         }
         if let schemeEnd = trimmed.range(of: "://") {

@@ -165,6 +165,9 @@ struct AddRepositorySheetView: View {
             feedback = nil
             // 改地址视为新的一次提交,重新放开同步闸(见 hasSubmitted)。
             hasSubmitted = false
+            // 旧地址查回的分支名单立即作废:防抖+重探窗口内它已不代表当前 URL,
+            // 留着可点会把旧远端分支存进新仓库配置(10-10 review P2 修复)。
+            remoteBranchSuggestions = []
             autoFetchTask?.cancel()
             remoteFetchGeneration += 1
             // 新探测尚未启动(防抖中),旧探测又不会再代写标志:这里统一复位,
@@ -217,6 +220,10 @@ struct AddRepositorySheetView: View {
               gitURL.trimmingCharacters(in: .whitespacesAndNewlines) == url else { return }
 
         remoteBranchSuggestions = ordered
+        // 探测完成即展开(10-11 用户定案):上一版"仅聚焦才展开"在新增弹窗里
+        // 永远不满足(用户没点过 MR 输入框,@FocusState 读回恒 false),
+        // 加载完列表不出来、必须再点一次输入框——展开时机交还给"数据就绪"。
+        // 收起通道不变:点到别处失焦时 onChange(inputFocused) 收起。
         showBranchSuggestions = true
         // 探测(800ms 防抖 + 网络往返)期间用户可能已输入目标分支:
         // 仅在输入为空时预填默认分支并抢焦点,不覆盖用户已敲的内容
@@ -242,17 +249,15 @@ struct AddRepositorySheetView: View {
         hasSubmitted = true
         defer { isAdding = false }
         do {
-            // 建档 → 回填 MR 目标分支 → 取实时记录的多步编排在 Orchestrator:
-            // 返回的是 update 之后的实时快照,"新增后直接编辑"弹窗的基线才不失真。
+            // 建档单写落盘(含 MR 目标分支/常用链接),返回即实时记录,
+            // "新增后直接编辑"弹窗的基线不失真(编排见 RepositoryAddOrchestrator)。
             let freshRepository = try RepositoryAddOrchestrator.addRepository(
                 gitURL: trimmed,
                 mrTargetBranches: editingMRBranches,
                 links: CommonLinksInput.normalizedForSave(rows: linkRows),
                 store: repositoryStore
             )
-            if let freshRepository {
-                onAdded(freshRepository)
-            }
+            onAdded(freshRepository)
             dismiss()
         } catch {
             feedback = CCSpaceFeedbackFactory.actionError(action: "新增仓库", error: error)

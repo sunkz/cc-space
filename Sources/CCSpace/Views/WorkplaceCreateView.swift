@@ -208,6 +208,9 @@ struct WorkplaceCreateView: View {
         selectedIDs = appliedState.selectedRepositoryIDs
         repositorySearchText = appliedState.repositorySearchText
         feedback = appliedState.feedback
+        // seed 不携带链接:sheet 存续期内再次 present 时必须清空上一份草稿,
+        // 否则新工作区会静默带上一次未提交的常用链接(10-10 review P2 修复)。
+        linkRows = []
     }
 
     private func toggleSelection(_ id: UUID) {

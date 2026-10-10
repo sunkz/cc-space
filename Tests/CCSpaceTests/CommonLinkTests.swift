@@ -24,8 +24,30 @@ final class CommonLinkTests: XCTestCase {
         XCTAssertTrue(CommonLinksInput.isValidURL("http://example.com"))
         XCTAssertFalse(CommonLinksInput.isValidURL("git@github.com:org/api.git"))
         XCTAssertFalse(CommonLinksInput.isValidURL("javascript:alert(1)"))
+        XCTAssertFalse(CommonLinksInput.isValidURL("file:///etc/passwd"))
         // 有 scheme 无 host 不算合法。
         XCTAssertFalse(CommonLinksInput.isValidURL("https://"))
+        // 严格解析:与消费侧 URL(string:) 同一口径,空格/未编码字符在校验期就拒,
+        // 不留"保存通过、点开报无法解析"的错位(10-10 review P2 修复)。
+        XCTAssertFalse(CommonLinksInput.isValidURL("https://example.com/a b"))
+    }
+
+    /// 存储层不变式:按 id 去重、丢非法、截断到上限——手改 JSON/导入旁路统一关闸。
+    func test_sanitize_dedupsDropsInvalidAndCaps() {
+        let dupID = UUID()
+        var links: [CommonLink] = [
+            CommonLink(id: dupID, title: "A", url: "https://a.example.com"),
+            CommonLink(id: dupID, title: "A 重复 id", url: "https://dup.example.com"),
+            CommonLink(title: "坏协议", url: "file:///tmp/evil.command"),
+        ]
+        for index in 0..<(CommonLinksInput.maxCount + 3) {
+            links.append(CommonLink(title: "N\(index)", url: "https://n\(index).example.com"))
+        }
+        let sanitized = CommonLinksInput.sanitize(links)
+        XCTAssertEqual(sanitized.count, CommonLinksInput.maxCount, "去重+丢非法后仍受上限约束")
+        XCTAssertEqual(sanitized.first?.title, "A")
+        XCTAssertFalse(sanitized.contains { $0.url.hasPrefix("file") })
+        XCTAssertEqual(Set(sanitized.map(\.id)).count, sanitized.count)
     }
 
     func test_normalizedForSave_trimsAndDropsBlankRowsPreservingOrder() {
@@ -116,6 +138,23 @@ final class CommonLinkTests: XCTestCase {
             from: Data(legacy.utf8)
         )
         XCTAssertEqual(decoded.links, [])
+    }
+
+    /// 备份导入旁路关闸:他人/手改备份里的非法 scheme、重复 id、超限 links
+    /// 必须在解码口就被净化(10-10 review P1 修复)。
+    func test_backupEntry_decodingSanitizesLinks() throws {
+        let dupID = "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"
+        let crafted = """
+        {"gitURL":"git@github.com:o/r.git",\
+        "links":[{"id":"\(dupID)","title":"首现","url":"https://first.example.com"},\
+        {"id":"\(dupID)","title":"重复 id","url":"https://dup.example.com"},\
+        {"id":"BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB","title":"坏协议","url":"file:///tmp/evil.command"}]}
+        """
+        let decoded = try JSONFileStore.makeDecoder().decode(
+            RepositoryBackupEntry.self,
+            from: Data(crafted.utf8)
+        )
+        XCTAssertEqual(decoded.links.map(\.title), ["首现"])
     }
 
     // MARK: - RepositoryStore 落盘行为

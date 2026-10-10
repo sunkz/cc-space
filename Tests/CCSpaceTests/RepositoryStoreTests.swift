@@ -457,6 +457,119 @@ final class RepositoryStoreTests: XCTestCase {
         XCTAssertEqual(reordered.repositories.map(\.id), [referenced.id])
     }
 
+    /// 去重不再硬删丢弃项:字段并入保留项,并产出 dropped→kept 的 id 映射
+    /// (10-10 review P2 修复的回归锁)。
+    func test_deduplicationMergesFieldsAndProducesIDRemapping() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let kept = RepositoryConfig(
+            id: UUID(),
+            gitURL: "git@github.com:org/api.git",
+            repoName: "api",
+            mrTargetBranches: ["main"],
+            createdAt: now,
+            updatedAt: now
+        )
+        let dropped = RepositoryConfig(
+            id: UUID(),
+            gitURL: "https://github.com/org/api",
+            repoName: "api",
+            defaultBranch: "master",
+            mrTargetBranches: ["main", "dev"],
+            links: [CommonLink(title: "Jenkins", url: "https://j.example.com")],
+            createdAt: now.addingTimeInterval(100),
+            updatedAt: now.addingTimeInterval(100)
+        )
+        let result = RepositoryStore.deduplicationResult(for: [kept, dropped])
+        XCTAssertEqual(result.repositories.count, 1)
+        let survivor = try XCTUnwrap(result.repositories.first)
+        XCTAssertEqual(survivor.id, kept.id)
+        XCTAssertEqual(survivor.defaultBranch, "master", "缺省才回填")
+        XCTAssertEqual(survivor.mrTargetBranches, ["main", "dev"], "保序并集")
+        XCTAssertEqual(survivor.links, dropped.links)
+        XCTAssertEqual(result.idRemapping[dropped.id], kept.id)
+    }
+
+    /// 引用重映射:工作区对被删项的选中/置顶换成保留项并按首现去重;
+    /// sync-states 同工作区双行时保留存活项原行,孤行改挂保留 id
+    /// (10-10 review P2:此前直接摘除引用,工作区白丢仓库)。
+    func test_remappingReferencesAndSyncStates() throws {
+        let keptID = UUID()
+        let droppedID = UUID()
+        let workplace = Workplace(
+            id: UUID(),
+            name: "w",
+            path: "/tmp/w",
+            selectedRepositoryIDs: [droppedID, keptID],
+            pinnedRepositoryIDs: [droppedID],
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        let remappedWorkplaces = RepositoryStore.remappingReferences(
+            from: [workplace],
+            idRemapping: [droppedID: keptID]
+        )
+        XCTAssertEqual(remappedWorkplaces.first?.selectedRepositoryIDs, [keptID])
+        XCTAssertEqual(remappedWorkplaces.first?.pinnedRepositoryIDs, [keptID])
+
+        let workplaceID = UUID()
+        let keptRow = RepositorySyncState(
+            workplaceID: workplaceID, repositoryID: keptID, status: .success, localPath: "/tmp/w/api"
+        )
+        let droppedRow = RepositorySyncState(
+            workplaceID: workplaceID, repositoryID: droppedID, status: .failed, localPath: "/tmp/w/api"
+        )
+        let merged = RepositoryStore.remappingSyncStates(
+            [keptRow, droppedRow],
+            idRemapping: [droppedID: keptID]
+        )
+        XCTAssertEqual(merged.count, 1, "组合键唯一:存活项原行优先,被删项行丢弃")
+        XCTAssertEqual(merged.first?.status, .success)
+
+        let lone = RepositoryStore.remappingSyncStates([droppedRow], idRemapping: [droppedID: keptID])
+        XCTAssertEqual(lone.count, 1)
+        XCTAssertEqual(lone.first?.repositoryID, keptID)
+    }
+
+    /// 建档单写:MR 目标分支/常用链接随 addRepository 一次落盘,返回即实时记录
+    /// (10-10 review P2:此前两步写,第二步失败留下"报失败但记录已存在"死角)。
+    func test_addRepositoryPersistsBranchesAndLinksInSingleWrite() throws {
+        let root = makeTestRootURL()
+        let fileStore = JSONFileStore(rootDirectory: root)
+        let store = RepositoryStore(fileStore: fileStore)
+        let links = [CommonLink(title: "看板", url: "https://b.example.com")]
+
+        let created = try store.addRepository(
+            gitURL: "git@github.com:org/api.git",
+            mrTargetBranches: ["main", "dev"],
+            links: links
+        )
+
+        XCTAssertEqual(store.repositories.count, 1)
+        let stored = try XCTUnwrap(store.repositories.first)
+        XCTAssertEqual(created.id, stored.id)
+        XCTAssertEqual(stored.mrTargetBranches, ["main", "dev"])
+        XCTAssertEqual(stored.links, links)
+
+        let reloaded = RepositoryStore(fileStore: fileStore)
+        XCTAssertEqual(reloaded.repositories.first?.mrTargetBranches, ["main", "dev"])
+        XCTAssertEqual(reloaded.repositories.first?.links, links)
+    }
+
+    /// updateRepository 的 links:nil=保持原值、传值=整体替换(与 mrTargetBranches 同口径)。
+    func test_updateRepositoryLinksNilKeepsExistingValueReplaces() throws {
+        let root = makeTestRootURL()
+        let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
+        let originalLinks = [CommonLink(title: "旧", url: "https://old.example.com")]
+        let created = try store.addRepository(gitURL: "git@github.com:org/api.git", links: originalLinks)
+
+        try store.updateRepository(id: created.id, gitURL: "git@github.com:org/api.git")
+        XCTAssertEqual(store.repositories.first?.links, originalLinks, "不传 links 不得清空")
+
+        let replacement = [CommonLink(title: "新", url: "https://new.example.com")]
+        try store.updateRepository(id: created.id, gitURL: "git@github.com:org/api.git", links: replacement)
+        XCTAssertEqual(store.repositories.first?.links, replacement)
+    }
+
     /// 去重事件序号必须单调递增:根视图用 `.onChange` 观察事件,而清理条数可能
     /// 连续两次相同(1→1),按条数观察第二次不会触发、提示永久丢失。
     func test_applyDeduplicationResultBumpsSequenceWhenCleanupCountRepeats() throws {

@@ -238,7 +238,7 @@ final class JSONFileStoreTests: XCTestCase {
         try fileManager.createDirectory(at: backup, withIntermediateDirectories: true)
         try Data("OLD-A".utf8).write(to: backup.appendingPathComponent("a.json"))
         try Data("NEW-B".utf8).write(to: staging.appendingPathComponent("b.json"))
-        try writeManifest(stagingName: stagingName, fileNames: ["a.json", "b.json"], in: root)
+        try writeManifest(stagingName: stagingName, fileNames: ["a.json", "b.json"], in: root, modificationDate: Date().addingTimeInterval(-30))
 
         JSONFileStore.cleanupStaleStagingDirectories(in: root, olderThan: 0)
 
@@ -271,7 +271,8 @@ final class JSONFileStoreTests: XCTestCase {
         try writeManifest(
             stagingName: stagingName,
             fileNames: ["a.json", "sync-states.json", "c.json"],
-            in: root
+            in: root,
+            modificationDate: Date().addingTimeInterval(-30)
         )
 
         JSONFileStore.cleanupStaleStagingDirectories(in: root, olderThan: 0)
@@ -296,13 +297,49 @@ final class JSONFileStoreTests: XCTestCase {
         try fileManager.createDirectory(at: backup, withIntermediateDirectories: true)
         try Data("OLD-A".utf8).write(to: backup.appendingPathComponent("a.json"))
         try Data("OLD-B".utf8).write(to: backup.appendingPathComponent("b.json"))
-        try writeManifest(stagingName: stagingName, fileNames: ["a.json", "b.json"], in: root)
+        try writeManifest(stagingName: stagingName, fileNames: ["a.json", "b.json"], in: root, modificationDate: Date().addingTimeInterval(-30))
 
         JSONFileStore.cleanupStaleStagingDirectories(in: root, olderThan: 0)
 
         XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("a.json"), encoding: .utf8), "NEW-A")
         XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("b.json"), encoding: .utf8), "NEW-B")
         XCTAssertFalse(fileManager.fileExists(atPath: staging.path))
+    }
+
+    /// 崩溃后用户继续使用、目标文件已被合法重写:陈旧清单在之后的启动里
+    /// 不得把"崩溃之后的新数据"回滚吞掉(10-10 review P1 防线)。
+    func test_startupRecoverySkipsRollbackForFilesRewrittenAfterCrash() throws {
+        let root = makeTestRootURL()
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+
+        // 崩溃发生在 1 小时前(a.json 已被事务提交,backup=OLD-A);
+        // 崩溃后用户继续使用,a.json 于"现在"被合法重写为 POST-CRASH-A。
+        try Data("POST-CRASH-A".utf8).write(to: root.appendingPathComponent("a.json"))
+        try Data("OLD-B".utf8).write(to: root.appendingPathComponent("b.json"))
+        let stagingName = ".ccspace-json-write-\(UUID().uuidString)"
+        let staging = root.appendingPathComponent(stagingName, isDirectory: true)
+        let backup = staging.appendingPathComponent("backup", isDirectory: true)
+        try fileManager.createDirectory(at: backup, withIntermediateDirectories: true)
+        try Data("OLD-A".utf8).write(to: backup.appendingPathComponent("a.json"))
+        try Data("NEW-B".utf8).write(to: staging.appendingPathComponent("b.json"))
+        try writeManifest(
+            stagingName: stagingName,
+            fileNames: ["a.json", "b.json"],
+            in: root,
+            modificationDate: Date().addingTimeInterval(-3600)
+        )
+
+        JSONFileStore.cleanupStaleStagingDirectories(in: root, olderThan: 0)
+
+        // a.json 的 mtime 比清单晚出阈值 → 判为崩溃后重写,跳过换回;
+        // b.json 从未提交,目标保持旧值;残留清单与暂存被前滚清理。
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("a.json"), encoding: .utf8), "POST-CRASH-A")
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("b.json"), encoding: .utf8), "OLD-B")
+        XCTAssertFalse(fileManager.fileExists(atPath: staging.path))
+        let manifests = try fileManager.contentsOfDirectory(atPath: root.path)
+            .filter { $0.hasPrefix(".ccspace-json-txn-") }
+        XCTAssertTrue(manifests.isEmpty)
     }
 
     func test_startupRecoveryLeavesFreshManifestAlone() throws {

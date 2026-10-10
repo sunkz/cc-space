@@ -49,7 +49,8 @@ struct Workplace: Codable, Equatable, Identifiable, Sendable {
         self.isPinned = isPinned
         self.pinnedRepositoryIDs = pinnedRepositoryIDs
         self.isArchived = isArchived
-        self.links = links
+        // links 不变式双路径收口(口径同 RepositoryConfig),见 CommonLinksInput.sanitize。
+        self.links = CommonLinksInput.sanitize(links)
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -64,8 +65,10 @@ struct Workplace: Codable, Equatable, Identifiable, Sendable {
         isPinned = try container.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
         pinnedRepositoryIDs = try container.decodeIfPresent([UUID].self, forKey: .pinnedRepositoryIDs) ?? []
         isArchived = try container.decodeIfPresent(Bool.self, forKey: .isArchived) ?? false
-        // 老数据无 links 字段:解码为空数组,不做迁移。
-        links = try container.decodeIfPresent([CommonLink].self, forKey: .links) ?? []
+        // 老数据无 links 字段:解码为空数组;成员式与解码两条路径共用同一净化。
+        links = CommonLinksInput.sanitize(
+            try container.decodeIfPresent([CommonLink].self, forKey: .links) ?? []
+        )
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         updatedAt = try container.decode(Date.self, forKey: .updatedAt)
     }

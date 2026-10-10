@@ -167,6 +167,11 @@ struct EditRepositorySheetView: View {
         let url = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         // 空地址或改回原地址不重探:onAppear 的探测结果仍对应当前保存的地址。
         guard url.isEmpty == false, url != repository.gitURL else { return }
+        // 旧地址查回的分支名单立即作废:防抖+重探窗口内它已不代表当前 URL,
+        // 列表又不再选中即收起,留着就是"新仓库配置存旧远端分支"的可点窗口
+        // (10-10 review P2 修复;loadRemoteBranchSuggestions 的 stale 保留
+        // 只对**同 URL** 重试成立)。
+        remoteBranchSuggestions = []
         // 旧地址的在途探测(含默认分支回写)一并作废,慢探测迟到不得覆盖新结果。
         probeTask?.cancel()
         probeTask = nil
@@ -243,6 +248,8 @@ struct EditRepositorySheetView: View {
         }.value
         guard Task.isCancelled == false else { return }
         remoteBranchSuggestions = ordered
+        // 探测完成即展开(10-11 用户定案,口径同 AddRepositorySheetView):
+        // "仅聚焦才展开"依赖 @FocusState 的同步读回,数据回写时机不可靠。
         showBranchSuggestions = true
     }
 
@@ -262,14 +269,15 @@ struct EditRepositorySheetView: View {
         let linksChanged = normalizedLinks != repository.links
         do {
             feedback = nil
+            // 地址/分支/链接合并为一次 updateRepository 落盘:此前 updateRepository
+            // 与 updateLinks 两步写,第一步成功、第二步失败会弹"更新仓库失败"
+            // 但 gitURL 实际已改掉,内存与盘半程背离(10-10 review P2 修复)。
             try repositoryStore.updateRepository(
                 id: repository.id,
                 gitURL: trimmedEditingGitURL,
-                mrTargetBranches: branchesChanged ? editingMRBranches : nil
+                mrTargetBranches: branchesChanged ? editingMRBranches : nil,
+                links: linksChanged ? normalizedLinks : nil
             )
-            if linksChanged {
-                try repositoryStore.updateLinks(id: repository.id, links: normalizedLinks)
-            }
             // 换过地址后探测到的默认分支必须随保存落盘:不落盘的话,预览用的
             // 新地址默认分支与 Store 里旧地址的值会长期不一致(MR 目标分支建议
             // 与"当前分支是否默认"都按 Store 值判定)。地址未保存时不写(见

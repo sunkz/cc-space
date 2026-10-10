@@ -128,6 +128,10 @@ struct DiskRefreshService {
             ))
         }
 
+        // 循环内守卫只看"下一个候选开始前";最后一个候选读远端期间才到达的
+        // 取消必须在这里也拦一道,否则取消语义下仍会提交导入(10-10 review 修复)。
+        guard Task.isCancelled == false else { return 0 }
+
         do {
             return try repositoryStore.commitImportedRepositories(
                 discovered: discovered,

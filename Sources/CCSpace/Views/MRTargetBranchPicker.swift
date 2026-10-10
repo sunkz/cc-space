@@ -39,6 +39,11 @@ struct MRTargetBranchPicker: View {
                         showsSuggestions = true
                     }
                 }
+                // 改点建议行取消勾选后,"该分支已在列表中"提示要跟着消失:
+                // 此前只在输入变化时清,列表里把该项取消掉提示仍残留(10-10 review)。
+                .onChange(of: selectedBranches) { _, _ in
+                    showsDuplicateHint = false
+                }
                 .overlay(alignment: .trailing) {
                     if isLoading {
                         ProgressView()
@@ -114,7 +119,9 @@ struct MRTargetBranchPicker: View {
                 }
             }
         }
-        .frame(maxHeight: FormListMetrics.listMaxHeight)
+        // 高度按实际行数贴合(上限 6 行):ScrollView 贪吃,固定 maxHeight 会让
+        // 一两行建议也占满整块 222pt(10-10 review P1 修复)。
+        .frame(maxHeight: FormListMetrics.listHeight(rowCount: suggestions.count))
     }
 
     private func suggestionRow(branch: String) -> some View {
@@ -164,6 +171,10 @@ struct MRTargetBranchPicker: View {
             }
         }
         .buttonStyle(.plain)
+        // 默认分支固定勾选不可切换:此前是"点了 return"的可用按钮,
+        // 卡片 hover 底色暗示可点、VoiceOver 也能激活却全程空转——改真禁用
+        // (灰化本身就是"不可改"的诚实信号,10-10 review 修复)。
+        .disabled(isDefault)
     }
 
     private func addMRBranch() {

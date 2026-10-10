@@ -47,10 +47,29 @@ enum CommonLinksInput {
     }
 
     /// 只收 http/https:这类链接面向浏览器打开(流水线/看板/文档),git 协议地址无意义。
+    /// 用 `URL(string:)`(严格解析)判定可构造性——与消费侧 runOpenCommonLink **同一解析器**:
+    /// 校验过的必能打开;宽松解析(URLComponents 会放行空格/未编码字符)曾让
+    /// "保存成功、点开报无法解析"的错位溜进 review(10-10 修复)。
     static func isValidURL(_ url: String) -> Bool {
         guard url.hasPrefix("http://") || url.hasPrefix("https://"),
-              let components = URLComponents(string: url),
-              let host = components.host, host.isEmpty == false else { return false }
+              // 空格/换行直接拒:新 Foundation 的 URL(string:) 会宽松地
+              // percent-encode 它们,宽松放行等于把"疑似粘贴残缺"的串存进来。
+              url.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
+              let parsed = URL(string: url),
+              let host = parsed.host, host.isEmpty == false else { return false }
         return true
+    }
+
+    /// 存储层不变式收敛点(口径同 `RepositoryConfig.deduplicated`):凡进入
+    /// RepositoryConfig/Workplace 的 links 都过这里——按 id 去重、丢弃非法行、
+    /// 截断到 `maxCount`。手改 JSON、旧版备份导入等旁路由此统一关闸,
+    /// 保证消费侧 `ForEach(links)` 无重复 ID、菜单不超展示上限、
+    /// 无非法 scheme 可经 `NSWorkspace.open` 拉起。
+    static func sanitize(_ links: [CommonLink]) -> [CommonLink] {
+        var seen = Set<UUID>()
+        return links.filter { link in
+            guard isValidURL(link.url), seen.insert(link.id).inserted else { return false }
+            return true
+        }.prefix(maxCount).map { $0 }
     }
 }

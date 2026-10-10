@@ -176,12 +176,13 @@ final class RepositoryWindowContext: ObservableObject {
     }
 }
 
-/// 新增仓库的多步编排:建档 → 按 URL 回查 id → 回填 MR 目标分支 → 取更新后的实时记录。
+/// 新增仓库的编排:一次 `addRepository` 落盘(含 MR 目标分支与常用链接),返回实时记录。
 ///
 /// 原先内联在 AddRepositorySheetView,View 不直接编排 store 的写入序列(AGENTS.md:
-/// 「View 不直接调 git」同一精神)。返回的必须是 update 之后的实时记录——此前上抛的是
-/// updateRepository **之前**查出的快照,"新增后直接编辑"弹窗里 MR 目标分支/默认分支
-/// 全是空值,改动基线也随之失真。按 URL 回查不到新增记录时返回 nil(调用方跳过回调)。
+/// 「View 不直接调 git」同一精神)。此前"建档→按 URL 回查 id→updateRepository 回填"
+/// 三步写:第二步失败留下"UI 报新增失败、记录已存在、重试撞 duplicateURL"的死角,
+/// 回查还依赖裸串相等(传未 trim 值即静默丢分支)。Store 侧 addRepository 单写化
+/// 后一并消解(10-10 review P2 修复)。
 @MainActor
 enum RepositoryAddOrchestrator {
     static func addRepository(
@@ -189,19 +190,7 @@ enum RepositoryAddOrchestrator {
         mrTargetBranches: [String],
         links: [CommonLink] = [],
         store: RepositoryStore
-    ) throws -> RepositoryConfig? {
-        // links 随建档一次写入(与 mrTargetBranches 的"建档后回填"不同,
-        // addRepository 本就收 links,没有第二次落盘的必要)。
-        try store.addRepository(gitURL: gitURL, links: links)
-        let addedID = store.repositories.first(where: { $0.gitURL == gitURL })?.id
-        if let addedID, mrTargetBranches.isEmpty == false {
-            try store.updateRepository(
-                id: addedID,
-                gitURL: gitURL,
-                mrTargetBranches: mrTargetBranches
-            )
-        }
-        guard let addedID else { return nil }
-        return store.repositories.first(where: { $0.id == addedID })
+    ) throws -> RepositoryConfig {
+        try store.addRepository(gitURL: gitURL, mrTargetBranches: mrTargetBranches, links: links)
     }
 }

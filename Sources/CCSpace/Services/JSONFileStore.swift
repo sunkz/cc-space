@@ -26,6 +26,11 @@ struct JSONFileStore: Sendable {
     /// 多文档事务的"意图清单"前缀:rename 开始前落盘,提交完成后删除;
     /// 启动清理据此把崩溃中断的多文件提交回滚(全旧)或前滚(全新)。
     static let transactionManifestPrefix = ".ccspace-json-txn-"
+    /// 陈旧回滚判定阈值:目标文件 mtime 比清单 mtime 晚出该值以上,判为
+    /// "崩溃之后被合法重写",回滚防线跳过换回(见 `recoverInterruptedTransactions`)。
+    /// 崩溃那次提交的 rename 发生在清单写入后毫秒~秒级,而"崩溃后继续用"的
+    /// 合法重写至少以分钟计——120s 足以把两类写入分开。
+    static let staleRestoreMarginSeconds: TimeInterval = 120
     /// 回滚失败时备份被移出暂存目录后使用的前缀。必须与 `stagingDirectoryPrefix` 不同:
     /// 否则下次启动的 `cleanupStaleStagingDirectories` 会因 mtime 超阈值把装着唯一备份
     /// 的目录直接删掉,"可手工取回"就落空了。
@@ -172,10 +177,24 @@ struct JSONFileStore: Sendable {
                 guard fileManager.fileExists(atPath: stagingDirectory.appendingPathComponent(fileName).path) == false else {
                     continue // 该文档未被提交,目标仍是旧值,不动
                 }
+                // 陈旧回滚防线(10-10 review P1 修复):cutoff 只推迟处理,不消灭它——
+                // 崩溃后 10 分钟内重启被跳过、用户继续正常使用数小时,下一次启动
+                // 仍会走到这里,若无条件换回就把"崩溃之后"的合法写入整体吞掉。
+                // rename 保留暂存文件的 mtime(≈清单写入时刻),因此目标 mtime 显著
+                // 晚于清单的,只可能是崩溃后被合法重写:跳过换回/删除,前滚保留新数据。
+                let destinationURL = rootDirectory.appendingPathComponent(fileName)
+                let destinationModified = (try? destinationURL.resourceValues(forKeys: [.contentModificationDateKey]))?
+                    .contentModificationDate ?? .distantPast
+                let rewrittenAfterCrash = destinationModified > modifiedAt.addingTimeInterval(Self.staleRestoreMarginSeconds)
+                if rewrittenAfterCrash {
+                    jsonFileStoreLog.warning(
+                        "event=interrupted_transaction_stale_skip file=\(fileName, privacy: .public)"
+                    )
+                    continue
+                }
                 let backupURL = stagingDirectory
                     .appendingPathComponent("backup", isDirectory: true)
                     .appendingPathComponent(fileName)
-                let destinationURL = rootDirectory.appendingPathComponent(fileName)
                 if fileManager.fileExists(atPath: backupURL.path) {
                     do {
                         try atomicReplace(stagedURL: backupURL, destinationURL: destinationURL)
@@ -287,10 +306,18 @@ struct JSONFileStore: Sendable {
                 try fileManager.copyItem(at: sourceURL, to: destinationURL)
             }
             // 副本内容等同原文件,settings.json 里含 AI API Key,收紧为仅本人可读写。
-            try? fileManager.setAttributes(
-                [.posixPermissions: 0o600],
-                ofItemAtPath: destinationURL.path
-            )
+            // 失败要留痕:静默 `try?` 会让"明文 key 的副本没收紧权限"这件事无迹可读
+            // (口径同 exportBackup,10-10 review 修复)。
+            do {
+                try fileManager.setAttributes(
+                    [.posixPermissions: 0o600],
+                    ofItemAtPath: destinationURL.path
+                )
+            } catch {
+                jsonFileStoreLog.warning(
+                    "event=corrupt_copy_chmod_failed file=\(destinationURL.lastPathComponent, privacy: .public) reason=\(error.localizedDescription, privacy: .public)"
+                )
+            }
         } catch {
             // 两种保全方式均失败:已无更多手段,原文件保持原样,
             // 下次保存仍可能覆写。此处不能 throw(调用方在启动错误路径上),只能留痕。

@@ -1047,7 +1047,13 @@ final class WorkplaceStore: ObservableObject {
         )
 
         let normalizedNewPath = Self.normalizedPath(newPath)
-        guard !workplaces.contains(where: { $0.id != id && Self.normalizedPath($0.path) == normalizedNewPath }) else {
+        // 重复目录检查按大小写归一比较(口径同 WorkplaceEditService.saveWorkplaceEdit):
+        // 默认卷大小写不敏感,仅大小写不同的"改名"实际指向同一目录,
+        // 严格相等会把这种合法操作误报为"与其它工作区重名"(10-10 review 修复)。
+        let lowercasedNewPath = normalizedNewPath.lowercased()
+        guard !workplaces.contains(where: {
+            $0.id != id && Self.normalizedPath($0.path).lowercased() == lowercasedNewPath
+        }) else {
             throw WorkplaceStoreError.duplicatePath
         }
         guard normalizedNewPath == Self.normalizedPath(oldPath) ||

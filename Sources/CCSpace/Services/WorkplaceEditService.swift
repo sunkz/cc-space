@@ -186,8 +186,9 @@ struct WorkplaceEditService {
             updatedWorkplace.selectedRepositoryIDs = selectedRepositoryIDs
             updatedWorkplace.branch = nextBranch
             // nil=保持原链接:非表单调用方(如其他内部流程)不传 links 时不得清空。
+            // 成员赋值不过 Workplace init,净化在此显式收口。
             if let links {
-                updatedWorkplace.links = links
+                updatedWorkplace.links = CommonLinksInput.sanitize(links)
             }
             updatedWorkplace.updatedAt = .now
 

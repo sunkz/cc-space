@@ -275,7 +275,10 @@ enum RootSplitWorkplaceActions {
             // 浏览器打开即成功,无需 toast;失败由协调器弹错误反馈(同"打开仓库主页")。
             successFeedback: { nil },
             operation: {
-                guard let url = URL(string: link.url) else {
+                // scheme 复核(纵深防御):配置可能来自手改 JSON/旧版数据,
+                // 只放行 http(s),不给任意 scheme 经 NSWorkspace 拉起应用的通道。
+                guard CommonLinksInput.isValidURL(link.url),
+                      let url = URL(string: link.url) else {
                     throw CommonLinkError.invalidURL(link.url)
                 }
                 try openInBrowser(url)

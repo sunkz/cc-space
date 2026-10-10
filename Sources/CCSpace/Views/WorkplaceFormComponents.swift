@@ -80,13 +80,18 @@ enum FormListMetrics {
     static let maxVisibleRows = 6
     static let listMaxHeight: CGFloat =
         CGFloat(maxVisibleRows) * rowHeight + CGFloat(maxVisibleRows - 1) * rowSpacing
+
+    /// 按实际行数取可视高度:ScrollView 在滚动轴上是贪心的,只给 `maxHeight(222)`
+    /// 会让 1 行的列表也恒占 222pt,把常用链接重新推出弹窗(10-10 review P1 修复)。
+    /// 行数不足 6 时高度贴合内容;超过则封顶 6 行、内部滚动。
+    static func listHeight(rowCount: Int) -> CGFloat {
+        guard rowCount > 0 else { return 0 }
+        let content = CGFloat(rowCount) * rowHeight + CGFloat(rowCount - 1) * rowSpacing
+        return min(content, listMaxHeight)
+    }
 }
 
 struct WorkplaceRepositorySelectionSection: View {
-    /// 仓库列表可视区上限:6 行(见 `FormListMetrics`)。列表不设上限时,
-    /// 仓库多会把下方"常用链接"整块推出可视区——定高内滚后表单骨架高度只随区块数变化。
-    static let listMaxHeight: CGFloat = FormListMetrics.listMaxHeight
-
     let subtitle: String
     let repositories: [WorkplaceSelectableRepository]
     let selectedIDs: Set<UUID>
@@ -95,22 +100,20 @@ struct WorkplaceRepositorySelectionSection: View {
     let isDisabled: Bool
     let onToggle: (UUID) -> Void
 
-    private var presentationState: WorkplaceRepositorySelectionPresentationState {
-        WorkplaceRepositorySelectionPresentationState(
+    var body: some View {
+        // 展示状态与排序在每遍 body 求值只做一次:此前 `presentationState`/
+        // `displayedRepositories` 是计算属性、body 内各访问多次,搜索框每按一键
+        // 触发多遍 filter + prioritizeSelected(localizedStandardCompare)
+        // (10-10 review P2,对齐"body 顶部求值一次沿渲染路径下发"的仓库惯例)。
+        let state = WorkplaceRepositorySelectionPresentationState(
             repositories: repositories,
             searchText: searchText,
             emptySubtitle: emptySubtitle
         )
-    }
-
-    private var displayedRepositories: [WorkplaceSelectableRepository] {
-        WorkplaceSelectableRepositoryOrdering.prioritizeSelected(
-            repositories: presentationState.filteredRepositories,
+        let displayed = WorkplaceSelectableRepositoryOrdering.prioritizeSelected(
+            repositories: state.filteredRepositories,
             selectedIDs: selectedIDs
         )
-    }
-
-    var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             CCSpaceSectionTitle(
                 title: "选择仓库",
@@ -126,19 +129,19 @@ struct WorkplaceRepositorySelectionSection: View {
                     .disabled(isDisabled)
             }
 
-            if presentationState.filteredRepositories.isEmpty {
+            if state.filteredRepositories.isEmpty {
                 CCSpaceEmptyStateCard(
-                    title: presentationState.emptyTitle,
-                    subtitle: presentationState.emptySubtitle,
+                    title: state.emptyTitle,
+                    subtitle: state.emptySubtitle,
                     systemImage: searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "shippingbox" : "magnifyingglass",
                     tint: .accentColor
                 ) { EmptyView() }
             } else {
                 // 逐行卡片(线上 release 版样式,10-10 用户定案回退):行=CCSpaceInteractiveCard,
-                // 行距 6,无外层描边容器;定高 6 行内滚,常用链接不被推出弹窗。
+                // 行距 6,无外层描边容器;可视区最多 6 行内滚,高度按实际行数贴合。
                 ScrollView {
                     LazyVStack(spacing: FormListMetrics.rowSpacing) {
-                        ForEach(displayedRepositories) { repository in
+                        ForEach(displayed) { repository in
                             WorkplaceSelectableRepositoryRow(
                                 repository: repository,
                                 isSelected: selectedIDs.contains(repository.id),
@@ -150,7 +153,7 @@ struct WorkplaceRepositorySelectionSection: View {
                         }
                     }
                 }
-                .frame(maxHeight: Self.listMaxHeight)
+                .frame(maxHeight: FormListMetrics.listHeight(rowCount: displayed.count))
             }
         }
         .ccspacePanel(background: .clear, cornerRadius: 12, padding: 12, borderOpacity: 0.03)
@@ -298,7 +301,8 @@ private struct WorkplaceSelectableRepositoryRow: View {
         .buttonStyle(.plain)
         .ccspaceQuickHelp(repository.url)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(repository.name)
+        // 地址只剩 hover 一条路径后,读屏也要能取到(10-10 review 修复)。
+        .accessibilityLabel("\(repository.name)，地址 \(repository.url)")
         .accessibilityValue(isSelected ? "已选中" : "未选中")
         .accessibilityHint("切换仓库选择")
     }

@@ -90,6 +90,56 @@ private final class FailingCreateDirectoryFileSystemService: FileSystemServicing
 
 @MainActor
 final class WorkplaceEditServiceTests: XCTestCase {
+    /// saveWorkplaceEdit 的 links 语义回归锁(10-10 review P2:删仓库等内部流程
+    /// 依赖"不传 links=保持原值",一旦默认值语义漂移会静默清空用户链接):
+    /// nil 保持、传值整体替换、非法项经净化丢弃。
+    func test_saveWorkplaceEditLinksNilPreservesAndValueReplacesSanitized() async throws {
+        let stores = try makeServiceStores()
+        let repositoryStore = stores.repositoryStore
+        let workplaceStore = stores.workplaceStore
+        let workspaceRoot = stores.workspaceRoot
+
+        try repositoryStore.addRepository(gitURL: "git@github.com:org/api.git")
+        let apiRepository = try XCTUnwrap(repositoryStore.repositories.first)
+        let originalLinks = [CommonLink(title: "旧", url: "https://old.example.com")]
+        let workplace = try workplaceStore.createWorkplace(
+            name: "links-w",
+            rootPath: workspaceRoot.path,
+            selectedRepositories: [apiRepository],
+            links: originalLinks
+        )
+
+        let gitService = WorkplaceEditGitServiceSpy()
+        let service = WorkplaceEditService(
+            workplaceStore: workplaceStore,
+            repositoryStore: repositoryStore,
+            syncCoordinator: SyncCoordinator(gitService: gitService),
+            gitService: gitService
+        )
+
+        try await service.saveWorkplaceEdit(
+            workplaceID: workplace.id,
+            name: "links-w",
+            selectedRepositoryIDs: [apiRepository.id],
+            branch: nil
+        )
+        var stored = try XCTUnwrap(workplaceStore.workplaces.first { $0.id == workplace.id })
+        XCTAssertEqual(stored.links, originalLinks, "不传 links 不得清空")
+
+        try await service.saveWorkplaceEdit(
+            workplaceID: workplace.id,
+            name: "links-w",
+            selectedRepositoryIDs: [apiRepository.id],
+            branch: nil,
+            links: [
+                CommonLink(title: "新", url: "https://new.example.com"),
+                CommonLink(title: "坏", url: "file:///tmp/evil.command"),
+            ]
+        )
+        stored = try XCTUnwrap(workplaceStore.workplaces.first { $0.id == workplace.id })
+        XCTAssertEqual(stored.links.map(\.title), ["新"], "非法 scheme 经净化丢弃")
+    }
+
     func test_saveWorkplaceEditRenamesUpdatesBranchAndClonesAddedRepository() async throws {
         let stores = try makeServiceStores()
         let repositoryStore = stores.repositoryStore

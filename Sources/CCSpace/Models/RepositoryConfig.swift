@@ -26,7 +26,8 @@ struct RepositoryConfig: Equatable, Identifiable, Sendable, Codable {
         self.repoName = repoName
         self.defaultBranch = defaultBranch
         self.mrTargetBranches = Self.deduplicated(mrTargetBranches)
-        self.links = links
+        // links 不变式(去重/合法性/上限)双路径收口,见 CommonLinksInput.sanitize。
+        self.links = CommonLinksInput.sanitize(links)
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -42,8 +43,10 @@ struct RepositoryConfig: Equatable, Identifiable, Sendable, Codable {
         mrTargetBranches = Self.deduplicated(
             try container.decodeIfPresent([String].self, forKey: .mrTargetBranches) ?? []
         )
-        // 老配置/老备份无 links 字段:解码为空数组,不做迁移。
-        links = try container.decodeIfPresent([CommonLink].self, forKey: .links) ?? []
+        // 老配置无 links 字段:解码为空数组;成员式与解码两条路径共用同一净化。
+        links = CommonLinksInput.sanitize(
+            try container.decodeIfPresent([CommonLink].self, forKey: .links) ?? []
+        )
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         updatedAt = try container.decode(Date.self, forKey: .updatedAt)
     }

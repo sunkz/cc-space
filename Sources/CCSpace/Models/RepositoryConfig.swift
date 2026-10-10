@@ -6,6 +6,8 @@ struct RepositoryConfig: Equatable, Identifiable, Sendable, Codable {
     var repoName: String
     var defaultBranch: String?
     var mrTargetBranches: [String]
+    /// 仓库级常用链接(流水线/看板/文档等),设置弹窗录入,工作区仓库行 ⋯ 菜单打开。
+    var links: [CommonLink]
     var createdAt: Date
     var updatedAt: Date
 
@@ -15,6 +17,7 @@ struct RepositoryConfig: Equatable, Identifiable, Sendable, Codable {
         repoName: String,
         defaultBranch: String? = nil,
         mrTargetBranches: [String] = [],
+        links: [CommonLink] = [],
         createdAt: Date,
         updatedAt: Date
     ) {
@@ -23,6 +26,7 @@ struct RepositoryConfig: Equatable, Identifiable, Sendable, Codable {
         self.repoName = repoName
         self.defaultBranch = defaultBranch
         self.mrTargetBranches = Self.deduplicated(mrTargetBranches)
+        self.links = links
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -38,6 +42,8 @@ struct RepositoryConfig: Equatable, Identifiable, Sendable, Codable {
         mrTargetBranches = Self.deduplicated(
             try container.decodeIfPresent([String].self, forKey: .mrTargetBranches) ?? []
         )
+        // 老配置/老备份无 links 字段:解码为空数组,不做迁移。
+        links = try container.decodeIfPresent([CommonLink].self, forKey: .links) ?? []
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         updatedAt = try container.decode(Date.self, forKey: .updatedAt)
     }

@@ -9,6 +9,7 @@ struct AddRepositorySheetView: View {
     @State private var gitURL: String = ""
     @State private var editingMRBranches: [String] = []
     @State private var mrBranchInput: String = ""
+    @State private var linkRows: [CommonLink] = []
     @State private var feedback: CCSpaceFeedback?
     @State private var isAdding = false
     /// 本轮提交已发起的同步闸:add() 内部没有任何 await,isAdding 在一次同步执行里
@@ -33,7 +34,9 @@ struct AddRepositorySheetView: View {
     private var canSubmit: Bool {
         // 远端分支探测只用于预填 MR 目标分支,不阻塞新增(离线/网络慢时应仍可提交)。
         // !hasSubmitted 是不依赖 await 的重入闸,口径见 add() 注释。
-        RepositoryAddPresentationState(gitURL: gitURL).canSubmit && !isAdding && !hasSubmitted
+        RepositoryAddPresentationState(gitURL: gitURL).canSubmit
+            && !isAdding && !hasSubmitted
+            && CommonLinksInput.hasBlockingError(rows: linkRows) == false
     }
 
     var body: some View {
@@ -97,6 +100,19 @@ struct AddRepositorySheetView: View {
                         )
                     }
                     .ccspacePanel(background: .clear, cornerRadius: 12, padding: 12, borderOpacity: 0.03)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        CCSpaceSectionTitle(
+                            title: "常用链接",
+                            subtitle: "选填。流水线 / 看板 / 文档等常用地址，保存后可在工作区仓库行菜单中打开",
+                            titleFont: .title3,
+                            titleWeight: .semibold,
+                            titleColor: .primary
+                        )
+
+                        CommonLinksEditor(rows: $linkRows, isDisabled: isAdding)
+                    }
+                    .ccspacePanel(background: .clear, cornerRadius: 12, padding: 12, borderOpacity: 0.03)
                 }
                 .padding([.top, .horizontal], 16)
             }
@@ -136,7 +152,7 @@ struct AddRepositorySheetView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
         }
-        .frame(width: 500, height: 450)
+        .frame(width: 500, height: 520)
         // 与主窗口一致:成功/信息类提示自动消失,错误类保留且可手动关闭。
         .ccspaceAutoDismissFeedback($feedback)
         .onAppear {
@@ -231,6 +247,7 @@ struct AddRepositorySheetView: View {
             let freshRepository = try RepositoryAddOrchestrator.addRepository(
                 gitURL: trimmed,
                 mrTargetBranches: editingMRBranches,
+                links: CommonLinksInput.normalizedForSave(rows: linkRows),
                 store: repositoryStore
             )
             if let freshRepository {

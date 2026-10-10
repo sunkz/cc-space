@@ -4,12 +4,13 @@ struct WorkplaceEditView: View {
     let workplace: Workplace
     let repositories: [RepositoryConfig]
     let syncStates: [RepositorySyncState]
-    let onSave: (String, [UUID], String?, WorkplaceOperationProgressHandler?) async throws -> Void
+    var onSave: (String, [UUID], String?, [CommonLink], WorkplaceOperationProgressHandler?) async throws -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var selectedRepositoryIDs: Set<UUID>
     @State private var name: String
     @State private var branch: String
+    @State private var linkRows: [CommonLink]
     @State private var isSaving = false
     @State private var feedback: CCSpaceFeedback?
     @State private var repositorySearchText = ""
@@ -27,6 +28,8 @@ struct WorkplaceEditView: View {
             branch: branch,
             originalSelectedRepositoryIDs: workplace.selectedRepositoryIDs,
             selectedRepositoryIDs: selectedRepositoryIDs,
+            originalLinks: workplace.links,
+            editingLinks: linkRows,
             isSaving: isSaving
         )
     }
@@ -43,8 +46,8 @@ struct WorkplaceEditView: View {
         workplace: Workplace,
         repositories: [RepositoryConfig],
         syncStates: [RepositorySyncState] = [],
-        onSave: @escaping (String, [UUID], String?, WorkplaceOperationProgressHandler?) async throws -> Void = {
-            _, _, _, _ in
+        onSave: @escaping (String, [UUID], String?, [CommonLink], WorkplaceOperationProgressHandler?) async throws -> Void = {
+            _, _, _, _, _ in
         }
     ) {
         self.workplace = workplace
@@ -54,6 +57,7 @@ struct WorkplaceEditView: View {
         _selectedRepositoryIDs = State(initialValue: Set(workplace.selectedRepositoryIDs))
         _name = State(initialValue: workplace.name)
         _branch = State(initialValue: workplace.branch ?? "")
+        _linkRows = State(initialValue: workplace.links)
     }
 
     private var orderedSelectedRepositoryIDs: [UUID] {
@@ -93,6 +97,7 @@ struct WorkplaceEditView: View {
                 name,
                 orderedSelectedRepositoryIDs,
                 normalizedBranch,
+                CommonLinksInput.normalizedForSave(rows: linkRows),
                 { progress in
                     operationProgress = progress
                 }
@@ -136,6 +141,19 @@ struct WorkplaceEditView: View {
                         isDisabled: isSaving,
                         onToggle: toggleSelection
                     )
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        CCSpaceSectionTitle(
+                            title: "常用链接",
+                            subtitle: "需求文档 / 环境地址等本工作区常用链接，保存后可在详情页工具栏打开",
+                            titleFont: .title3,
+                            titleWeight: .semibold,
+                            titleColor: .primary
+                        )
+
+                        CommonLinksEditor(rows: $linkRows, isDisabled: isSaving)
+                    }
+                    .ccspacePanel(background: .clear, cornerRadius: 12, padding: 12, borderOpacity: 0.03)
 
                     if let removalWarningFeedback = presentationState.removalWarningFeedback {
                         CCSpaceFeedbackBanner(feedback: removalWarningFeedback)
@@ -181,7 +199,8 @@ struct WorkplaceEditView: View {
                 }
             )
         }
-        .frame(minWidth: 440, idealWidth: 520, minHeight: 360, idealHeight: 460)
+        // 弹窗尺寸固定 520×550(10-10 用户定案):与创建工作区同值,宽高均不可拖拽。
+        .frame(width: 520, height: 550)
         .navigationTitle("编辑工作区")
         .ccspaceAutoDismissFeedback($feedback)
         .interactiveDismissDisabled(isSaving)

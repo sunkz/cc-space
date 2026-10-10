@@ -11,6 +11,7 @@ struct WorkplaceCreateView: View {
     @State private var name: String
     @State private var branch: String
     @State private var selectedIDs: Set<UUID>
+    @State private var linkRows: [CommonLink] = []
     @State private var feedback: CCSpaceFeedback?
     @State private var isSubmitting = false
     @State private var repositorySearchText = ""
@@ -48,6 +49,11 @@ struct WorkplaceCreateView: View {
         )
     }
 
+    /// 表单总闸:基础校验之外,非法链接行也阻塞提交(行内已有橙字提示)。
+    private var canSubmit: Bool {
+        presentationState.canSubmit && CommonLinksInput.hasBlockingError(rows: linkRows) == false
+    }
+
     private var repositoryOptions: [WorkplaceSelectableRepository] {
         WorkplaceSelectableRepositoryFactory.createOptions(
             repositories: repositoryStore.repositories
@@ -56,7 +62,7 @@ struct WorkplaceCreateView: View {
 
     @MainActor
     private func submitCreate() async {
-        guard presentationState.canSubmit else { return }
+        guard canSubmit else { return }
 
         isSubmitting = true
         feedback = nil
@@ -75,6 +81,7 @@ struct WorkplaceCreateView: View {
                 rootPath: settingsStore.settings.workplaceRootPath,
                 selectedRepositoryIDs: sortedIDs,
                 branch: branch,
+                links: CommonLinksInput.normalizedForSave(rows: linkRows),
                 progressHandler: { progress in
                     operationProgress = progress
                 }
@@ -123,6 +130,19 @@ struct WorkplaceCreateView: View {
                         onToggle: toggleSelection
                     )
 
+                    VStack(alignment: .leading, spacing: 8) {
+                        CCSpaceSectionTitle(
+                            title: "常用链接",
+                            subtitle: "选填。需求文档 / 环境地址等本工作区常用链接，保存后可在详情页工具栏打开",
+                            titleFont: .title3,
+                            titleWeight: .semibold,
+                            titleColor: .primary
+                        )
+
+                        CommonLinksEditor(rows: $linkRows, isDisabled: isSubmitting)
+                    }
+                    .ccspacePanel(background: .clear, cornerRadius: 12, padding: 12, borderOpacity: 0.03)
+
                     if let branchStrategyFeedback = presentationState.branchStrategyFeedback {
                         CCSpaceFeedbackBanner(feedback: branchStrategyFeedback)
                     }
@@ -142,7 +162,7 @@ struct WorkplaceCreateView: View {
                 submitTitle: "创建",
                 submittingTitle: "创建中",
                 isSubmitting: isSubmitting,
-                isSubmitDisabled: !presentationState.canSubmit,
+                isSubmitDisabled: !canSubmit,
                 progress: operationProgress,
                 // 提交中保留取消:onCancel 里走 submitTask?.cancel() 的清理通道,
                 // 禁用反而让用户对着 interactiveDismissDisabled 的弹窗干等。
@@ -163,7 +183,9 @@ struct WorkplaceCreateView: View {
                 }
             )
         }
-        .frame(minWidth: 440, idealWidth: 520, minHeight: 360, idealHeight: 460)
+        // 弹窗尺寸固定 520×550(10-10 用户定案):与编辑工作区同值,宽高均不可拖拽;
+        // 内容超高走外层 ScrollView。
+        .frame(width: 520, height: 550)
         .navigationTitle("创建工作区")
         .ccspaceAutoDismissFeedback($feedback)
         .interactiveDismissDisabled(isSubmitting)

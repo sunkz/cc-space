@@ -30,10 +30,9 @@ struct MRTargetBranchPicker: View {
                 .onChange(of: inputFocused) { _, focused in
                     showsSuggestions = focused && !suggestions.isEmpty
                 }
-                // 选中一条后 suggestionsList 会主动收起(避免遮挡后续字段);
-                // macOS 上点建议行不会让 TextField 失焦,若只靠焦点变化重开,
-                // 输入框保持聚焦期间列表永远不再出现,连选第二条只能先点别处。
-                // 聚焦状态下的输入变化作为重开路径:清空/改动搜索词即重新浮出。
+                // 聚焦状态下的输入变化保持/重开浮层:失焦收起是主通道,
+                // 这里兜住"失焦后重新聚焦但 focused 值未翻转"等边角(10-10 起
+                // 选中不再收起,原先为"选中后列表不再出现"打的补丁已简化)。
                 .onChange(of: inputText) { _, _ in
                     showsDuplicateHint = false
                     if inputFocused {
@@ -106,22 +105,16 @@ struct MRTargetBranchPicker: View {
     }
 
     private func suggestionsList(_ suggestions: [String]) -> some View {
+        // 逐行卡片(与工作区弹窗仓库列表统一,10-10 定案):行=CCSpaceInteractiveCard,
+        // 行距 6,无外层描边容器;可视区最多 6 行(FormListMetrics),超出内滚。
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
+            LazyVStack(alignment: .leading, spacing: FormListMetrics.rowSpacing) {
                 ForEach(suggestions, id: \.self) { branch in
                     suggestionRow(branch: branch)
                 }
             }
-            .padding(4)
         }
-        .frame(maxHeight: 250)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(Color.primary.opacity(0.06))
-        )
-        .shadow(color: Color.black.opacity(0.08), radius: 8, y: 4)
+        .frame(maxHeight: FormListMetrics.listMaxHeight)
     }
 
     private func suggestionRow(branch: String) -> some View {
@@ -134,45 +127,41 @@ struct MRTargetBranchPicker: View {
                 selectedBranches.removeAll { $0 == branch }
             } else {
                 selectedBranches.append(branch)
-                // 选中后立即收起建议浮层:此前只在焦点变化时更新,选中后列表一直
-                // 浮在表单上方遮挡后续字段。
-                showsSuggestions = false
+                // 选中后**不再收起列表**(10-10 改):旧逻辑是"浮层遮挡后续字段"时代的产物,
+                // 现列表为面板内定高滚动区、不遮挡任何东西;MR 目标分支本是多选场景,
+                // 选一条就收起逼用户重新聚焦才能选第二条。收起时机只保留失焦(onChange focused)。
             }
         } label: {
-            HStack(spacing: 0) {
-                Image(systemName: isSelected || isDefault ? "checkmark.circle.fill" : "circle")
-                    .font(.body)
-                    .foregroundStyle(isSelected || isDefault ? Color.accentColor : .secondary)
-                    .padding(.leading, 10)
-                    .padding(.trailing, 8)
+            // 逐行卡片(与工作区弹窗仓库行同款度量):选中/hover 底色由
+            // CCSpaceInteractiveCard 自带,不再手画背景。
+            CCSpaceInteractiveCard(selected: isSelected || isDefault) {
+                HStack(spacing: 8) {
+                    Image(systemName: isSelected || isDefault ? "checkmark.circle.fill" : "circle")
+                        .font(.body)
+                        .foregroundStyle(isSelected || isDefault ? Color.accentColor : .secondary)
 
-                Text(branch)
-                    .font(.body)
-                    .foregroundStyle(Color.primary)
+                    Text(branch)
+                        .font(.body.weight(.medium))
+                        .foregroundStyle(Color.primary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
 
-                Spacer(minLength: 8)
+                    Spacer(minLength: 8)
 
-                if isDefault {
-                    HStack(spacing: 3) {
-                        Image(systemName: "star.fill")
-                            .font(.system(size: 8))
-                        Text("默认")
-                            .font(.caption2)
+                    if isDefault {
+                        HStack(spacing: 3) {
+                            Image(systemName: "star.fill")
+                                .font(.system(size: 8))
+                            Text("默认")
+                                .font(.caption2)
+                        }
+                        .foregroundStyle(.secondary.opacity(0.7))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(Color.primary.opacity(0.04), in: Capsule())
                     }
-                    .foregroundStyle(.secondary.opacity(0.7))
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2)
-                    .background(Color.primary.opacity(0.04), in: Capsule())
-                    .padding(.trailing, 8)
                 }
             }
-            .padding(.vertical, 6)
-            .padding(.leading, 4)
-            .contentShape(Rectangle())
-            .background(
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(isSelected || isDefault ? Color.accentColor.opacity(0.08) : Color.clear)
-            )
         }
         .buttonStyle(.plain)
     }

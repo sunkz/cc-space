@@ -71,7 +71,22 @@ struct WorkplaceFormFieldsSection: View {
     }
 }
 
+/// 创建/编辑弹窗列表区的共享度量(10-10 定案):可视区**最多展示 6 行**,超出内滚。
+/// 行样式=线上 release 版工作区弹窗的逐行 `CCSpaceInteractiveCard`(padding 8,body 单行
+/// → 卡高 32,行距 6);仓库选择列表与 MR 目标分支建议列表共用同款。
+enum FormListMetrics {
+    static let rowHeight: CGFloat = 32
+    static let rowSpacing: CGFloat = 6
+    static let maxVisibleRows = 6
+    static let listMaxHeight: CGFloat =
+        CGFloat(maxVisibleRows) * rowHeight + CGFloat(maxVisibleRows - 1) * rowSpacing
+}
+
 struct WorkplaceRepositorySelectionSection: View {
+    /// 仓库列表可视区上限:6 行(见 `FormListMetrics`)。列表不设上限时,
+    /// 仓库多会把下方"常用链接"整块推出可视区——定高内滚后表单骨架高度只随区块数变化。
+    static let listMaxHeight: CGFloat = FormListMetrics.listMaxHeight
+
     let subtitle: String
     let repositories: [WorkplaceSelectableRepository]
     let selectedIDs: Set<UUID>
@@ -119,18 +134,23 @@ struct WorkplaceRepositorySelectionSection: View {
                     tint: .accentColor
                 ) { EmptyView() }
             } else {
-                LazyVStack(spacing: 6) {
-                    ForEach(displayedRepositories) { repository in
-                        WorkplaceSelectableRepositoryRow(
-                            repository: repository,
-                            isSelected: selectedIDs.contains(repository.id),
-                            onToggle: {
-                                onToggle(repository.id)
-                            }
-                        )
-                        .disabled(isDisabled)
+                // 逐行卡片(线上 release 版样式,10-10 用户定案回退):行=CCSpaceInteractiveCard,
+                // 行距 6,无外层描边容器;定高 6 行内滚,常用链接不被推出弹窗。
+                ScrollView {
+                    LazyVStack(spacing: FormListMetrics.rowSpacing) {
+                        ForEach(displayedRepositories) { repository in
+                            WorkplaceSelectableRepositoryRow(
+                                repository: repository,
+                                isSelected: selectedIDs.contains(repository.id),
+                                onToggle: {
+                                    onToggle(repository.id)
+                                }
+                            )
+                            .disabled(isDisabled)
+                        }
                     }
                 }
+                .frame(maxHeight: Self.listMaxHeight)
             }
         }
         .ccspacePanel(background: .clear, cornerRadius: 12, padding: 12, borderOpacity: 0.03)
@@ -250,6 +270,9 @@ private struct WorkplaceFormProgressPanel: View {
     }
 }
 
+/// 仓库选择行:线上 release 版样式——`CCSpaceInteractiveCard` 逐行卡片
+/// (选中 accent 淡底/hover 浅灰由卡片自带),单行仓库名 body 半粗。
+/// 完整远端地址收进 ccspaceQuickHelp 悬浮提示(10-10 定案),不占副标题行。
 private struct WorkplaceSelectableRepositoryRow: View {
     let repository: WorkplaceSelectableRepository
     let isSelected: Bool
@@ -263,21 +286,17 @@ private struct WorkplaceSelectableRepositoryRow: View {
                         .font(.body)
                         .foregroundStyle(isSelected ? Color.accentColor : .secondary)
 
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(repository.name)
-                            .font(.body.weight(.medium))
-                        Text(repository.url)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
+                    Text(repository.name)
+                        .font(.body.weight(.medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
 
                     Spacer()
                 }
             }
         }
         .buttonStyle(.plain)
-        .contentShape(Rectangle())
+        .ccspaceQuickHelp(repository.url)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(repository.name)
         .accessibilityValue(isSelected ? "已选中" : "未选中")

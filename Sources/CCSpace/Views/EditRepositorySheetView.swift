@@ -16,6 +16,7 @@ struct EditRepositorySheetView: View {
     @State private var editingGitURL: String = ""
     @State private var editingMRBranches: [String] = []
     @State private var mrBranchInput: String = ""
+    @State private var editingLinks: [CommonLink] = []
     @State private var feedback: CCSpaceFeedback?
     @State private var effectiveDefaultBranch: String?
     @State private var remoteBranchSuggestions: [String] = []
@@ -33,7 +34,8 @@ struct EditRepositorySheetView: View {
             repository: repository,
             editingRepositoryID: repository.id,
             editingGitURL: editingGitURL,
-            editingMRBranches: editingMRBranches
+            editingMRBranches: editingMRBranches,
+            editingLinks: editingLinks
         ).canSubmit
     }
 
@@ -83,6 +85,19 @@ struct EditRepositorySheetView: View {
                         )
                     }
                     .ccspacePanel(background: .clear, cornerRadius: 12, padding: 12, borderOpacity: 0.03)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        CCSpaceSectionTitle(
+                            title: "常用链接",
+                            subtitle: "流水线 / 看板 / 文档等常用地址，保存后可在工作区仓库行菜单中打开",
+                            titleFont: .title3,
+                            titleWeight: .semibold,
+                            titleColor: .primary
+                        )
+
+                        CommonLinksEditor(rows: $editingLinks, isDisabled: false)
+                    }
+                    .ccspacePanel(background: .clear, cornerRadius: 12, padding: 12, borderOpacity: 0.03)
                 }
                 .padding([.top, .horizontal], 16)
             }
@@ -112,12 +127,13 @@ struct EditRepositorySheetView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
         }
-        .frame(width: 500, height: 490)
+        .frame(width: 500, height: 560)
         // 与主窗口一致:成功/信息类提示自动消失,错误类保留且可手动关闭。
         .ccspaceAutoDismissFeedback($feedback)
         .onAppear {
             editingGitURL = repository.gitURL
             effectiveDefaultBranch = repository.defaultBranch
+            editingLinks = repository.links
             if repository.mrTargetBranches.isEmpty, let defaultBranch = repository.defaultBranch {
                 editingMRBranches = [defaultBranch]
             } else {
@@ -242,6 +258,8 @@ struct EditRepositorySheetView: View {
     private func save() {
         let trimmedEditingGitURL = editingGitURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let branchesChanged = editingMRBranches != repository.mrTargetBranches
+        let normalizedLinks = CommonLinksInput.normalizedForSave(rows: editingLinks)
+        let linksChanged = normalizedLinks != repository.links
         do {
             feedback = nil
             try repositoryStore.updateRepository(
@@ -249,6 +267,9 @@ struct EditRepositorySheetView: View {
                 gitURL: trimmedEditingGitURL,
                 mrTargetBranches: branchesChanged ? editingMRBranches : nil
             )
+            if linksChanged {
+                try repositoryStore.updateLinks(id: repository.id, links: normalizedLinks)
+            }
             // 换过地址后探测到的默认分支必须随保存落盘:不落盘的话,预览用的
             // 新地址默认分支与 Store 里旧地址的值会长期不一致(MR 目标分支建议
             // 与"当前分支是否默认"都按 Store 值判定)。地址未保存时不写(见

@@ -260,4 +260,37 @@ enum RootSplitWorkplaceActions {
             try openInBrowser(await resolveMergeRequestURL())
         }
     }
+
+    /// 打开常用链接(工作区级工具栏 / 仓库行「常用链接」子菜单)。
+    /// 链接在录入侧已校验过 http(s),这里只兜 URL 构造与浏览器拉起失败,
+    /// 纯打开动作不改 git 状态:无 Push、不触发分支快照重载。
+    @MainActor
+    static func runOpenCommonLink(
+        coordinator: WorkplaceDetailActionCoordinator,
+        link: CommonLink,
+        openInBrowser: @escaping @MainActor (URL) throws -> Void
+    ) {
+        coordinator.run(
+            actionName: "打开链接",
+            // 浏览器打开即成功,无需 toast;失败由协调器弹错误反馈(同"打开仓库主页")。
+            successFeedback: { nil },
+            operation: {
+                guard let url = URL(string: link.url) else {
+                    throw CommonLinkError.invalidURL(link.url)
+                }
+                try openInBrowser(url)
+            }
+        )
+    }
+}
+
+enum CommonLinkError: LocalizedError {
+    case invalidURL(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidURL(let raw):
+            return "链接地址无法解析：\(raw)"
+        }
+    }
 }

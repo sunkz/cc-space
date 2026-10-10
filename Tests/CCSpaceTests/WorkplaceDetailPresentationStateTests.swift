@@ -338,6 +338,7 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
                 onMergeRepositoryDefaultBranchIntoCurrent: { _, _ in },
                 onCreateMergeRequest: { _, _, _ in },
                 onCreateMergeRequestForBranch: { _, _, _ in },
+                onOpenCommonLink: { _ in },
                 onOpenRepositoryWeb: { _, _ in },
                 onDeleteRepository: { _, _ in },
                 onTogglePinnedRepository: { _ in },

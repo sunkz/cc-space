@@ -356,7 +356,13 @@ final class WorkplaceStore: ObservableObject {
         try persistWorkplaces(updatedWorkplaces)
     }
 
-    func createWorkplace(name: String, rootPath: String, selectedRepositories: [RepositoryConfig], branch: String? = nil) throws
+    func createWorkplace(
+        name: String,
+        rootPath: String,
+        selectedRepositories: [RepositoryConfig],
+        branch: String? = nil,
+        links: [CommonLink] = []
+    ) throws
         -> Workplace
     {
         let trimmedRootPath = rootPath.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -384,6 +390,7 @@ final class WorkplaceStore: ObservableObject {
             path: path,
             selectedRepositoryIDs: selectedRepositories.map(\.id),
             branch: branch,
+            links: links,
             createdAt: now,
             updatedAt: now
         )

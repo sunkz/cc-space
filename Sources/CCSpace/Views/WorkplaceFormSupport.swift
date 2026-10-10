@@ -331,6 +331,8 @@ struct WorkplaceEditPresentationState {
         branch: String,
         originalSelectedRepositoryIDs: [UUID],
         selectedRepositoryIDs: Set<UUID>,
+        originalLinks: [CommonLink] = [],
+        editingLinks: [CommonLink] = [],
         isSaving: Bool
     ) {
         let trimmedName = WorkplaceFormTextNormalization.normalizedText(name)
@@ -342,7 +344,9 @@ struct WorkplaceEditPresentationState {
         let removedCount = originalSelectedSet.subtracting(selectedRepositoryIDs).count
         let nameChanged = trimmedName != trimmedOriginalName
         let branchChanged = normalizedBranch != normalizedOriginalBranch
-        let hasChanges = nameChanged || addedCount > 0 || removedCount > 0 || branchChanged
+        // 链接按保存归一值比较:编辑期新增的空行不算改动。
+        let linksChanged = CommonLinksInput.normalizedForSave(rows: editingLinks) != originalLinks
+        let hasChanges = nameChanged || addedCount > 0 || removedCount > 0 || branchChanged || linksChanged
         branchValidationError = BranchNameValidation.validate(branch)
 
         canSubmit =
@@ -350,7 +354,8 @@ struct WorkplaceEditPresentationState {
             !trimmedName.isEmpty &&
             selectedRepositoryIDs.isEmpty == false &&
             hasChanges &&
-            branchValidationError == nil
+            branchValidationError == nil &&
+            CommonLinksInput.hasBlockingError(rows: editingLinks) == false
         selectedRepositorySubtitle = selectedRepositoryIDs.isEmpty ? "" : "\(selectedRepositoryIDs.count) 个已选"
         removedRepositoryCount = removedCount
         removalWarningFeedback =
@@ -374,6 +379,9 @@ struct WorkplaceEditPresentationState {
             } else {
                 changeSegments.append("清空工作分支")
             }
+        }
+        if linksChanged {
+            changeSegments.append("更新常用链接")
         }
         changeSummaryFeedback =
             changeSegments.isEmpty

@@ -9,6 +9,8 @@ struct Workplace: Codable, Equatable, Identifiable, Sendable {
     var isPinned: Bool
     var pinnedRepositoryIDs: [UUID]
     var isArchived: Bool
+    /// 工作区级常用链接(需求文档/环境地址等),创建/编辑工作区表单录入,详情页工具栏打开。
+    var links: [CommonLink]
     var createdAt: Date
     var updatedAt: Date
 
@@ -21,6 +23,7 @@ struct Workplace: Codable, Equatable, Identifiable, Sendable {
         case isPinned
         case pinnedRepositoryIDs
         case isArchived
+        case links
         case createdAt
         case updatedAt
     }
@@ -34,6 +37,7 @@ struct Workplace: Codable, Equatable, Identifiable, Sendable {
         isPinned: Bool = false,
         pinnedRepositoryIDs: [UUID] = [],
         isArchived: Bool = false,
+        links: [CommonLink] = [],
         createdAt: Date,
         updatedAt: Date
     ) {
@@ -45,6 +49,7 @@ struct Workplace: Codable, Equatable, Identifiable, Sendable {
         self.isPinned = isPinned
         self.pinnedRepositoryIDs = pinnedRepositoryIDs
         self.isArchived = isArchived
+        self.links = links
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -59,6 +64,8 @@ struct Workplace: Codable, Equatable, Identifiable, Sendable {
         isPinned = try container.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
         pinnedRepositoryIDs = try container.decodeIfPresent([UUID].self, forKey: .pinnedRepositoryIDs) ?? []
         isArchived = try container.decodeIfPresent(Bool.self, forKey: .isArchived) ?? false
+        // 老数据无 links 字段:解码为空数组,不做迁移。
+        links = try container.decodeIfPresent([CommonLink].self, forKey: .links) ?? []
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         updatedAt = try container.decode(Date.self, forKey: .updatedAt)
     }
@@ -73,6 +80,7 @@ struct Workplace: Codable, Equatable, Identifiable, Sendable {
         try container.encode(isPinned, forKey: .isPinned)
         try container.encode(pinnedRepositoryIDs, forKey: .pinnedRepositoryIDs)
         try container.encode(isArchived, forKey: .isArchived)
+        try container.encode(links, forKey: .links)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(updatedAt, forKey: .updatedAt)
     }

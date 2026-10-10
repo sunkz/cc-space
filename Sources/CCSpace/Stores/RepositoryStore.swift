@@ -10,17 +10,25 @@ struct RepositoryBackupEntry: Codable, Equatable, Sendable {
     let gitURL: String
     var defaultBranch: String?
     var mrTargetBranches: [String] = []
+    var links: [CommonLink] = []
 
     private enum CodingKeys: String, CodingKey {
         case gitURL
         case defaultBranch
         case mrTargetBranches
+        case links
     }
 
-    init(gitURL: String, defaultBranch: String? = nil, mrTargetBranches: [String] = []) {
+    init(
+        gitURL: String,
+        defaultBranch: String? = nil,
+        mrTargetBranches: [String] = [],
+        links: [CommonLink] = []
+    ) {
         self.gitURL = gitURL
         self.defaultBranch = defaultBranch
         self.mrTargetBranches = mrTargetBranches
+        self.links = links
     }
 
     init(from decoder: Decoder) throws {
@@ -28,6 +36,9 @@ struct RepositoryBackupEntry: Codable, Equatable, Sendable {
         gitURL = try container.decode(String.self, forKey: .gitURL)
         defaultBranch = try container.decodeIfPresent(String.self, forKey: .defaultBranch)
         mrTargetBranches = try container.decodeIfPresent([String].self, forKey: .mrTargetBranches) ?? []
+        // 老备份无 links 字段:解码为空数组。带 links 的新备份被旧版 app 读取时
+        // 未知键被其解码器忽略,双向兼容,无需抬版本号。
+        links = try container.decodeIfPresent([CommonLink].self, forKey: .links) ?? []
     }
 }
 
@@ -187,7 +198,7 @@ final class RepositoryStore: ObservableObject {
         JSONFileStore.makeDecoder()
     }
 
-    func addRepository(gitURL: String) throws {
+    func addRepository(gitURL: String, links: [CommonLink] = []) throws {
         let normalizedGitURL = gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard repositories.contains(where: { Self.gitURLsMatch($0.gitURL, normalizedGitURL) }) == false else {
@@ -204,6 +215,7 @@ final class RepositoryStore: ObservableObject {
             id: UUID(),
             gitURL: normalizedGitURL,
             repoName: repoName,
+            links: links,
             createdAt: now,
             updatedAt: now
         )
@@ -511,6 +523,11 @@ final class RepositoryStore: ObservableObject {
         try mutateRepository(id: id) { $0.mrTargetBranches = branches }
     }
 
+    /// 整体替换仓库级常用链接(录入区保存时传归一后的全量;空数组=清空)。
+    func updateLinks(id: UUID, links: [CommonLink]) throws {
+        try mutateRepository(id: id) { $0.links = links }
+    }
+
     func updateDefaultBranch(id: UUID, branch: String) throws {
         try mutateRepository(id: id) { $0.defaultBranch = branch }
     }
@@ -521,7 +538,8 @@ final class RepositoryStore: ObservableObject {
                 RepositoryBackupEntry(
                     gitURL: $0.gitURL,
                     defaultBranch: $0.defaultBranch,
-                    mrTargetBranches: $0.mrTargetBranches
+                    mrTargetBranches: $0.mrTargetBranches,
+                    links: $0.links
                 )
             }
         )
@@ -619,6 +637,12 @@ final class RepositoryStore: ObservableObject {
                         changed = true
                     }
                 }
+                // links 合并取"本地为空才回填":链接按 id 幂等合并会把用户
+                // 已删掉的链接从旧备份里复活,不如只在缺省时补一次。
+                if updatedRepositories[existingIndex].links.isEmpty, !entry.links.isEmpty {
+                    updatedRepositories[existingIndex].links = entry.links
+                    changed = true
+                }
                 if changed {
                     updatedRepositories[existingIndex].updatedAt = .now
                     mergedCount += 1
@@ -641,6 +665,7 @@ final class RepositoryStore: ObservableObject {
                     repoName: repoName,
                     defaultBranch: entry.defaultBranch,
                     mrTargetBranches: entry.mrTargetBranches,
+                    links: entry.links,
                     createdAt: now,
                     updatedAt: now
                 )

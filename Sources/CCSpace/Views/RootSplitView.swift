@@ -368,12 +368,13 @@ struct RootSplitView: View {
                 workplace: currentWorkplace,
                 repositories: repositoryStore.repositories,
                 syncStates: workplaceStore.syncStates
-            ) { name, selectedRepositoryIDs, branch, progressHandler in
+            ) { name, selectedRepositoryIDs, branch, links, progressHandler in
                 try await workplaceEditService.saveWorkplaceEdit(
                     workplaceID: workplace.id,
                     name: name,
                     selectedRepositoryIDs: selectedRepositoryIDs,
                     branch: branch,
+                    links: links,
                     progressHandler: progressHandler
                 )
             }
@@ -712,6 +713,15 @@ struct RootSplitView: View {
                     },
                     openInBrowser: { mergeRequestURL in
                         try WorkplaceSystemActions.openInBrowser(mergeRequestURL)
+                    }
+                )
+            },
+            onOpenCommonLink: { link in
+                RootSplitWorkplaceActions.runOpenCommonLink(
+                    coordinator: detailActionCoordinator,
+                    link: link,
+                    openInBrowser: { url in
+                        try WorkplaceSystemActions.openInBrowser(url)
                     }
                 )
             },

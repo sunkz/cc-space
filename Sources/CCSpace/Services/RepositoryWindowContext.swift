@@ -187,9 +187,12 @@ enum RepositoryAddOrchestrator {
     static func addRepository(
         gitURL: String,
         mrTargetBranches: [String],
+        links: [CommonLink] = [],
         store: RepositoryStore
     ) throws -> RepositoryConfig? {
-        try store.addRepository(gitURL: gitURL)
+        // links 随建档一次写入(与 mrTargetBranches 的"建档后回填"不同,
+        // addRepository 本就收 links,没有第二次落盘的必要)。
+        try store.addRepository(gitURL: gitURL, links: links)
         let addedID = store.repositories.first(where: { $0.gitURL == gitURL })?.id
         if let addedID, mrTargetBranches.isEmpty == false {
             try store.updateRepository(

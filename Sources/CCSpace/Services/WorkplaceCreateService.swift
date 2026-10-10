@@ -17,6 +17,7 @@ struct WorkplaceCreateService {
         rootPath: String,
         selectedRepositoryIDs: [UUID],
         branch: String?,
+        links: [CommonLink] = [],
         progressHandler: WorkplaceOperationProgressHandler? = nil
     ) async throws -> Workplace {
         let trimmedBranch = branch?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -75,7 +76,8 @@ struct WorkplaceCreateService {
                 name: name,
                 rootPath: rootPath,
                 selectedRepositories: selectedRepositories,
-                branch: normalizedBranch
+                branch: normalizedBranch,
+                links: links
             )
         } catch {
             for path in acquiredPaths.reversed() {

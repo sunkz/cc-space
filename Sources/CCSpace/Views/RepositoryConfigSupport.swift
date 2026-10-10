@@ -98,6 +98,7 @@ struct RepositoryEditPresentationState {
         editingRepositoryID: UUID?,
         editingGitURL: String,
         editingMRBranches: [String] = [],
+        editingLinks: [CommonLink] = [],
         isPendingNew: Bool = false,
         isFetchingDefaultBranch: Bool = false
     ) {
@@ -106,13 +107,18 @@ struct RepositoryEditPresentationState {
         self.isPendingNew = isPendingNew
         let gitURLChanged = trimmedGitURL != repository.gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let mrBranchesChanged = editingMRBranches != repository.mrTargetBranches
+        // 链接按"保存归一值 vs 存量"比较:编辑期未填的空行不算改动。
+        let linksChanged = CommonLinksInput.normalizedForSave(rows: editingLinks) != repository.links
+        // 非法链接行阻塞保存(行内已有橙字提示,按钮禁用与提示同一口径)。
+        let hasLinkError = CommonLinksInput.hasBlockingError(rows: editingLinks)
         if isPendingNew {
-            canSubmit = isEditing && !trimmedGitURL.isEmpty && !isFetchingDefaultBranch
+            canSubmit = isEditing && !trimmedGitURL.isEmpty && !isFetchingDefaultBranch && !hasLinkError
         } else {
             canSubmit =
                 isEditing &&
                 !trimmedGitURL.isEmpty &&
-                (gitURLChanged || mrBranchesChanged)
+                !hasLinkError &&
+                (gitURLChanged || mrBranchesChanged || linksChanged)
         }
     }
 }

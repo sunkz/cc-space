@@ -34,6 +34,9 @@ struct WorkplaceDetailActions {
     let onCreateMergeRequest: (RepositorySyncState, RepositoryConfig, String?) -> Void
     /// 分支面板行内"向该分支创建 MR"（目标分支为末参，当前分支为源，不 Push）。
     let onCreateMergeRequestForBranch: (RepositorySyncState, RepositoryConfig, String) -> Void
+    /// 打开常用链接（工作区级工具栏入口 + 仓库行「常用链接」子菜单共用），
+    /// URL 解析与失败反馈由宿主协调器承担。
+    let onOpenCommonLink: (CommonLink) -> Void
     /// 在浏览器打开仓库主页(仓库行右键/⋯ 菜单)。
     let onOpenRepositoryWeb: (RepositorySyncState, RepositoryConfig) -> Void
     let onDeleteRepository: (RepositorySyncState, String) -> Void
@@ -248,6 +251,9 @@ struct WorkplaceDetailView: View {
             pushToolbarItem(state)
             branchToolbarItems(state)
             openActionToolbarItem(state)
+            if workplace.links.isEmpty == false {
+                commonLinksToolbarItem()
+            }
             deleteToolbarItem(state)
         }
         .animation(.snappy(duration: 0.22), value: repositories.count)
@@ -547,6 +553,25 @@ struct WorkplaceDetailView: View {
         }
     }
 
+    /// 工作区级常用链接工具栏入口:仅在配置了链接时渲染。菜单项点击上抛宿主,
+    /// URL 解析与失败反馈走协调器(与"打开仓库主页"同一口径)。
+    private func commonLinksToolbarItem() -> some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) {
+            Menu {
+                ForEach(workplace.links) { link in
+                    Button(link.title) { actions.onOpenCommonLink(link) }
+                }
+            } label: {
+                Image(systemName: "link")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .accessibilityLabel("常用链接")
+            .ccspaceToolbarActionButton(prominent: true)
+            .ccspaceQuickHelp("打开本工作区的常用链接")
+        }
+    }
+
     private func deleteToolbarItem(_ state: WorkplaceDetailPresentationState) -> some ToolbarContent {
         ToolbarItem(placement: .primaryAction) {
             Button(role: .destructive) {
@@ -646,14 +671,7 @@ struct WorkplaceDetailView: View {
         detailState: WorkplaceDetailPresentationState
     ) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            CCSpaceSectionTitle(
-                title: "Git 仓库",
-                subtitle: "",
-                titleFont: .title3,
-                titleWeight: .semibold,
-                titleColor: .primary
-            )
-
+            // 不再渲染"Git 仓库"区块标题(10-10 用户要求):详情页只此一区,标题冗余。
             if syncStates.isEmpty {
                 CCSpaceEmptyStateCard(
                     title: "暂无仓库",
@@ -736,6 +754,9 @@ struct WorkplaceDetailView: View {
             },
             onCreateMergeRequestForBranch: { repository, targetBranch in
                 actions.onCreateMergeRequestForBranch(state, repository, targetBranch)
+            },
+            onOpenCommonLink: { link in
+                actions.onOpenCommonLink(link)
             },
             onOpenRepositoryWeb: { repository in
                 actions.onOpenRepositoryWeb(state, repository)

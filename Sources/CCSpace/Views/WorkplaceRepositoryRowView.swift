@@ -27,6 +27,8 @@ struct WorkplaceRepositoryRowView: View {
     let onCreateMergeRequest: (RepositoryConfig, String?) -> Void
     /// 分支面板行内"向该分支创建 MR":以当前分支为源、参数分支为目标直接打开网页(不 Push)。
     let onCreateMergeRequestForBranch: (RepositoryConfig, String) -> Void
+    /// 打开仓库级常用链接(⋯/右键菜单「常用链接」子菜单),URL 解析与失败反馈由宿主承担。
+    let onOpenCommonLink: (CommonLink) -> Void
     /// 在浏览器打开仓库主页(右键/⋯ 菜单),URL 解析与失败反馈由宿主协调器承担。
     let onOpenRepositoryWeb: (RepositoryConfig) -> Void
     let actionsDisabled: Bool
@@ -764,12 +766,28 @@ struct WorkplaceRepositoryRowView: View {
             switch group {
             case .webActions:
                 webActionMenuItem(rowState: rowState)
+                commonLinksMenuItem()
             case .localActions:
                 localActionMenuItems(rowState: rowState)
             case .primaryDivider:
                 Divider()
             case .delete:
                 deleteMenuButton(rowState: rowState)
+            }
+        }
+    }
+
+    /// 仓库级常用链接子菜单:仅配置了链接的行渲染。只依赖仓库配置、
+    /// 不需要本地目录,与"在浏览器打开仓库"同一放置口径(未克隆也可用)。
+    @ViewBuilder
+    private func commonLinksMenuItem() -> some View {
+        if let repository, repository.links.isEmpty == false {
+            Menu {
+                ForEach(repository.links) { link in
+                    Button(link.title) { onOpenCommonLink(link) }
+                }
+            } label: {
+                Label("常用链接", systemImage: "link")
             }
         }
     }
@@ -869,6 +887,7 @@ struct WorkplaceRepositoryRowView: View {
         // 未克隆时本地组缺席,由菜单头部的独立 .webActions 组兜底,不会丢失。
         if rowState.canOpenLocalActions {
             webActionMenuItem(rowState: rowState)
+            commonLinksMenuItem()
         }
         Divider()
         Button {

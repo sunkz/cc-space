@@ -60,6 +60,7 @@ struct WorkplaceEditService {
         name: String,
         selectedRepositoryIDs: [UUID],
         branch: String?,
+        links: [CommonLink]? = nil,
         progressHandler: WorkplaceOperationProgressHandler? = nil
     ) async throws {
         // 记录在 await 窗口内被磁盘刷新等路径删除时必须报错,不能静默"保存成功"。
@@ -184,6 +185,10 @@ struct WorkplaceEditService {
             updatedWorkplace.path = newPath
             updatedWorkplace.selectedRepositoryIDs = selectedRepositoryIDs
             updatedWorkplace.branch = nextBranch
+            // nil=保持原链接:非表单调用方(如其他内部流程)不传 links 时不得清空。
+            if let links {
+                updatedWorkplace.links = links
+            }
             updatedWorkplace.updatedAt = .now
 
             let updatedStates = try originalStates.map { state in

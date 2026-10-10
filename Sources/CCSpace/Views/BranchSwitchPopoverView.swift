@@ -320,8 +320,7 @@ struct BranchListPopoverView: View {
                 showsCreateButton: showsCreateButton,
                 showsMergeRequestButton: showsMergeRequestButton,
                 onDelete: deleteAction(for: branch, remote: remote),
-                metadata: source == .local ? branchMetadata[branch] : nil,
-                showsLeadingIcon: source == .local
+                metadata: source == .local ? branchMetadata[branch] : nil
             ) {
                 dismissPopover()
                 onPick(pickPayload(for: branch, remote: remote))
@@ -479,8 +478,10 @@ enum BranchNameDisplay {
     }
 }
 
-/// 单条分支行:当前分支打勾、点击切换(分支名悬停有提示)、
-/// 右侧提供切换/复制分支名/删除/新建入口。供切换分支/分支比较选择器两个模式复用。
+/// 单条分支行:当前分支以「accent 蓝 + 加粗分支名」标识(无对勾、无底色块,10-10 C6 定案)、
+/// 点击切换(分支名悬停有提示),右侧提供切换/创建 MR/复制分支名/删除/新建入口;
+/// 可点击行 hover 出菜单式灰底(参考仓库行 MR 目标分支菜单),当前行/禁用行不给。
+/// 供切换分支/分支比较选择器两个模式复用。
 struct BranchSwitchRow: View {
     let branch: String
     let isCurrentBranch: Bool
@@ -499,9 +500,6 @@ struct BranchSwitchRow: View {
     var onDelete: (() -> Void)? = nil
     /// 该分支的元数据(最后提交时间 / 领先落后);nil(远端页签/元数据未加载)时不展示角标。
     var metadata: GitBranchMetadata? = nil
-    /// true(本地页签):行首预留 10pt 指示列,当前分支行画小对勾、其他行留白对齐;
-    /// false(远端页签):不显示对勾也不预留(当前分支标识只属于本地页签)。
-    var showsLeadingIcon: Bool = true
     let onSwitch: () -> Void
     /// 行尾 ➕ 点击:宿主把该行切换为输入框。
     var onCreateFromHere: (() -> Void)? = nil
@@ -509,6 +507,14 @@ struct BranchSwitchRow: View {
     var onCreateMergeRequestForBranch: (() -> Void)? = nil
     @State private var resetTask: Task<Void, Never>?
     @State private var isDeleteHovering = false
+    @State private var isRowHovering = false
+
+    /// 行 hover 菜单式灰底:仅"整行点击有效"的行显示——当前分支行点击本就被守卫拦下
+    /// (标识靠蓝字加粗,不需要底色)、禁用行整体降透明,给灰底都会误导"可点"。
+    private var rowHoverBackground: Color {
+        guard isDisabled == false, isCurrentBranch == false, isRowHovering else { return .clear }
+        return Color.primary.opacity(0.06)
+    }
 
     /// 分支名可能被护栏截断/头部省略,hover 提示始终给全名。
     private var nameHelp: String {
@@ -558,30 +564,15 @@ struct BranchSwitchRow: View {
         return parts.joined(separator: "，")
     }
 
-    /// 当前分支的行首小对勾。
-    private var currentBranchCheck: some View {
-        Image(systemName: "checkmark")
-            .font(.system(size: 9, weight: .semibold))
-            .foregroundStyle(Color.accentColor)
-    }
-
     var body: some View {
         HStack(spacing: 6) {
-            if showsLeadingIcon {
-                // 本地页签:整列预留,勾/空白同宽,分支名跨行对齐;远端页签不显示对勾。
-                Group {
-                    if isCurrentBranch {
-                        currentBranchCheck
-                    } else {
-                        Color.clear
-                    }
-                }
-                .frame(width: 10)
-            }
             Text(BranchNameDisplay.displayText(for: branch))
                 .lineLimit(1)
                 // 分支名区分度在尾部:宽度不足时从头部省略,而不是切掉尾部。
                 .truncationMode(.head)
+                // 当前分支标识(C6):accent 蓝 + 半粗字重,行内零色块。
+                .fontWeight(isCurrentBranch ? .semibold : .regular)
+                .foregroundStyle(isCurrentBranch ? Color.accentColor : Color(nsColor: .labelColor))
                 .ccspaceQuickHelp(nameHelp)
             Spacer(minLength: 6)
             metadataView
@@ -674,11 +665,20 @@ struct BranchSwitchRow: View {
         .padding(.leading, 4)
         .padding(.trailing, -2)
         .padding(.vertical, 6)
+        // hover 灰底垫在整行命中区。圆角 7pt 取自左栏选中 chip 像素采样(README 截图 2x 约 14px);
+        // 尾随再收 6pt 抵消行内容 -2 的视觉微调,让灰底左右缘都落在距弹窗边 16pt
+        // (与 header 玻璃胶囊同两条竖线),左右圆弧对称。
+        .background {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(rowHoverBackground)
+                .padding(.trailing, 6)
+        }
         .contentShape(Rectangle())
         .onTapGesture {
             guard isDisabled == false, isCurrentBranch == false else { return }
             onSwitch()
         }
+        .onHover { isRowHovering = $0 }
         .opacity(isDisabled ? 0.5 : 1)
         .onDisappear {
             // 弹窗关闭后不再持有复位任务:它会写父视图的 copiedBranch。
@@ -711,7 +711,8 @@ struct CreateBranchInlineRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
-                // 与分支行 10pt 指示列对齐(输入行左侧固定显示绿色 ➕);
+                // 行首绿色 ➕ 作为"新建输入行"自身的动作标识保留
+                // (原与分支行 10pt 对勾指示列对齐,10-10 C6 该列已随对勾移除);
                 // 行内 4pt 与分支行的行内 padding 同值,外层再叠加容器统一留白 12pt。
                 Image(systemName: "plus")
                     .font(.caption)

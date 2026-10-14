@@ -500,6 +500,110 @@ final class DiskRefreshServiceTests: XCTestCase {
         XCTAssertTrue(repositoryStore.repositories.isEmpty)
         XCTAssertTrue(workplaceStore.syncStates.isEmpty)
     }
+
+    /// 单飞守卫:同一数据根上的并发刷新只让第一轮生效,其余立即返回。
+    ///
+    /// 守卫必须按 rootPath 记在**共享**位置而非 `DiskRefreshService` 实例里——它是
+    /// `@MainActor struct` 且被 RootSplitView 以计算属性构造(每次访问都是新实例)。
+    /// 本轮用"计算体阻塞在闸门上"把第一轮钉在飞状态,再发起第二轮:
+    /// - 第二轮必须立刻返回(不得也去等闸门),否则两轮会并发 apply/import;
+    /// - 计算体调用次数必须为 1——这是"重入被拦住"的唯一直接证据(空数据根下
+    ///   两轮的返回值都是 0,单看返回值区分不出来)。
+    func test_refreshConcurrentCallOnSameRootIsSkippedBySingleFlight() async throws {
+        let stores = try makeServiceStores()
+        let workplaceStore = stores.workplaceStore
+        let repositoryStore = stores.repositoryStore
+
+        let gate = RefreshGate()
+        let callCounter = CallCounter()
+        let service = DiskRefreshService(
+            workplaceStore: workplaceStore,
+            repositoryStore: repositoryStore,
+            refreshCalculator: { snapshot, rootPath in
+                await callCounter.increment()
+                // 第二轮若未被拦截也会走到这里并挂住,调用次数随即变成 2。
+                await gate.wait()
+                return DiskRefreshComputationResult(
+                    workplaceResult: WorkplaceStore.diskRefreshResult(
+                        workplaces: snapshot.workplace.workplaces,
+                        syncStates: snapshot.workplace.syncStates,
+                        rootPath: rootPath,
+                        lockedPathKeys: []
+                    ),
+                    repositoryResult: RepositoryStore.deduplicationResult(
+                        for: snapshot.repositories,
+                        protectedRepositoryIDs: []
+                    )
+                )
+            }
+        )
+
+        let rootPath = stores.workspaceRoot.path
+        let first = Task { await service.refresh(rootPath: rootPath) }
+        try await waitUntil(timeout: 5) { await gate.isWaiting }
+
+        // 第一轮仍在飞:第二轮必须立即返回,且不得进入计算体。
+        let secondOutcome = await service.refresh(rootPath: rootPath)
+        XCTAssertEqual(secondOutcome.importedRepositoryCount, 0)
+        let callsWhileFirstInFlight = await callCounter.count
+        XCTAssertEqual(callsWhileFirstInFlight, 1, "同一根的并发刷新不得重入计算体")
+
+        await gate.release()
+        _ = await first.value
+    }
+
+    /// 守卫按 rootPath 分键:不同数据根的刷新互不阻塞(守卫写成全局布尔就是功能回归)。
+    func test_refreshOnDifferentRootsIsNotSerializedBySingleFlight() async throws {
+        let stores = try makeServiceStores()
+        let gate = RefreshGate()
+        let callCounter = CallCounter()
+        let service = DiskRefreshService(
+            workplaceStore: stores.workplaceStore,
+            repositoryStore: stores.repositoryStore,
+            refreshCalculator: { snapshot, rootPath in
+                let call = await callCounter.increment()
+                // 只有第一轮被闸门拦住;第二轮必须能穿过守卫再次进入计算体。
+                if call == 1 {
+                    await gate.wait()
+                }
+                return DiskRefreshComputationResult(
+                    workplaceResult: WorkplaceStore.diskRefreshResult(
+                        workplaces: snapshot.workplace.workplaces,
+                        syncStates: snapshot.workplace.syncStates,
+                        rootPath: rootPath,
+                        lockedPathKeys: []
+                    ),
+                    repositoryResult: RepositoryStore.deduplicationResult(
+                        for: snapshot.repositories,
+                        protectedRepositoryIDs: []
+                    )
+                )
+            }
+        )
+
+        let first = Task { await service.refresh(rootPath: stores.workspaceRoot.path) }
+        try await waitUntil(timeout: 5) { await gate.isWaiting }
+
+        _ = await service.refresh(rootPath: stores.workspaceRoot.path + "-other")
+        let calls = await callCounter.count
+        XCTAssertEqual(calls, 2, "不同数据根不得被同一把单飞锁串行化")
+
+        await gate.release()
+        _ = await first.value
+    }
+
+    /// 轮询等待条件成立,超时即断言失败;避免用固定 sleep 赌调度时序。
+    private func waitUntil(
+        timeout: TimeInterval,
+        _ condition: @escaping () async -> Bool
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if await condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("等待条件在 \(timeout)s 内未成立")
+    }
 }
 
 private actor CallCounter {
@@ -515,6 +619,10 @@ private actor CallCounter {
 private actor RefreshGate {
     private var released = false
     private var continuations: [CheckedContinuation<Void, Never>] = []
+
+    /// 是否已有调用方挂在闸门上(测试用它把"第一轮已进入计算体、尚无结果"这件事
+    /// 变成可等待的条件,而不是 sleep 赌时序)。
+    var isWaiting: Bool { continuations.isEmpty == false }
 
     func wait() async {
         guard released == false else { return }

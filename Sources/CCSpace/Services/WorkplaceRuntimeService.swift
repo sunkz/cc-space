@@ -11,7 +11,7 @@ struct WorkplaceRuntimeService {
     nonisolated private static let maxConcurrentBatchTasks = 4
 
     /// 手动 Stash 的消息前缀,与切分支安全流程的自动 Stash 消息区分。
-    nonisolated private static let manualStashMessage = "CCSpace manual stash"
+    nonisolated private static let manualStashMessage = "CCSpace 手动暂存"
 
     let workplaceStore: WorkplaceStore
     let syncCoordinator: SyncCoordinator
@@ -761,7 +761,9 @@ struct WorkplaceRuntimeService {
                             // 等锁期间路径可能被替换(symlink 换向、根目录变更):
                             // :681 的 containment 校验发生在等锁之前,按 LocalPathSafety 的
                             // TOCTOU 契约,破坏性删除必须在锁内、紧邻执行前复检。
-                            try LocalPathSafety.validateManagedPath(
+                            // 破坏性递归删除:必须用**严格**包含判定,不把"等于根"算作受管
+                            // (记录路径被篡改成恰好等于受管根时会删掉整棵根)。
+                            try LocalPathSafety.validateStrictlyContainedPath(
                                 workplacePath,
                                 within: rootPath
                             )
@@ -820,7 +822,8 @@ struct WorkplaceRuntimeService {
     }
 
     private func ensureManagedWorkplace(_ workplace: Workplace) throws {
-        try LocalPathSafety.validateManagedPath(
+        // 严格包含:工作区路径不得等于受管根本身,否则后续递归删除会把整棵根删掉。
+        try LocalPathSafety.validateStrictlyContainedPath(
             workplace.path,
             within: workplaceRootPath
         )
@@ -831,7 +834,8 @@ struct WorkplaceRuntimeService {
         in workplace: Workplace
     ) throws {
         try ensureManagedWorkplace(workplace)
-        try LocalPathSafety.validateManagedPath(
+        // 严格包含:仓库 localPath 不得等于工作区根本身(否则"移除仓库"会删掉整个工作区)。
+        try LocalPathSafety.validateStrictlyContainedPath(
             state.localPath,
             within: workplace.path
         )

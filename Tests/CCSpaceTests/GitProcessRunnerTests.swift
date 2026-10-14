@@ -135,12 +135,18 @@ final class GitProcessRunnerTests: XCTestCase {
                 "GIT_INDEX_FILE": "/someone/else/.git/index",
                 "GIT_CONFIG_SYSTEM": "/someone/else/gitconfig",
                 "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_PARAMETERS": "'core.fsmonitor'='/tmp/evil.sh'",
+                "GIT_EXTERNAL_DIFF": "/tmp/evil.sh",
+                "GIT_PROXY_COMMAND": "/tmp/evil.sh",
                 "HOME": "/Users/tester",
             ],
             additional: ["GIT_CONFIG_GLOBAL": "/isolated/gitconfig"]
         )
 
-        for key in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT"] {
+        for key in [
+            "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_PARAMETERS", "GIT_EXTERNAL_DIFF", "GIT_PROXY_COMMAND",
+        ] {
             XCTAssertNil(environment[key], "继承的 \(key) 必须被剥离,否则 -C 定位被劫持")
         }
         // 注入项在剥离**之后**合并:测试用的配置隔离仍然生效。

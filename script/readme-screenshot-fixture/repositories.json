@@ -16,7 +16,9 @@
     "gitURL": "git@cc:docs-portal.git",
     "id": "22222222-2222-2222-2222-222222222222",
     "mrTargetBranches": [
-      "main"
+      "release/2024",
+      "weekly",
+      "feature/marketing-weekly"
     ],
     "repoName": "docs-portal",
     "updatedAt": "2026-04-18T00:00:00Z"

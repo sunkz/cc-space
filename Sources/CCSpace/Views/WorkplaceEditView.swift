@@ -4,7 +4,7 @@ struct WorkplaceEditView: View {
     let workplace: Workplace
     let repositories: [RepositoryConfig]
     let syncStates: [RepositorySyncState]
-    let onSave: (String, [UUID], String?, WorkplaceOperationProgressHandler?) async throws -> Void
+    var onSave: (String, [UUID], String?, WorkplaceOperationProgressHandler?) async throws -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var selectedRepositoryIDs: Set<UUID>
@@ -121,14 +121,12 @@ struct WorkplaceEditView: View {
                         branch: $branch,
                         isDisabled: isSaving,
                         branchValidationError: presentationState.branchValidationError,
-                        autoFocusName: true,
                         nameHint: "名称会作为根目录下的文件夹名",
                         branchHint: "选填，统一切换分支时使用此名称",
                         onInputChanged: clearFeedback
                     )
 
                     WorkplaceRepositorySelectionSection(
-                        subtitle: presentationState.selectedRepositorySubtitle,
                         repositories: repositoryOptions,
                         selectedIDs: selectedRepositoryIDs,
                         emptySubtitle: "",
@@ -166,7 +164,6 @@ struct WorkplaceEditView: View {
                 progress: operationProgress,
                 // 保存中取消按钮改用作"中止":中止走 saveTask?.cancel() 的回滚通道,
                 // 而不是留下半途改动直接关窗。
-                isCancelDisabledWhileSubmitting: false,
                 onCancel: {
                     if isSaving {
                         saveTask?.cancel()
@@ -181,7 +178,9 @@ struct WorkplaceEditView: View {
                 }
             )
         }
-        .frame(minWidth: 440, idealWidth: 520, minHeight: 360, idealHeight: 460)
+        // 弹窗尺寸固定 520×640:与创建工作区同值(两处一起改才对齐),宽高均不可拖拽。
+        // 仓库列表改为全量展开后内容更高,故从原先的 500 加高到 640;再超出仍走外层 ScrollView。
+        .frame(width: 520, height: 640)
         .navigationTitle("编辑工作区")
         .ccspaceAutoDismissFeedback($feedback)
         .interactiveDismissDisabled(isSaving)

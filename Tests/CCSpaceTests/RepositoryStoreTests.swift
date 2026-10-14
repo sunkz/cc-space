@@ -111,84 +111,37 @@ final class RepositoryStoreTests: XCTestCase {
         }
     }
 
-    func test_updateRepositoryChangesURLWithoutChangingRepoName() async throws {
-        let root = makeTestRootURL()
-        let fileStore = JSONFileStore(rootDirectory: root)
-        let store = RepositoryStore(fileStore: fileStore)
-
-        try store.addRepository(gitURL: "git@github.com:org/api.git")
-        let repoID = store.repositories.first!.id
-
-        try store.updateRepository(id: repoID, gitURL: "git@gitlab.example.com:team/api.git")
-
-        XCTAssertEqual(store.repositories.first?.gitURL, "git@gitlab.example.com:team/api.git")
-        XCTAssertEqual(store.repositories.first?.repoName, "api")
-
-        // Verify persistence
-        let reloaded = RepositoryStore(fileStore: fileStore)
-        XCTAssertEqual(reloaded.repositories.first?.gitURL, "git@gitlab.example.com:team/api.git")
-    }
-
-    func test_addAndUpdateRepositoryTrimWhitespace() async throws {
+    func test_addRepositoryTrimsWhitespace() async throws {
         let root = makeTestRootURL()
         let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
 
         try store.addRepository(gitURL: " git@github.com:org/api.git ")
-        let repoID = try XCTUnwrap(store.repositories.first?.id)
         XCTAssertEqual(store.repositories.first?.gitURL, "git@github.com:org/api.git")
-
-        try store.updateRepository(id: repoID, gitURL: " git@gitlab.example.com:team/api.git ")
-        XCTAssertEqual(store.repositories.first?.gitURL, "git@gitlab.example.com:team/api.git")
     }
 
-    func test_updateRepositoryRejectsDuplicateURL() async throws {
-        let root = makeTestRootURL()
-        let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
-
+    /// 去重只做清理,**不得**把磁盘上"看着像仓库"的目录顺手纳管进来。
+    ///
+    /// 自动纳管是磁盘刷新那条链的既定行为(另测),但去重这条路上多塞记录等于用户
+    /// 没同意就多了个仓库。原用例把 store 的 fileStore 与仓库目录指向两个不同临时根、
+    /// 且 store 一条记录都没有,`isEmpty` 恒真——断言与实现无关,这里连盘带库都真的摆上。
+    func test_deduplicatePersistedRepositoriesDoesNotImportRepositoriesFromDisk() throws {
+        let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: makeTestRootURL()))
         try store.addRepository(gitURL: "git@github.com:org/api.git")
-        try store.addRepository(gitURL: "git@github.com:org/web.git")
-        let webID = store.repositories.first { $0.repoName == "web" }!.id
 
-        XCTAssertThrowsError(
-            try store.updateRepository(id: webID, gitURL: "git@github.com:org/api.git")
-        ) { error in
-            XCTAssertEqual(error.localizedDescription, "仓库地址已存在")
+        let diskRoot = makeTestRootURL()
+        let fileManager = FileManager.default
+        for folder in ["hello", "hi"] {
+            try fileManager.createDirectory(
+                at: diskRoot.appendingPathComponent(folder).appendingPathComponent(".git"),
+                withIntermediateDirectories: true
+            )
         }
-    }
 
-    func test_updateRepositoryRejectsRepoNameChange() async throws {
-        let root = makeTestRootURL()
-        let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
-
-        try store.addRepository(gitURL: "git@github.com:org/api.git")
-        let repoID = store.repositories.first { $0.repoName == "api" }!.id
-
-        XCTAssertThrowsError(
-            try store.updateRepository(id: repoID, gitURL: "git@github.com:org/backend.git")
-        ) { error in
-            XCTAssertEqual(error.localizedDescription, "暂不支持通过编辑修改仓库名称，请新增仓库后替换")
-        }
-    }
-
-    func test_deduplicatePersistedRepositoriesDoesNotAutoImportRepositoriesFromDisk() async throws {
-        let rootDirectory = makeTestRootURL()
-        let fileStore = JSONFileStore(rootDirectory: makeTestRootURL())
-        let store = RepositoryStore(fileStore: fileStore)
-
-        let workplaceA = rootDirectory.appendingPathComponent("hello")
-        let workplaceB = rootDirectory.appendingPathComponent("hi")
-        let repoA = workplaceA.appendingPathComponent("blog")
-        let repoB = workplaceB.appendingPathComponent("blog-copy")
-
-        try FileManager.default.createDirectory(at: repoA.appendingPathComponent(".git"), withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: repoB.appendingPathComponent(".git"), withIntermediateDirectories: true)
-
-        _ = rootDirectory
         store.applyDeduplicationResult(
             RepositoryStore.deduplicationResult(for: store.repositories)
         )
 
-        XCTAssertTrue(store.repositories.isEmpty)
+        XCTAssertEqual(store.repositories.map(\.gitURL), ["git@github.com:org/api.git"])
     }
 
     func test_exportBackupWritesRepositoryBackupDocument() async throws {
@@ -455,6 +408,188 @@ final class RepositoryStoreTests: XCTestCase {
             protectedRepositoryIDs: [referenced.id]
         )
         XCTAssertEqual(reordered.repositories.map(\.id), [referenced.id])
+    }
+
+    /// 去重不再硬删丢弃项:字段并入保留项,并产出 dropped→kept 的 id 映射
+    /// (10-10 review P2 修复的回归锁)。
+    func test_deduplicationMergesFieldsAndProducesIDRemapping() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let kept = RepositoryConfig(
+            id: UUID(),
+            gitURL: "git@github.com:org/api.git",
+            repoName: "api",
+            mrTargetBranches: ["main"],
+            createdAt: now,
+            updatedAt: now
+        )
+        let dropped = RepositoryConfig(
+            id: UUID(),
+            gitURL: "https://github.com/org/api",
+            repoName: "api",
+            defaultBranch: "master",
+            mrTargetBranches: ["main", "dev"],
+            createdAt: now.addingTimeInterval(100),
+            updatedAt: now.addingTimeInterval(100)
+        )
+        let result = RepositoryStore.deduplicationResult(for: [kept, dropped])
+        XCTAssertEqual(result.repositories.count, 1)
+        let survivor = try XCTUnwrap(result.repositories.first)
+        XCTAssertEqual(survivor.id, kept.id)
+        XCTAssertEqual(survivor.defaultBranch, "master", "缺省才回填")
+        XCTAssertEqual(survivor.mrTargetBranches, ["main", "dev"], "保序并集")
+        XCTAssertEqual(result.idRemapping[dropped.id], kept.id)
+    }
+
+    /// 引用重映射:工作区对被删项的选中/置顶换成保留项并按首现去重;
+    /// sync-states 同工作区双行时保留存活项原行,孤行改挂保留 id
+    /// (10-10 review P2:此前直接摘除引用,工作区白丢仓库)。
+    func test_remappingReferencesAndSyncStates() throws {
+        let keptID = UUID()
+        let droppedID = UUID()
+        let workplace = Workplace(
+            id: UUID(),
+            name: "w",
+            path: "/tmp/w",
+            selectedRepositoryIDs: [droppedID, keptID],
+            pinnedRepositoryIDs: [droppedID],
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        let remappedWorkplaces = RepositoryStore.remappingReferences(
+            from: [workplace],
+            idRemapping: [droppedID: keptID]
+        )
+        XCTAssertEqual(remappedWorkplaces.first?.selectedRepositoryIDs, [keptID])
+        XCTAssertEqual(remappedWorkplaces.first?.pinnedRepositoryIDs, [keptID])
+
+        let workplaceID = UUID()
+        let keptRow = RepositorySyncState(
+            workplaceID: workplaceID, repositoryID: keptID, status: .success, localPath: "/tmp/w/api"
+        )
+        let droppedRow = RepositorySyncState(
+            workplaceID: workplaceID, repositoryID: droppedID, status: .failed, localPath: "/tmp/w/api"
+        )
+        let merged = RepositoryStore.remappingSyncStates(
+            [keptRow, droppedRow],
+            idRemapping: [droppedID: keptID]
+        )
+        XCTAssertEqual(merged.count, 1, "组合键唯一:存活项原行优先,被删项行丢弃")
+        XCTAssertEqual(merged.first?.status, .success)
+
+        let lone = RepositoryStore.remappingSyncStates([droppedRow], idRemapping: [droppedID: keptID])
+        XCTAssertEqual(lone.count, 1)
+        XCTAssertEqual(lone.first?.repositoryID, keptID)
+    }
+
+    /// 建档返回实时记录(调用方不必再按地址回查——10-10 review P2 的"两步写"死角
+    /// 就是靠"一次落盘 + 返回记录"消掉的);MR 目标分支改由面板单独配置,同样要落盘。
+    func test_addRepositoryReturnsLiveRecordAndPersistsBranchUpdates() throws {
+        let root = makeTestRootURL()
+        let fileStore = JSONFileStore(rootDirectory: root)
+        let store = RepositoryStore(fileStore: fileStore)
+
+        let created = try store.addRepository(gitURL: "git@github.com:org/api.git")
+        // 建档自己就得把记录落盘:后面的写会全量重排整个数组,若不在这里单独 reload,
+        // "addRepository 是否真的写过盘"会被下一次写顺带掩盖。
+        let afterAdd = RepositoryStore(fileStore: fileStore)
+        XCTAssertEqual(afterAdd.repositories.count, 1)
+        XCTAssertEqual(afterAdd.repositories.first?.id, created.id)
+
+        try store.updateMRTargetBranches(id: created.id, branches: ["main", "dev"])
+
+        let stored = try XCTUnwrap(store.repositories.first)
+        XCTAssertEqual(created.id, stored.id)
+        XCTAssertEqual(created.mrTargetBranches, [], "建档时不带 MR 分支")
+        XCTAssertEqual(stored.mrTargetBranches, ["main", "dev"])
+
+        let reloaded = RepositoryStore(fileStore: fileStore)
+        XCTAssertEqual(reloaded.repositories.first?.mrTargetBranches, ["main", "dev"])
+    }
+
+    /// 本地路径的 `~` 在建档时展开:git 子进程不经过 shell,原样入库的地址
+    /// `ls-remote`/`clone` 都会把它当字面量目录名,永远失败。
+    func test_addRepositoryExpandsHomeDirectoryPrefix() throws {
+        let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: makeTestRootURL()))
+
+        let created = try store.addRepository(gitURL: "~/repos/blog.git")
+        XCTAssertEqual(created.gitURL, NSHomeDirectory() + "/repos/blog.git")
+
+        // 展开后再加一次同一个远端:归一化必须认出重复,而不是存两条。
+        XCTAssertThrowsError(try store.addRepository(gitURL: "~/repos/blog.git")) { error in
+            XCTAssertEqual(error as? RepositoryStoreError, .duplicateURL)
+        }
+        // scp 形态里的 `~` 属远端 shell 语义,不能动。
+        let remote = try store.addRepository(gitURL: "git@host:~/srv/blog2.git")
+        XCTAssertEqual(remote.gitURL, "git@host:~/srv/blog2.git")
+    }
+
+    /// 大小写不同但指向同一仓库的地址必须判等:`GitHub.com/Org/API` 与
+    /// `github.com/org/api` 存成两条记录,克隆时它们推出来的 repoName 相同、
+    /// 会抢同一个工作区目录,而第二份记录在 UI 上看着像"另一个仓库"。
+    func test_gitURLsMatchIgnoresCaseAndTrailingSeparators() {
+        XCTAssertTrue(
+            RepositoryStore.gitURLsMatch("https://github.com/org/api.git", "https://GitHub.COM/Org/API")
+        )
+        XCTAssertTrue(
+            RepositoryStore.gitURLsMatch("git@github.com:org/api.git", "GIT@github.com:org/api/")
+        )
+        XCTAssertFalse(
+            RepositoryStore.gitURLsMatch("https://github.com/org/api.git", "https://github.com/org/apiv2.git")
+        )
+    }
+
+    func test_addRepositoryRejectsCaseVariantOfExistingURL() throws {
+        let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: makeTestRootURL()))
+        try store.addRepository(gitURL: "https://github.com/org/api.git")
+
+        XCTAssertThrowsError(try store.addRepository(gitURL: "https://GitHub.com/Org/API.git")) { error in
+            XCTAssertEqual(error as? RepositoryStoreError, .duplicateURL)
+        }
+    }
+
+    /// 备份文件可被手工编辑,导入侧与新增入口同一口径展开 `~/`:原样入库就是一个
+    /// 永远克隆不下来的死地址(git 不展波浪号,这里也从不经过 shell)。
+    func test_importBackupExpandsHomeDirectoryPrefix() throws {
+        let root = makeTestRootURL()
+        let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
+        let backupURL = root.appendingPathComponent("repositories-backup.json")
+        let v2JSON = """
+        {
+            "version": 2,
+            "exportedAt": "2024-01-01T00:00:00Z",
+            "repositories": [
+                { "gitURL": "~/remotes/blog.git" }
+            ]
+        }
+        """
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data(v2JSON.utf8).write(to: backupURL, options: .atomic)
+
+        _ = try store.importBackup(from: backupURL)
+
+        XCTAssertEqual(store.repositories.map(\.gitURL), [NSHomeDirectory() + "/remotes/blog.git"])
+    }
+
+    /// 口径一致性:UI 判定通过的地址,Store 建档必须也能成功(反之则用户会看到
+    /// "地址格式正确却报第三种错")。这里是新增入口放行的各类形态的最小代表集。
+    func test_repositoryURLShapesAcceptedByUIAreStorable() throws {
+        let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: makeTestRootURL()))
+
+        for gitURL in [
+            "https://github.com/org/blog.git",
+            "ssh://git@github.com:22/org/blog2.git",
+            "git@github.com:org/blog3.git",
+            "github.com:org/blog9.git",
+            "git@gitlab.example.com:group/sub/blog4.git",
+            "git@host:/srv/git/blog5.git",
+            "https://host/org/my%20repo.git",
+            "file:///private/tmp/remotes/blog6.git",
+            "/private/tmp/remotes/blog7.git",
+            "~/remotes/blog8.git",
+        ] {
+            XCTAssertTrue(RepositoryURLFormat.isParseable(gitURL), "UI 侧应放行 \(gitURL)")
+            XCTAssertNoThrow(try store.addRepository(gitURL: gitURL), "Store 建档应接受 \(gitURL)")
+        }
     }
 
     /// 去重事件序号必须单调递增:根视图用 `.onChange` 观察事件,而清理条数可能

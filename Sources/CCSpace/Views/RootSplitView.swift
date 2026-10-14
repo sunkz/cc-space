@@ -249,7 +249,8 @@ struct RootSplitView: View {
                 // 启动对账:补建丢失的 sync state,清理指向已删仓库的孤儿引用。
                 // 任一持久化文件本次损坏被重置时**必须跳过**:此时空集合不是真实状态,
                 // 继续对账会把另外两个健康文件里的关联数据一并清空(级联丢失)。
-                if repositoryStore.didRecoverFromCorruptFile || workplaceStore.didRecoverFromCorruptFile {
+                if repositoryStore.didRecoverFromCorruptFile
+                    || workplaceStore.didRecoverFromCorruptFile {
                     rootSplitViewLog.error(
                         "event=startup_reconcile_skipped reason=corrupt_file_recovered repositories=\(repositoryStore.didRecoverFromCorruptFile, privacy: .public) workplace=\(workplaceStore.didRecoverFromCorruptFile, privacy: .public)"
                     )
@@ -265,7 +266,7 @@ struct RootSplitView: View {
                 }
                 // 任一持久化文件本次启动曾损坏:必须让用户知道"配置变默认值/记录变少"
                 // 不是自己没设置过,且原始文件已保全为 .corrupt- 副本
-                // (三个 Store 的 didRecoverFromCorruptFile 消费点,此前只有 settings 有横幅)。
+                // (各 Store 的 didRecoverFromCorruptFile 消费点,此前只有 settings/仓库/工作区有横幅)。
                 var corruptedFiles: [String] = []
                 if settingsStore.didRecoverFromCorruptFile { corruptedFiles.append("设置") }
                 if repositoryStore.didRecoverFromCorruptFile { corruptedFiles.append("仓库配置") }
@@ -308,6 +309,12 @@ struct RootSplitView: View {
             // macOS 上 Cmd-Q 不一定先触发 scenePhase 变化,
             // 终止通知里同步 flush,防抖窗口内的终态不丢。
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                workplaceStore.flushSyncStates()
+                settingsStore.flushSettings()
+            }
+            // 关窗在 macOS 上不等于退出进程:store 随视图一起释放,防抖里尚未落盘的
+            // 终态会跟着一起没了,重开窗口读到的还是旧文件。关窗即 flush。
+            .onDisappear {
                 workplaceStore.flushSyncStates()
                 settingsStore.flushSettings()
             }
@@ -696,6 +703,25 @@ struct RootSplitView: View {
                     }
                 )
             },
+            onCreateMergeRequestForBranch: { state, repository, targetBranch in
+                // 分支面板行内入口:当前分支为源、该行分支为目标。不 Push——
+                // 非当前分支无法复用"push 当前分支"逻辑,链接生成后由托管平台校验。
+                RootSplitWorkplaceActions.runCreateMergeRequestForBranch(
+                    coordinator: detailActionCoordinator,
+                    repositoryName: repository.repoName,
+                    resolveMergeRequestURL: {
+                        try await MergeRequestService.createURL(
+                            repository: repository,
+                            syncState: state,
+                            gitService: gitService,
+                            targetBranch: targetBranch
+                        )
+                    },
+                    openInBrowser: { mergeRequestURL in
+                        try WorkplaceSystemActions.openInBrowser(mergeRequestURL)
+                    }
+                )
+            },
             onOpenRepositoryWeb: { syncState, repository in
                 RootSplitWorkplaceActions.runOpenRepositoryWeb(
                     coordinator: detailActionCoordinator,
@@ -982,7 +1008,7 @@ struct RootSplitView: View {
 
                     // 图标没有文字基线,整行按 .center 对齐:标识(15pt 墨迹)与 13pt 的
                     // 版本号文字自然居中,不需要为字号变化维护魔法偏移。
-                    HStack(alignment: .center, spacing: 10) {
+                    HStack(alignment: .center, spacing: 6) {
                         // GitHub 标识代替原来的「获取更新 ↗」文字:系统符号库没有
                         // GitHub 标识(见 GitHubMarkShape),且工具栏越短越好——
                         // 完整文案(含"发现新版本 vX.Y.Z")走悬浮提示与无障碍名称。
@@ -991,6 +1017,11 @@ struct RootSplitView: View {
                             GitHubMarkShape()
                                 .fill(updateButtonState.usesAccentTint ? Color.accentColor : Color.primary)
                                 .frame(width: 15, height: 15)
+                                // Shape 的默认命中区只覆盖墨迹,标识外圈的留白(圆角四角、
+                                // 尾巴细线之间)点击会落空——表现为"有时点了没反应"。
+                                // 撑成 23×23 矩形命中区:与文字的实际间距仍是原来的 10pt。
+                                .frame(width: 23, height: 23)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         // 图标按钮没有可见文字,靠 providesLabel 把文案挂成无障碍名称;
@@ -1053,7 +1084,15 @@ struct RootSplitView: View {
     }
 
     private func openReleasesPage() {
-        NSWorkspace.shared.open(updateChecker.releasesURL)
+        // open 返回 false 是"浏览器根本没起来"(默认浏览器异常等),与命中区落空的
+        // 表现相同;静默失败无法区分,所以给出可见提示并附上可手动访问的地址。
+        if !NSWorkspace.shared.open(updateChecker.releasesURL) {
+            appearanceFeedback = CCSpaceFeedback(
+                style: .error,
+                message: "打开 GitHub Releases 失败",
+                details: "请检查系统默认浏览器设置，或手动访问 \(updateChecker.releasesURL.absoluteString)"
+            )
+        }
     }
 
     @MainActor

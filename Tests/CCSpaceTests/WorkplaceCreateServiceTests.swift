@@ -23,7 +23,6 @@ private actor WorkplaceCreateGitServiceSpy: GitServicing {
     func push(in directory: String) async throws {}
     func stash(in directory: String) async throws {}
     func stashPop(in directory: String) async throws {}
-    func isGitAvailable() async -> Bool { true }
     func defaultBranch(for remoteURL: String) async -> String? { "main" }
     func defaultBranch(in directory: String) async -> String? { "main" }
     func currentBranch(in directory: String) async -> String? { "main" }

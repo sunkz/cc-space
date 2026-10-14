@@ -245,4 +245,81 @@ final class LocalPathSafetyTests: XCTestCase {
         XCTAssertFalse(LocalPathSafety.hasDanglingSymlink(in: link.path))
         XCTAssertTrue(LocalPathSafety.isWithinDirectory(link.path, rootPath: workspaceRoot.path))
     }
+
+    // MARK: - 严格包含(破坏性操作专用判定)
+
+    /// 破坏性操作(递归删除、整树移动)必须用 `isStrictlyWithinDirectory`:
+    /// `isWithinDirectory` 把"同一目录"也判为受管(创建子路径时才是想要的语义),
+    /// 而记录路径一旦被手工编辑/损坏成恰好等于受管根,`rm -rf <root>` 会把整棵
+    /// 受管根(含其它工作区)一并删掉。
+    func test_isStrictlyWithinDirectoryRejectsTheRootItself() {
+        XCTAssertFalse(LocalPathSafety.isStrictlyWithinDirectory("/tmp/root", rootPath: "/tmp/root"))
+        XCTAssertFalse(LocalPathSafety.isStrictlyWithinDirectory("/tmp/root/", rootPath: "/tmp/root"))
+        XCTAssertFalse(LocalPathSafety.isStrictlyWithinDirectory("/tmp/root/./", rootPath: "/tmp/root"))
+    }
+
+    /// 大小写归一后等于根的输入同样必须拒绝:macOS 默认卷大小写不敏感,
+    /// 放宽分支会把它放行,而它指向的正是受管根本身。
+    func test_isStrictlyWithinDirectoryRejectsRootDifferingOnlyByCase() {
+        XCTAssertFalse(LocalPathSafety.isStrictlyWithinDirectory("/TMP/ROOT", rootPath: "/tmp/root"))
+    }
+
+    func test_isStrictlyWithinDirectoryAcceptsRealDescendants() {
+        XCTAssertTrue(LocalPathSafety.isStrictlyWithinDirectory("/tmp/root/ios-dev", rootPath: "/tmp/root"))
+        XCTAssertTrue(LocalPathSafety.isStrictlyWithinDirectory("/tmp/root/ios-dev/api", rootPath: "/tmp/root"))
+        // 尚未落盘的目标(新建克隆场景)同样要判是,否则创建流程第一步就被拒。
+        XCTAssertTrue(
+            LocalPathSafety.isStrictlyWithinDirectory(
+                "/tmp/root/ios-dev/not-created-yet",
+                rootPath: "/tmp/root"
+            )
+        )
+    }
+
+    func test_isStrictlyWithinDirectoryStillRejectsOutsiders() {
+        XCTAssertFalse(LocalPathSafety.isStrictlyWithinDirectory("/tmp/rootx", rootPath: "/tmp/root"))
+        XCTAssertFalse(LocalPathSafety.isStrictlyWithinDirectory("/tmp", rootPath: "/tmp/root"))
+        XCTAssertFalse(LocalPathSafety.isStrictlyWithinDirectory("", rootPath: "/tmp/root"))
+    }
+
+    /// 符号链接别名指向根自身:词法上像子路径,解析后与根同一目录——
+    /// 这正是"删根"最隐蔽的形态,必须判否。
+    func test_isStrictlyWithinDirectoryRejectsSymlinkAliasResolvingToRoot() throws {
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("LocalPathSafety-\(UUID().uuidString)", isDirectory: true)
+        let workspaceRoot = tempRoot.appendingPathComponent("ws", isDirectory: true)
+        try fileManager.createDirectory(at: workspaceRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempRoot) }
+
+        let alias = workspaceRoot.appendingPathComponent("alias", isDirectory: true)
+        try fileManager.createSymbolicLink(at: alias, withDestinationURL: workspaceRoot)
+
+        // 普通 containment 判"是"(等价于根),严格 containment 必须判"否"。
+        XCTAssertTrue(LocalPathSafety.isWithinDirectory(alias.path, rootPath: workspaceRoot.path))
+        XCTAssertFalse(LocalPathSafety.isStrictlyWithinDirectory(alias.path, rootPath: workspaceRoot.path))
+        // 别名下的真实子目录仍是根内后代,不得被误伤。
+        try fileManager.createDirectory(
+            at: workspaceRoot.appendingPathComponent("real", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        XCTAssertTrue(
+            LocalPathSafety.isStrictlyWithinDirectory(
+                alias.path + "/real",
+                rootPath: workspaceRoot.path
+            )
+        )
+    }
+
+    func test_validateStrictlyContainedPathThrowsForRootItself() {
+        XCTAssertNoThrow(
+            try LocalPathSafety.validateStrictlyContainedPath("/tmp/root/ios-dev", within: "/tmp/root")
+        )
+        XCTAssertThrowsError(
+            try LocalPathSafety.validateStrictlyContainedPath("/tmp/root", within: "/tmp/root")
+        )
+        XCTAssertThrowsError(
+            try LocalPathSafety.validateStrictlyContainedPath("/tmp/elsewhere", within: "/tmp/root")
+        )
+    }
 }

@@ -1,7 +1,7 @@
 import Foundation
 
-/// 仓库只读信息查询(提交记录 / Stash 列表 / 远端分支建议 / 远端探测),
-/// 供仓库行视图与新增/编辑表单弹层使用:View 不直接触碰 GitServicing 全量协议。
+/// 仓库只读信息查询(提交记录 / Stash 列表 / 远端分支建议 / 远端默认分支),
+/// 供仓库行视图与设置页仓库区使用:View 不直接触碰 GitServicing 全量协议。
 /// 目录存在性判断复用 FileSystemServicing 扩展的统一实现;
 /// 本服务只做只读探测,协议要求的写方法委托给 FileSystemService。
 struct RepositoryInfoService: FileSystemServicing {
@@ -44,14 +44,7 @@ struct RepositoryInfoService: FileSystemServicing {
         return await gitService.remoteBranches(for: remoteURL)
     }
 
-    /// 新增/编辑表单的远端探测:分支列表与默认分支合并为一次探测
-    /// (真实 GitService 只跑一条 `ls-remote --symref`,省一半网络往返;
-    /// URL 合法性守卫在 GitService.probeRemoteInfo 内保持)。
-    func probeRemote(gitURL: String) async -> (branches: [String], defaultBranch: String?) {
-        await gitService.probeRemoteInfo(for: gitURL)
-    }
-
-    /// 远端默认分支(表单编辑回填用)。
+    /// 远端默认分支(建档后与打开 MR 面板时回补仓库配置用)。
     func defaultBranch(for remoteURL: String) async -> String? {
         await gitService.defaultBranch(for: remoteURL)
     }

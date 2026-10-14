@@ -192,7 +192,7 @@ struct AISettingsSection: View {
 
     private var configPanel: some View {
         VStack(alignment: .leading, spacing: 10) {
-            fieldRow(label: "Base URL") {
+            fieldRow(label: "接口地址") {
                 TextField("https://open.bigmodel.cn/api/paas/v4", text: $baseURLText)
                     .textFieldStyle(.roundedBorder)
                     // 与 API Key、模型名同口径:回车即保存。三格只差 baseURL 需要回车确认
@@ -200,7 +200,7 @@ struct AISettingsSection: View {
                     .onSubmit(save)
             }
 
-            fieldRow(label: "API Key") {
+            fieldRow(label: "密钥") {
                 apiKeyField
             }
 

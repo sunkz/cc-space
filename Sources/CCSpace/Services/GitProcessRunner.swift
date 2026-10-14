@@ -22,6 +22,24 @@ enum GitProcessExecutionError: LocalizedError, Equatable {
 }
 
 struct GitProcessRunner {
+    /// 单流输出上限(默认 64 MB)。`run` 的 `outputLimitBytes` 默认取本值;
+    /// 该参数**仅测试**用于把上限压到极小以覆盖"截断 → 恰好一次 onOverflow →
+    /// 杀进程 → 抛超限错误"整条链路,生产路径恒为默认值、行为零变化。
+    static let defaultOutputLimitBytes = 64 * 1024 * 1024
+
+    /// 每次 git 调用统一前置的全局配置覆盖(必须排在子命令之前)。
+    ///
+    /// `core.fsmonitor=false`:仓库自带的 `.git/config` 可以把 fsmonitor 指到任意脚本,
+    /// 而 `git status`/`git diff` 这类**只读**命令会去执行它(实测 Apple Git 157 还会
+    /// fork 一个 `--detach` 的 daemon,`terminate()` 只杀直接子进程、杀不掉它)。
+    /// 这些配置随目录一起被拷进工作区并被自动纳管,而本 app 的状态刷新会周期性触发,
+    /// 等于"打开工作区看一眼"就运行了仓库带来的代码。
+    ///
+    /// 代价只有性能:禁用后 git 退化为全量扫描,结果仍然正确。
+    /// 钩子(`.git/hooks`、`core.hooksPath`)这里**不**禁:commit/stash 触发钩子与用户
+    /// 在命令行里做同样操作是一致的,静默屏蔽反而制造"app 里提交没跑钩子"的隐性差异。
+    static let globalConfigurationArguments: [String] = ["-c", "core.fsmonitor=false"]
+
     private static let gitURL: URL? = {
         let candidates = ["/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git"]
         for path in candidates {
@@ -31,11 +49,6 @@ struct GitProcessRunner {
         }
         return nil
     }()
-
-    /// 探测到的 git 可执行文件路径(设置页诊断展示用);找不到任何候选时为 nil。
-    static var gitExecutablePath: String? {
-        gitURL?.path
-    }
 
     /// 组装 git 子进程的环境变量(纯函数,便于单测——不碰进程级 setenv)。
     ///
@@ -50,10 +63,16 @@ struct GitProcessRunner {
         // `-C <目录>` 定位——所有 git 操作都被指向启动它的那个仓库,且因为命令"成功
         // 执行"了,错误完全不可归因。GIT_CONFIG*/GIT_SSH_COMMAND 同理论外部 system
         // 配置可绕过下方固定项(GIT_SSH_COMMAND 在下面单独追加处理,不在此剔除)。
+        //
+        // GIT_CONFIG_PARAMETERS 是 `git -c` 的进程间续传形式,键值全由它说了算,留着
+        // 就能从环境里把 `core.fsmonitor=<脚本>` 重新塞回来、绕过
+        // `globalConfigurationArguments` 的前置覆盖(实测生效)。GIT_EXTERNAL_DIFF 与
+        // GIT_PROXY_COMMAND 同属"环境变量指向可执行程序",一并剥掉。
         for key in [
             "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
             "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR",
             "GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_PARAMETERS", "GIT_EXTERNAL_DIFF", "GIT_PROXY_COMMAND",
         ] {
             environment.removeValue(forKey: key)
         }
@@ -87,7 +106,9 @@ struct GitProcessRunner {
         /// 额外注入子进程的环境变量（**仅测试用**：配置隔离，如 GIT_CONFIG_GLOBAL）。
         /// 默认空 → 生产路径零变化。注入项在基础环境之上、固定项之前合并，
         /// LC_ALL/GIT_ALLOW_PROTOCOL 等安全与分类固定项不被覆盖。
-        additionalEnvironment: [String: String] = [:]
+        additionalEnvironment: [String: String] = [:],
+        /// 单流输出上限（**仅测试用**：压小以覆盖超限链路）。生产路径恒为默认值。
+        outputLimitBytes: Int = GitProcessRunner.defaultOutputLimitBytes
     ) async throws -> GitProcessResult {
         guard let gitURL = Self.gitURL else {
             throw NSError(
@@ -113,7 +134,7 @@ struct GitProcessRunner {
 
         let process = Process()
         process.executableURL = gitURL
-        process.arguments = arguments
+        process.arguments = Self.globalConfigurationArguments + arguments
         process.currentDirectoryURL = URL(fileURLWithPath: NSTemporaryDirectory())
 
         process.environment = Self.childEnvironment(
@@ -172,8 +193,8 @@ struct GitProcessRunner {
                     )
                 }
 
-                let stdoutBox = SendableDataBox(onOverflow: handleOutputOverflow)
-                let stderrBox = SendableDataBox(onOverflow: handleOutputOverflow)
+                let stdoutBox = SendableDataBox(maxBytes: outputLimitBytes, onOverflow: handleOutputOverflow)
+                let stderrBox = SendableDataBox(maxBytes: outputLimitBytes, onOverflow: handleOutputOverflow)
                 let readGroup = DispatchGroup()
                 // 每管道恰好一次的 group leave 终结器:EOF 与"摘除回调但 EOF 永不到来"
                 // 的兜底路径(排水超时/启动失败)共用,保证 readGroup 恒平衡——
@@ -426,13 +447,20 @@ struct GitProcessRunner {
         }
     }
 
-    private static func safeCommandDescription(arguments: [String]) -> String {
+    /// 组装成可展示的命令描述(已脱敏)。internal 仅为单测直接覆盖脱敏口径;
+    /// 生产调用方只有 `run` 内的错误构造。
+    static func safeCommandDescription(arguments: [String]) -> String {
         (["git"] + arguments)
             .map(redactedArgument)
             .joined(separator: " ")
     }
 
-    private static func redactedArgument(_ argument: String) -> String {
+    /// 单个 argv 片段的脱敏:内联凭据(URL userinfo)与 `?token=` 类查询参数一并打码。
+    ///
+    /// internal 仅为单测覆盖。注意与 `GitServiceError.redactCredentials` 是两份独立
+    /// 实现(后者作用于任意文本、靠正则匹配 `scheme://user:pass@host`),两者口径必须
+    /// 同步演进——任一处漏打码都会把令牌写进日志/UI。测试对两边都有断言。
+    static func redactedArgument(_ argument: String) -> String {
         guard var components = URLComponents(string: argument) else {
             return argument
         }
@@ -496,8 +524,14 @@ struct GitProcessRunner {
     /// SIGTERM 可能被挂起的 git(等锁、D 状态 IO)吞掉:5s 后仍存活则升级 SIGKILL,
     /// 避免残留 git 进程长期持有工作区(如 index.lock)。isRunning 复查经 ObjC 桥接,
     /// 避免向已回收的 pid 操作时 Foundation 抛异常崩 App。
-    private static func scheduleSIGKILLEscalation(processBox: SendableProcessBox) {
-        DispatchQueue.global().asyncAfter(deadline: .now() + 5) { [processBox] in
+    ///
+    /// `escalationDelay` 默认 5s;**仅测试**注入更小值以缩短等待。
+    /// 放宽为 internal 仅为单测能直接驱动这条分支(生产调用方只有 `run` 内部三处)。
+    static func scheduleSIGKILLEscalation(
+        processBox: SendableProcessBox,
+        escalationDelay: TimeInterval = 5
+    ) {
+        DispatchQueue.global().asyncAfter(deadline: .now() + escalationDelay) { [processBox] in
             if Self.objCBridgedIsRunning(processBox.process) {
                 kill(processBox.process.processIdentifier, SIGKILL)
             }
@@ -505,7 +539,9 @@ struct GitProcessRunner {
     }
 }
 
-private final class SendableProcessBox: @unchecked Sendable {
+/// Process 的 Sendable 转发盒。internal(而非 private)是为了让单测能驱动
+/// `scheduleSIGKILLEscalation`;生产构造点只有 `run`。
+final class SendableProcessBox: @unchecked Sendable {
     let process: Process
 
     init(_ process: Process) {
@@ -513,32 +549,29 @@ private final class SendableProcessBox: @unchecked Sendable {
     }
 }
 
-/// 增量读取缓冲:单流硬上限 64 MB。超限时停止追加(截断)并恰好一次触发溢出回调,
-/// 由调用方终止进程并失败本次运行——否则超大 `git diff` 会在超时兜底生效前
-/// 先把内存耗尽。
-private final class SendableDataBox: @unchecked Sendable {
-    static let maxBytes = 64 * 1024 * 1024
-
+/// 增量读取缓冲:单流硬上限(默认 64 MB,可注入)。超限时停止追加(截断)并恰好一次
+/// 触发溢出回调,由调用方终止进程并失败本次运行——否则超大 `git diff` 会在超时兜底
+/// 生效前先把内存耗尽。
+///
+/// internal(而非 private)仅为让单测直接覆盖"截断 + 恰好一次溢出回调"这条契约;
+/// 生产构造点只有 `run`。
+final class SendableDataBox: @unchecked Sendable {
     private let lock = NSLock()
+    private let maxBytes: Int
     private var _data = Data()
     private var _truncated = false
     private var _overflowNotified = false
     private let onOverflow: @Sendable () -> Void
 
-    init(onOverflow: @escaping @Sendable () -> Void) {
+    init(maxBytes: Int, onOverflow: @escaping @Sendable () -> Void) {
+        self.maxBytes = maxBytes
         self.onOverflow = onOverflow
     }
 
     var data: Data {
-        get { lock.lock(); defer { lock.unlock() }; return _data }
-        set { lock.lock(); defer { lock.unlock() }; _data = newValue }
-    }
-
-    /// 超限截断后为真;此后 append 为空操作。
-    var truncated: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return _truncated
+        return _data
     }
 
     func append(_ chunk: Data) {
@@ -547,7 +580,7 @@ private final class SendableDataBox: @unchecked Sendable {
             lock.unlock()
             return
         }
-        let remaining = Self.maxBytes - _data.count
+        let remaining = maxBytes - _data.count
         if chunk.count > remaining {
             // 追加到恰好触及上限后截断;溢出回调恰好一次(两个流共用同一处理闭包)。
             if remaining > 0 {

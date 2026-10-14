@@ -101,6 +101,18 @@ enum BranchListNormalization {
     }
 }
 
+/// 分支列表的"已选置顶"稳定排序:被选中的按原相对顺序排在前,其余紧随其后。
+/// MR 目标分支面板用它把已添加的分支挪到首屏,同时保证点选/取消都不会让其他行乱跳
+/// (两组内部各自稳定,只有被操作那一行在两组之间移动)。
+enum BranchSelectionOrder {
+    static func selectedFirst(_ branches: [String], selected: [String]) -> [String] {
+        let selectedSet = Set(selected)
+        let hits = branches.filter { selectedSet.contains($0) }
+        let rest = branches.filter { selectedSet.contains($0) == false }
+        return hits + rest
+    }
+}
+
 /// 分支按"最近活动"排序:最后提交时间新的在前。
 /// 元数据未加载/无时间的分支保持原顺序(字母序)排在最后——
 /// 弹窗首帧(元数据未到)与字母序一致,数据到达后才换序,不会闪跳。
@@ -134,18 +146,13 @@ private func normalizedBranches(
     _ branches: [String],
     currentBranch: String?
 ) -> [String] {
-    var normalized = branches
-        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        .filter { !$0.isEmpty }
-
-    if let currentBranch,
-       normalized.contains(currentBranch) == false {
-        normalized.append(currentBranch)
+    // 与远端名单共用 `BranchListNormalization`(去空+去重+本地化排序);
+    // 这里先把当前分支补进去,保证元数据未到时它也始终在列表里。
+    var inputs = branches
+    if let currentBranch {
+        inputs.append(currentBranch)
     }
-
-    return Array(Set(normalized)).sorted {
-        $0.localizedStandardCompare($1) == .orderedAscending
-    }
+    return BranchListNormalization.remoteBranches(inputs)
 }
 
 enum WorkplaceSystemActions {
@@ -356,21 +363,46 @@ struct WorkplaceRepositoryBranchPillState: Equatable {
     }
 }
 
-/// 分支切换 popover 远端分支区的展示状态:远端分支名单的展示辅助。
-/// 本地已有的不再剔除——远端页签应如实反映远端有什么,本地已有的点击即切换本地分支。
+/// 远端跟踪引用与裸分支名的换算。面板统一展示裸分支名,而对比模式的"远端"数据
+/// 来自 `refs/remotes`(本身就是 `origin/x` 这样的引用名),两者在这里划清界限。
+enum BranchRemoteRef {
+    /// `origin/feature/x` → `feature/x`:只去首段 remote 名,分支名自带的 "/" 保留;
+    /// 不含 "/"、或去完前缀为空(`origin/`)的输入原样返回——宁可多显示也不留空行。
+    static func bareName(ofTrackingRef ref: String) -> String {
+        guard let slash = ref.firstIndex(of: "/") else { return ref }
+        let bare = String(ref[ref.index(after: slash)...])
+        return bare.isEmpty ? ref : bare
+    }
+
+    /// 一批跟踪引用里裸名撞车的名字:多 remote 仓库(fork + upstream)下
+    /// `origin/main` 与 `fork/main` 都会裸成 `main`,这时不能去前缀。
+    static func ambiguousBareNames(ofTrackingRefs refs: [String]) -> Set<String> {
+        var counts: [String: Int] = [:]
+        for ref in refs {
+            counts[bareName(ofTrackingRef: ref), default: 0] += 1
+        }
+        return Set(counts.compactMap { $0.value > 1 ? $0.key : nil })
+    }
+
+    /// 行展示名:只在"分支对比 + 远端页签"(`showsBareRemoteNames`)下去前缀显示裸名,
+    /// 裸名在这批行里撞车时返回 nil,由调用方回退显示完整跟踪引用。
+    /// 其余场景同样返回 nil——那表示"显示行自身值",不是"显示空"。
+    static func displayBranch(
+        ofTrackingRef ref: String,
+        ambiguousBareNames: Set<String>,
+        showsBareRemoteNames: Bool
+    ) -> String? {
+        guard showsBareRemoteNames else { return nil }
+        let bare = bareName(ofTrackingRef: ref)
+        return ambiguousBareNames.contains(bare) ? nil : bare
+    }
+}
+
 struct BranchSwitchRemotePresentationState: Equatable {
     let remoteBranchNames: [String]
 
-    /// 远端分支的展示名:带 origin/ 前缀,与本地远端跟踪引用、对比弹窗的叫法一致。
-    func displayName(for remoteBranch: String) -> String {
-        "origin/" + remoteBranch
-    }
-
-    /// 由展示名还原切换用的分支名(git 侧仍按裸名 + --track 回退处理)。
-    func branchName(fromDisplayName displayName: String) -> String {
-        displayName.hasPrefix("origin/") ? String(displayName.dropFirst("origin/".count)) : displayName
-    }
-
+    /// 远端分支名单的展示辅助。本地已有的不剔除——远端页签如实反映远端有什么,
+    /// 本地已有的那条点击即切换本地分支。这里只负责归一与去重。
     /// `remoteBranches` 为 nil(尚未加载)时结果为空,由调用方结合加载态展示。
     /// 输入须已在加载时归一排序(见 `BranchListNormalization`);这里只做轻量去重,
     /// 不再排序——上千分支的本地化排序放进每次 body 求值会卡死主线程。
@@ -392,7 +424,6 @@ struct CompareBranchListPresentationState: Equatable {
     let filteredBranches: [String]
     let emptyTitle: String
     let emptySubtitle: String
-    let listHeight: CGFloat
 
     init(branches: [String], searchText: String) {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -411,7 +442,6 @@ struct CompareBranchListPresentationState: Equatable {
             emptySubtitle = ""
         }
 
-        listHeight = BranchSwitchListPresentationState.fixedListHeight
     }
 }
 
@@ -448,8 +478,6 @@ struct BranchSwitchListPresentationState: Equatable {
     let filteredBranches: [String]
     let emptyTitle: String
     let emptySubtitle: String
-    /// 列表固定高度;用显式数值驱动,内容变化时 popover 能跟随重新布局。
-    let listHeight: CGFloat
 
     static let rowHeight: CGFloat = 30
     /// 固定列表高度:恰好 5 行(rowHeight 30 × 5),超出在列表内滚动;
@@ -463,29 +491,25 @@ struct BranchSwitchListPresentationState: Equatable {
         searchText: String
     ) {
         let candidates: [String]
-        let displayCandidates: [String]
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         switch source {
         case .local:
             candidates = localBranches
-            displayCandidates = candidates
         case .remote:
             // 远端名单须已归一排序(BranchListNormalization),此处直接使用。
-            let allRemote = remoteBranchNames ?? []
-            candidates = allRemote
-            // 远端行展示 origin/ 前缀名,搜索剥掉前缀再匹配:
-            // 搜 "feat" 与 "origin/feat" 都能命中。
-            displayCandidates = allRemote.map { "origin/\($0)" }
+            // 展示一律用裸名:分支面板里不加 origin/ 前缀,
+            // 本地/远端靠页签区分。
+            candidates = remoteBranchNames ?? []
         }
-        // 远端页签的搜索剥掉 origin/ 前缀再匹配:
-        // 行展示的是前缀名,搜 "origin/checkout" 与 "checkout" 应命中同一分支。
+        // 仍容忍用户把 origin/ 打进搜索词:剥掉前缀,让 "origin/checkout" 与
+        // "checkout" 命中同一分支。
         var matchQuery = query
         if source == .remote, matchQuery.hasPrefix("origin/") {
             matchQuery = String(matchQuery.dropFirst("origin/".count))
         }
         filteredBranches = matchQuery.isEmpty
-            ? displayCandidates
-            : displayCandidates.filter { BranchSearch.matches($0, query: matchQuery) }
+            ? candidates
+            : candidates.filter { BranchSearch.matches($0, query: matchQuery) }
 
         if candidates.isEmpty {
             switch source {
@@ -504,8 +528,6 @@ struct BranchSwitchListPresentationState: Equatable {
             emptySubtitle = ""
         }
 
-        // 高度固定,与分支数/页签/搜索词无关:面板尺寸恒定不跳动。
-        listHeight = Self.fixedListHeight
     }
 }
 
@@ -1000,7 +1022,7 @@ enum WorkplaceDetailFeedbackFactory {
 
 /// 目录存在性探测:路径去空白后非空且在盘上是目录时返回该路径,否则 nil。
 /// 注意:这是磁盘 stat,绝不能放进 body 求值路径——调用点必须收敛到
-/// 用户动作(如删除按钮)触发的一刻(见 P1-11)。
+/// 用户动作(如删除按钮)触发的一刻。
 func existingDirectoryPath(_ path: String) -> String? {
     let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
     guard trimmedPath.isEmpty == false else { return nil }
@@ -1095,3 +1117,5 @@ private extension String {
         isEmpty ? nil : self
     }
 }
+
+

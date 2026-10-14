@@ -80,12 +80,16 @@ final class AppViewModelTests: XCTestCase {
     }
 
     /// 默认仍通知选中变化:运行期删除工作区等场景持久化 nil 才是事实。
+    /// 刻意**不**加"值未变则提前返回"的空操作守卫——模型不知道文件里已持久化的值,
+    /// 漏写会让上一轮失效的 lastSelectedWorkplaceID 留在盘上,
+    /// 下次启动把它当有效选中项恢复(同一契约见 `RouteRestoreSupportTests`)。
     @MainActor
     func test_showRouteNotifiesSelectionChangeByDefault() {
         let model = AppViewModel()
         var persistedSelections: [UUID?] = []
         model.onSelectedWorkplaceChange = { persistedSelections.append($0) }
 
+        // 默认路由即 .settings,对它的重复同步同样必须回调:清空选中是事实。
         model.showRoute(.settings)
 
         XCTAssertEqual(persistedSelections, [nil])

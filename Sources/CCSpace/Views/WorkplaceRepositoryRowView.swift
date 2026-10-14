@@ -25,6 +25,8 @@ struct WorkplaceRepositoryRowView: View {
     let showsWorkBranchAction: Bool
     let onMergeDefaultBranchIntoCurrent: () -> Void
     let onCreateMergeRequest: (RepositoryConfig, String?) -> Void
+    /// 分支面板行内"向该分支创建 MR":以当前分支为源、参数分支为目标直接打开网页(不 Push)。
+    let onCreateMergeRequestForBranch: (RepositoryConfig, String) -> Void
     /// 在浏览器打开仓库主页(右键/⋯ 菜单),URL 解析与失败反馈由宿主协调器承担。
     let onOpenRepositoryWeb: (RepositoryConfig) -> Void
     let actionsDisabled: Bool
@@ -146,7 +148,7 @@ struct WorkplaceRepositoryRowView: View {
         if availableBranches.isEmpty {
             return "当前分支，暂无可切换的本地分支"
         }
-        return "当前分支，点击可切换本地/远端分支或新建分支"
+        return "当前分支，点击可切换本地/远端分支、新建分支或创建 MR"
     }
 
     private var branchPillState: WorkplaceRepositoryBranchPillState? {
@@ -241,6 +243,14 @@ struct WorkplaceRepositoryRowView: View {
                                     // 被删分支从列表消失(与 Stash 列表行为一致)。
                                     onDeleteBranch: onDeleteBranch,
                                     onDeleteRemoteBranch: onDeleteRemoteBranch,
+                                    // repository 为 nil(配置已被删/未纳管)时传 nil 回调:
+                                    // 面板按"回调为 nil"隐藏 MR 按钮——画出来却点了没反应比不画更糟。
+                                    onCreateMergeRequestForBranch: repository == nil ? nil : { targetBranch in
+                                        guard let repository else { return }
+                                        // 直关已由面板内容完成,此处 binding 写入仅兜底同步。
+                                        showingBranchMenu = false
+                                        onCreateMergeRequestForBranch(repository, targetBranch)
+                                    },
                                     branchMetadata: branchMetadata,
                                     defaultBranch: repository?.defaultBranch?
                                         .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -477,9 +487,8 @@ struct WorkplaceRepositoryRowView: View {
                 }
             )
         }
-        // 确认弹窗挂在**行**上而不是 popover 内:popover 是 transient,焦点转移
-        // (alert 弹出本身就是一次焦点切换)会把 popover 连带关闭,alert 随之消失,
-        // 甚至出现"点了取消但删除仍被执行"的窗口期。与 showingAbortConfirmation 一致。
+        // 确认弹窗同样挂在行上而不是 popover 内——理由与分支删除确认一致:
+        // transient popover 会被 alert 的焦点转移连带关闭。
         .alert(
             stashDropConfirmationTitle,
             isPresented: stashDropConfirmationBinding
@@ -604,13 +613,9 @@ struct WorkplaceRepositoryRowView: View {
                 }
                 return
             }
-            // 归一(去重+本地化排序)在取数回来后做一次:分支多时排序可观,
-            // 且展示状态每次 body 求值都会消费名单,不能放到 body 里现算。
-            // (纠偏:当前工具链下 View 整类型被推断为 @MainActor,本方法不再是
-            // nonisolated,此处 Task 继承主执行器——首个 await 恢复后仍回到主线程,
-            // 旧注释"已回到全局并发执行器,不在主线程"的前提不成立,勿再据此
-            // 论证"无需 detached"。归一下沉进 Task.detached:上千分支的排序
-            // 不能留在主线程,与 AddRepositorySheetView 同口径。)
+            // 归一(去重+本地化排序)在取数回来后做一次,且下沉 Task.detached:
+            // View 整类型被推断为 @MainActor,这里的 Task 继承主执行器,上千分支的
+            // 排序留在主线程会卡住 UI(设置页 MR 面板同一口径)。
             // branches 为 nil = 本次探测失败(区别于 [] 的"远端确无分支"):
             // 沿用旧名单,失败只由加载态收口体现,不把 stale-while-revalidate
             // 的缓存一次网络抖动打成空列表。
@@ -698,16 +703,11 @@ struct WorkplaceRepositoryRowView: View {
             Button {
                 onCreateMergeRequest(repository, branch)
             } label: {
-                // 默认分支用星标前置标记,不再带文字后缀;空白占位图与 star 同尺寸,
-                // 图标列等宽保证分支名对齐。macOS 26 菜单默认隐图标,显式 titleAndIcon。
-                Label {
-                    Text(branch == currentBranch ? "\(branch)（当前分支）" : branch)
-                } icon: {
-                    Image(nsImage: branch == repository.defaultBranch ? MenuPlaceholderIcon.star : MenuPlaceholderIcon.blank)
-                }
+                // 默认分支不加星标(分支列表一律裸名,
+                // 纯文字菜单里为它留一列图标只会多占缩进)。
+                Text(branch == currentBranch ? "\(branch)（当前分支）" : branch)
             }
         }
-        .labelStyle(.titleAndIcon)
     }
 
     /// 菜单内容(溢出菜单与右键菜单共用)是展示状态的最重消费者,
@@ -1191,8 +1191,6 @@ struct RepositoryBranchStatePillModel: Identifiable {
     var action: Action? = nil
     /// 供 VoiceOver 朗读的完整文案；缩写式 pill 标题(如"领先 2 个")朗读时需展开为完整语义。
     var accessibilityTitle: String? = nil
-
-    var isActionable: Bool { action != nil }
 
     var id: String { title }
 

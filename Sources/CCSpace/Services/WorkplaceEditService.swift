@@ -103,7 +103,11 @@ struct WorkplaceEditService {
         let targetExistsOnDisk: Bool = await Task.detached(priority: .userInitiated) {
             FileManager.default.fileExists(atPath: newPath)
         }.value
-        guard normalizedNewPath == WorkplaceStore.normalizedPath(oldPath) ||
+        // 与上方重名检查同口径用大小写归一比较:默认卷大小写不敏感,"仅大小写不同"的
+        // 改名实际指向同一目录,此时 `fileExists(atPath: newPath)` 恒为真,严格相等比较
+        // 会把合法改名误报成"路径已存在"(且让下面 pathsDifferIgnoringCase 分支永不可达)。
+        let normalizedOldPath = WorkplaceStore.normalizedPath(oldPath)
+        guard normalizedNewPath.lowercased() == normalizedOldPath.lowercased() ||
                 targetExistsOnDisk == false else {
             throw WorkplaceStoreError.pathAlreadyExistsOnDisk
         }
@@ -118,7 +122,7 @@ struct WorkplaceEditService {
         // 是否真正执行 move 仍按原始字符串(记录路径字符串的规范化改名也是有效编辑)。
         let renamed = newPath != oldPath
         let pathsDifferIgnoringCase =
-            normalizedNewPath.lowercased() != WorkplaceStore.normalizedPath(oldPath).lowercased()
+            normalizedNewPath.lowercased() != normalizedOldPath.lowercased()
         if renamed, pathsDifferIgnoringCase, let nested = workplaceStore.workplaces.first(where: { candidate in
             candidate.id != workplaceID
                 && LocalPathSafety.isWithinDirectory(candidate.path, rootPath: oldPath)
@@ -528,7 +532,8 @@ struct WorkplaceEditService {
         within workplacePath: String
     ) throws {
         for state in states {
-            try LocalPathSafety.validateManagedPath(
+            // 严格包含:状态行 localPath 不得等于工作区根,否则整树改名/暂存移出会动到根本身。
+            try LocalPathSafety.validateStrictlyContainedPath(
                 state.localPath,
                 within: workplacePath
             )

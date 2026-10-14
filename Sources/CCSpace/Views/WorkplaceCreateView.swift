@@ -107,14 +107,12 @@ struct WorkplaceCreateView: View {
                         branch: $branch,
                         isDisabled: isSubmitting,
                         branchValidationError: presentationState.branchValidationError,
-                        autoFocusName: true,
                         nameHint: "名称会作为根目录下的文件夹名",
                         branchHint: "选填，统一切换分支时使用此名称",
                         onInputChanged: clearFeedback
                     )
 
                     WorkplaceRepositorySelectionSection(
-                        subtitle: presentationState.selectedRepositorySubtitle,
                         repositories: repositoryOptions,
                         selectedIDs: selectedIDs,
                         emptySubtitle: "请先到设置页添加 Git 仓库地址，然后回来勾选需要包含的仓库。",
@@ -146,7 +144,6 @@ struct WorkplaceCreateView: View {
                 progress: operationProgress,
                 // 提交中保留取消:onCancel 里走 submitTask?.cancel() 的清理通道,
                 // 禁用反而让用户对着 interactiveDismissDisabled 的弹窗干等。
-                isCancelDisabledWhileSubmitting: false,
                 onCancel: {
                     if isSubmitting {
                         // 提交中点"取消":终止任务并让 Service 走清理路径,
@@ -163,7 +160,9 @@ struct WorkplaceCreateView: View {
                 }
             )
         }
-        .frame(minWidth: 440, idealWidth: 520, minHeight: 360, idealHeight: 460)
+        // 弹窗尺寸固定 520×640:与编辑工作区同值(两处一起改才对齐),宽高均不可拖拽。
+        // 仓库列表改为全量展开后内容更高,故从原先的 500 加高到 640;再超出仍走外层 ScrollView。
+        .frame(width: 520, height: 640)
         .navigationTitle("创建工作区")
         .ccspaceAutoDismissFeedback($feedback)
         .interactiveDismissDisabled(isSubmitting)

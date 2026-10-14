@@ -44,7 +44,6 @@ struct CommitLogWindowView: View {
     @State private var errorMessage: String?
     @State private var searchText = ""
     @State private var isUnpushedOnly = false
-    @State private var limit = Self.pageSize
     @State private var hasMore = false
     /// 程序性重置"仅看未推送"(换 payload / 换分支)时置真,由
     /// onChange(of: isUnpushedOnly) 消费一次即复位:程序重置与用户切换分流,
@@ -73,6 +72,9 @@ struct CommitLogWindowView: View {
     @State private var detailTasks: [String: Task<Void, Never>] = [:]
     /// "全部展开"的限流详情加载任务句柄。
     @State private var expandAllTask: Task<Void, Never>?
+    /// 搜索输入防抖任务:关键词过滤现在下推到 git(每轮都要扫历史),
+    /// 逐键触发会在一串输入里排起连续查询,停手后才发一次。
+    @State private var searchTask: Task<Void, Never>?
     /// 当前"全部展开"批次覆盖的提交 id,取消时用于同步清加载标记。
     @State private var expandAllBatchIDs: Set<String> = []
     /// 批次令牌:每次启动新批次自增,批次回写点比对令牌,过期批次只认领标记不写状态。
@@ -83,6 +85,9 @@ struct CommitLogWindowView: View {
     @Environment(\.openWindow) private var openWindow
 
     private static let pageSize = 20
+    /// 搜索防抖时长。关键词现在进 git 查询,每轮都要扫一遍历史,
+    /// 逐键触发等于把一串击键排成一串 git log。
+    private static let searchDebounceNanoseconds: UInt64 = 250_000_000
     /// 全部展开时详情加载的最大并发数(与 WorkplaceBranchLoader.maxConcurrentSnapshotLoads 同一量级)。
     private static let maxConcurrentDetailLoads = 8
 
@@ -184,7 +189,6 @@ struct CommitLogWindowView: View {
             errorMessage = nil
             searchText = ""
             resetUnpushedOnlyProgrammatically()
-            limit = Self.pageSize
             hasMore = false
             hasLoadedInitialData = false
             expandedIDs = []
@@ -199,15 +203,15 @@ struct CommitLogWindowView: View {
         }
         .onWindowBecomeKey {
             // 相等 payload 的 openWindow 只聚焦不重建内容:聚焦时静默刷新保证数据最新。
-            // 不得调 reload():它会把 limit 重置回首页并闪整屏加载态——用户翻看历史
-            // 提交时切出再切回,浏览位置直接丢失。这里走 resetting=false 的静默刷新:
-            // 保留 limit 与现有列表(仅底部加载区转圈),与 Diff 窗口聚焦行为
+            // 不得调 reload():它会把列表打回首页并闪整屏加载态——用户翻看历史
+            // 提交时切出再切回,浏览位置直接丢失。这里走 .reloadLoaded:
+            // 按已加载条数整窗重取并保留现有列表(仅加载区转圈),与 Diff 窗口聚焦行为
             // (load(isRefresh: true))对齐。首次打开的 becomeKey 与 .task 首载
             // 重叠,由 hasLoadedInitialData 跳过。
             guard hasLoadedInitialData else { return }
             guard isCreatingBranch == false else { return }
             loadBranchContext()
-            reloadCommits(resetting: false, showLoading: false)
+            reloadCommits(.reloadLoaded)
         }
         .onDisappear {
             cancelAllTasks()
@@ -253,8 +257,7 @@ struct CommitLogWindowView: View {
                     // 换分支后"仅看未推送"的可用性可能变化(新分支未必有上游),
                     // 留在勾选态会得到误导性的空列表,直接重置。
                     resetUnpushedOnlyProgrammatically()
-                    limit = Self.pageSize
-                    reloadCommits(resetting: true, showLoading: true)
+                    reloadCommits(.firstPageWithSpinner)
                 }
             )
             .environment(\.controlSize, .regular)
@@ -287,7 +290,7 @@ struct CommitLogWindowView: View {
                 Image(systemName: "magnifyingglass")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                TextField("搜索提交、作者或 ID", text: $searchText)
+                TextField("搜索提交说明、作者或 ID", text: $searchText)
                     .textFieldStyle(.plain)
                 if searchText.isEmpty == false {
                     Button {
@@ -298,6 +301,11 @@ struct CommitLogWindowView: View {
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
+                }
+                // 搜索进行中:结果会整批换掉列表,行内给个进行指示,免得看着像没反应。
+                if isLoadingMore {
+                    ProgressView()
+                        .controlSize(.small)
                 }
             }
             .padding(.vertical, 5)
@@ -328,15 +336,19 @@ struct CommitLogWindowView: View {
             .help("刷新")
             .accessibilityLabel("刷新")
         }
+        .onChange(of: searchText) { _, _ in
+            // 关键词进 git 查询,不做防抖的话一串击键会排成一串历史扫描。
+            // 清空(含点 xmark)同样走这条路:防抖后回到无过滤的首页。
+            scheduleSearchReload()
+        }
         .onChange(of: isUnpushedOnly) { _, _ in
             // 程序性重置走各自路径的统一刷新,这里只响应用户切换。
             if programmaticUnpushedReset {
                 programmaticUnpushedReset = false
                 return
             }
-            // 切换筛选只重置分页,保留搜索词。
-            limit = Self.pageSize
-            reloadCommits(resetting: true, showLoading: true)
+            // 切换筛选只回到首页,保留搜索词。
+            reloadCommits(.firstPageWithSpinner)
         }
     }
 
@@ -369,7 +381,7 @@ struct CommitLogWindowView: View {
                 Spacer()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if state.filteredCommits.isEmpty {
+        } else if state.visibleCommits.isEmpty {
             VStack(spacing: 4) {
                 Spacer()
                 Text(state.emptyTitle)
@@ -384,8 +396,8 @@ struct CommitLogWindowView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            // 分隔线判断改用下标:此前每行取一次 filteredCommits.last,整列表 O(N²)。
-            let visibleCommits = state.filteredCommits
+            // 分隔线判断改用下标:此前每行取一次 visibleCommits.last,整列表 O(N²)。
+            let visibleCommits = state.visibleCommits
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(visibleCommits.enumerated()), id: \.element.id) { index, commit in
@@ -444,6 +456,9 @@ struct CommitLogWindowView: View {
         detailTasks.removeAll()
         noticeTask?.cancel()
         noticeTask = nil
+        // 防抖中的搜索也要作废:否则窗口消失后计时器照样会把一轮 git log 打出去。
+        searchTask?.cancel()
+        searchTask = nil
         // 建分支会写 HEAD,窗口关闭后必须一并取消,否则仍会跑完并 reload。
         createBranchTask?.cancel()
         createBranchTask = nil
@@ -459,8 +474,7 @@ struct CommitLogWindowView: View {
 
     private func reload() {
         loadBranchContext()
-        limit = Self.pageSize
-        reloadCommits(resetting: true, showLoading: true)
+        reloadCommits(.firstPageWithSpinner)
     }
 
     /// 分支名单/远端跟踪分支/元数据/当前分支:供标题栏分支选择器与"仅看未推送"可用性判断。
@@ -480,28 +494,57 @@ struct CommitLogWindowView: View {
         }
     }
 
-    private func reloadCommits(resetting: Bool, showLoading: Bool) {
+    /// 提交列表的加载方式。分页游标就是"已加载条数"(git 侧 `--skip` 偏移),
+    /// 各方式只是 skip/count 的不同组合,翻到第 N 页不再需要从仓库头重拉整段历史。
+    private enum CommitLogLoadKind {
+        /// 回到首页并整屏转圈(首载、换分支、换"仅看未推送"、手动刷新)。
+        case firstPageWithSpinner
+        /// 回到首页但先保留现有列表(关键词变化:新结果到达前不清空,避免整屏闪空)。
+        case firstPageQuietly
+        /// 按已加载条数整窗重取,保留浏览位置(窗口聚焦时的静默刷新)。
+        case reloadLoaded
+        /// 追加下一页("加载更多")。
+        case nextPage
+    }
+
+    private func reloadCommits(_ kind: CommitLogLoadKind) {
         let generation = payloadGeneration
-        let path = payload.localPath
-        if resetting {
-            if showLoading {
-                isLoading = true
-            }
+        let loadedCount = commits.count
+        let pageSize: Int
+        let skip: Int
+        switch kind {
+        case .firstPageWithSpinner, .firstPageQuietly:
+            pageSize = Self.pageSize
+            skip = 0
+        case .reloadLoaded:
+            // 整窗重取:条数不足一页时仍按一页取,避免空列表下退化成零条查询。
+            pageSize = max(Self.pageSize, loadedCount)
+            skip = 0
+        case .nextPage:
+            pageSize = Self.pageSize
+            skip = loadedCount
+        }
+
+        switch kind {
+        case .firstPageWithSpinner:
+            isLoading = true
             commits = []
             errorMessage = nil
             hasMore = false
-        } else {
+        case .firstPageQuietly, .reloadLoaded, .nextPage:
+            // 保留现有列表,只在搜索行/页脚转圈。
             isLoadingMore = true
         }
-        let unpushedOnly = isUnpushedOnly
-        let rev = selectedBranch
-        let currentLimit = limit
-        context.loadCommits(
-            directory: path,
-            limit: currentLimit,
-            rev: rev,
-            unpushedOnly: unpushedOnly
-        ) { [self] outcome in
+
+        let request = CommitLogPageRequest(
+            directory: payload.localPath,
+            searchText: searchText,
+            skip: skip,
+            count: pageSize,
+            rev: selectedBranch,
+            unpushedOnly: isUnpushedOnly
+        )
+        context.loadCommits(request: request) { [self] outcome in
             // payload 已更换(复用窗口换仓库)时旧仓库结果不得落笔。
             guard generation == payloadGeneration else { return }
             switch outcome {
@@ -510,11 +553,19 @@ struct CommitLogWindowView: View {
                 isLoading = false
                 isLoadingMore = false
                 hasLoadedInitialData = true
-            case .success(let fetched, let hasMoreResult):
-                hasMore = hasMoreResult
-                commits = hasMore ? Array(fetched.prefix(currentLimit)) : fetched
-                // 静默刷新(resetting=false)也要清错误:content 优先渲染错误页,
-                // 不清则目录恢复后列表已更新、界面却永远停在"本地目录不存在"。
+            case .success(let pageCommits, let more):
+                hasMore = more
+                if kind == .nextPage {
+                    // 游标是"已加载条数"的偏移,期间若有新提交落到分支顶端,
+                    // 下一页会重复带上已展示的头部提交:按哈希去重后再追加。
+                    let shown = Set(commits.map(\.hash))
+                    commits.append(contentsOf: pageCommits.filter { shown.contains($0.hash) == false })
+                } else {
+                    commits = pageCommits
+                }
+                // 静默刷新(firstPageQuietly/reloadLoaded/nextPage)也要清错误:
+                // content 优先渲染错误页,不清则目录恢复后列表已更新、
+                // 界面却永远停在"本地目录不存在"。
                 errorMessage = nil
                 isLoading = false
                 isLoadingMore = false
@@ -524,9 +575,18 @@ struct CommitLogWindowView: View {
     }
 
     private func loadMore() {
-        limit += Self.pageSize
-        // resetting=false:保留已加载列表,只追加;清空重拉会造成列表闪空。
-        reloadCommits(resetting: false, showLoading: false)
+        reloadCommits(.nextPage)
+    }
+
+    /// 关键词防抖:搜索已下推到 git,每轮都要扫一遍历史,
+    /// 逐键触发等于把一串击键排成一串 `git log`。
+    private func scheduleSearchReload() {
+        searchTask?.cancel()
+        searchTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: Self.searchDebounceNanoseconds)
+            guard Task.isCancelled == false else { return }
+            reloadCommits(.firstPageQuietly)
+        }
     }
 
     // MARK: - 详情展开
@@ -542,7 +602,7 @@ struct CommitLogWindowView: View {
 
     /// 当前可见提交是否已全部展开(与 Diff 查看器"全部展开/折叠"按钮同语义)。
     private func allExpanded(_ state: CommitLogPresentationState) -> Bool {
-        let visible = state.filteredCommits
+        let visible = state.visibleCommits
         guard visible.isEmpty == false else { return false }
         return visible.allSatisfy { expandedIDs.contains($0.id) }
     }
@@ -575,7 +635,7 @@ struct CommitLogWindowView: View {
             expandedIDs.removeAll()
             return
         }
-        let visible = state.filteredCommits
+        let visible = state.visibleCommits
         guard visible.isEmpty == false else { return }
         for commit in visible {
             expandedIDs.insert(commit.id)

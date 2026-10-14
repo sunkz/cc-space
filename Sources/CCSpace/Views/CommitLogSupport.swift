@@ -1,14 +1,18 @@
 import Foundation
 
-/// 提交记录 popover 的展示状态:按关键词过滤提交、计数与空态文案。
-/// "仅看未推送"切换数据源(全量 / @{u}..HEAD),关键词过滤始终在已加载的列表上进行。
+/// 提交记录窗口的展示状态:计数与空态文案。
+///
+/// 关键词过滤不在这里做——已下推到 `git log`(见 `GitService.commitLogPage`),
+/// 在内存里再筛一遍会把 git 命中的**提交正文**判掉(本类型只持有 subject/author/hash),
+/// 反而重新造成"搜不到更早/更深命中"。
+/// "仅看未推送"切换数据源(全量 / @{u}..HEAD),搜索始终作用于当前数据源。
 struct CommitLogPresentationState: Equatable {
     enum Scope: Equatable {
         case all
         case unpushedOnly
     }
 
-    let filteredCommits: [GitCommitEntry]
+    let visibleCommits: [GitCommitEntry]
     let countLabel: String
     let emptyTitle: String
     let emptySubtitle: String
@@ -22,31 +26,26 @@ struct CommitLogPresentationState: Equatable {
         hasUpstream: Bool,
         isRemoteTrackingRef: Bool = false
     ) {
-        let trimmedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmedSearchText.isEmpty {
-            filteredCommits = commits
-        } else {
-            filteredCommits = commits.filter { entry in
-                entry.subject.localizedCaseInsensitiveContains(trimmedSearchText)
-                    || entry.author.localizedCaseInsensitiveContains(trimmedSearchText)
-                    || entry.hash.localizedCaseInsensitiveContains(trimmedSearchText)
-            }
-        }
+        visibleCommits = commits
+        let isSearching = searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
 
         let unit = scope == .unpushedOnly ? "条未推送提交" : "条提交"
-        countLabel = "\(filteredCommits.count) \(unit)"
+        countLabel = isSearching
+            ? "匹配 \(visibleCommits.count) \(unit)"
+            : "\(visibleCommits.count) \(unit)"
 
-        if commits.isEmpty {
-            if scope == .unpushedOnly {
-                emptyTitle = "没有未推送的提交"
-                emptySubtitle = "当前分支的提交都已推送到远端"
-            } else {
-                emptyTitle = "暂无提交记录"
-                emptySubtitle = ""
-            }
-        } else {
+        if visibleCommits.isEmpty == false {
+            emptyTitle = ""
+            emptySubtitle = ""
+        } else if isSearching {
             emptyTitle = "未找到匹配提交"
-            emptySubtitle = "试试提交说明、作者或 commit ID 中的关键词。"
+            emptySubtitle = "已在全部历史提交的说明、作者与 commit ID 中搜索。"
+        } else if scope == .unpushedOnly {
+            emptyTitle = "没有未推送的提交"
+            emptySubtitle = "当前分支的提交都已推送到远端"
+        } else {
+            emptyTitle = "暂无提交记录"
+            emptySubtitle = ""
         }
 
         canFilterUnpushed = hasUpstream

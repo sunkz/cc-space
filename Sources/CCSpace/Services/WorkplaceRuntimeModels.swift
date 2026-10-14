@@ -34,9 +34,6 @@ struct WorkplaceBatchOperationResult: Equatable {
         self.failedNames = failedNames
     }
 
-    var attemptedCount: Int {
-        successCount + failedCount + skippedCount + cancelledCount
-    }
 }
 
 typealias BatchResultSummary = WorkplaceBatchOperationResult

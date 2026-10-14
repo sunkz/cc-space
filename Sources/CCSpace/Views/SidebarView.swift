@@ -10,6 +10,8 @@ struct SidebarView: View {
     let onDuplicateWorkplace: (Workplace) -> Void
     let onToggleArchived: (Workplace) -> Void
     @State private var searchText = ""
+    @State private var sortControlHovered = false
+    @State private var createControlHovered = false
     @AppStorage("SidebarView.workplaceSortMode") private var workplaceSortMode: WorkplaceSortMode = .name
 
     private var presentationState: SidebarPresentationState {
@@ -60,13 +62,15 @@ struct SidebarView: View {
                                     .font(.system(size: 11, weight: .bold))
                                     // borderless Menu 的 label 不认 foregroundStyle(连显式
                                     // Color 都会被静默忽略,实测渲染成主色近黑),只认按钮级
-                                    // tint;必须用 tint 才与右侧新建按钮同样是次级灰。
-                                    .tint(.secondary)
+                                    // tint;要与右侧新建按钮同色就得走 tint。
+                                    .tint(.primary)
                             }
                             .menuStyle(.borderlessButton)
                             .menuIndicator(.hidden)
                             .controlSize(.small)
                             .frame(width: 22, height: 22)
+                            .ccspaceHeaderIconChip(isHovered: sortControlHovered)
+                            .onHover { sortControlHovered = $0 }
                             .accessibilityLabel("排序方式")
                             .ccspaceQuickHelp("选择工作区排序方式")
 
@@ -75,11 +79,13 @@ struct SidebarView: View {
                             } label: {
                                 Image(systemName: "folder.badge.plus")
                                     .font(.system(size: 11, weight: .bold))
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(.primary)
                             }
                             .buttonStyle(.plain)
                             .frame(width: 22, height: 22)
                             .contentShape(Rectangle())
+                            .ccspaceHeaderIconChip(isHovered: createControlHovered)
+                            .onHover { createControlHovered = $0 }
                             // 不用 Cmd+N:macOS 惯例是"新建窗口",占用后用户按不出
                             // 预期行为且没有对应菜单项告知。Cmd+Shift+N 与"新增"语义一致。
                             .keyboardShortcut("n", modifiers: [.command, .shift])
@@ -149,5 +155,18 @@ struct SidebarView: View {
             onDuplicateWorkplace: onDuplicateWorkplace,
             onToggleArchived: onToggleArchived
         )
+    }
+}
+
+private extension View {
+    /// 悬浮底色。`.plain` 按钮与 borderless Menu 都不带任何按压/悬浮反馈,
+    /// header 里只剩一个灰色小图标时会被当成不可点的装饰,补这层底色作可供性。
+    /// 动效沿用 `CCSpaceIconActionButtonModifier` 的 snappy 0.18。
+    func ccspaceHeaderIconChip(isHovered: Bool) -> some View {
+        background(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(isHovered ? Color.primary.opacity(0.08) : Color.clear)
+        )
+        .animation(.snappy(duration: 0.18), value: isHovered)
     }
 }

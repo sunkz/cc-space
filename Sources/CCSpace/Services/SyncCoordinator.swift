@@ -32,9 +32,6 @@ struct RepositoryPullResult: Sendable {
         self.branchSummaries = branchSummaries
     }
 
-    var attemptedCount: Int {
-        successCount + failedCount + skippedCount
-    }
 }
 
 private struct PullPreparationResult {
@@ -203,9 +200,17 @@ struct SyncCoordinator: Sendable {
             }
 
             var states: [RepositorySyncState] = []
+            var didLogCancellation = false
             while let state = try await group.next() {
                 states.append(state)
                 guard Task.isCancelled == false else {
+                    if didLogCancellation == false {
+                        didLogCancellation = true
+                        // 批量克隆此前全程无日志:取消/半途失败只能靠上层兜,排障时无从定位。
+                        syncCoordinatorLog.notice(
+                            "event=clone_batch_cancelled scheduled=\(repositories.count, privacy: .public) remaining=\(repositories.count - nextRepositoryIndex, privacy: .public)"
+                        )
+                    }
                     group.cancelAll()
                     continue
                 }
@@ -295,6 +300,11 @@ struct SyncCoordinator: Sendable {
                 var failedState = state
                 failedState.status = .failed
                 failedState.lastError = UserFacingError.message(for: error)
+                // 批量 pull 此前无日志:失败原因(网络/锁/权限)只能靠 UI 行的 lastError 反推。
+                // path 保持默认 private(含用户主目录名),原因显式 public 以便读出。
+                syncCoordinatorLog.error(
+                    "event=pull_failed path=\(state.localPath) reason=\(failedState.lastError ?? "", privacy: .public)"
+                )
                 return (state, failedState, nil, false)
             }
         }
@@ -461,11 +471,6 @@ struct SyncCoordinator: Sendable {
         try await RepositoryOperationLock.shared.withLock(path: directory) {
             try await gitService.createBranch(branch, fromRev: rev, in: directory)
         }
-    }
-
-    @MainActor
-    func isGitAvailable() async -> Bool {
-        await gitService.isGitAvailable()
     }
 
     private static func runLimitedTasks<Input: Sendable, Output: Sendable>(

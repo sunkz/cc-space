@@ -48,18 +48,35 @@ final class RunScriptTests: XCTestCase {
     /// vtool 外观补丁失败必须可见:此前 `|| true` 吞错后仍无条件打印 "Patched",
     /// 真失败时误导排查。只锁语义不变量——失败提示存在、vtool 调用行不吞错不静默——
     /// 不锁定具体变量名/命令拼接形式/调用行数等实现细节,避免重构即碎。
-    func test_runScriptReportsVtoolPatchFailureInsteadOfSwallowing() throws {
+    func test_sdkPatchReportsVtoolFailureInsteadOfSwallowing() throws {
         let script = try String(
-            contentsOf: repoRoot.appendingPathComponent("run.sh"),
+            contentsOf: repoRoot.appendingPathComponent("script/patch_app_sdk.sh"),
             encoding: .utf8
         )
 
         XCTAssertTrue(script.contains("vtool patch failed"))
         let vtoolLines = script.split(separator: "\n").filter { $0.contains("vtool -set-build-version") }
-        XCTAssertFalse(vtoolLines.isEmpty, "run.sh 应存在 vtool 补丁调用,否则本测试没有覆盖对象")
+        XCTAssertFalse(vtoolLines.isEmpty, "补丁脚本应存在 vtool 调用,否则本测试没有覆盖对象")
         for line in vtoolLines {
             XCTAssertFalse(line.contains("|| true"), "vtool 调用行不得吞错: \(line)")
             XCTAssertFalse(line.contains(">/dev/null"), "vtool 调用行不得丢弃输出: \(line)")
+        }
+    }
+
+    /// 凡是"打包本地产物后直接运行/截图"的脚本都必须调用同一份 SDK 补丁:
+    /// 补丁原先内联在 run.sh 的 cmd_run,README 截图脚本自行调 package_app.sh 绕过它,
+    /// 产出的截图全是旧外观且无人报错(2026-10-13)。
+    func test_localPackagingScriptsInvokeSharedSDKPatch() throws {
+        for relativePath in ["run.sh", "script/generate_readme_screenshots.sh"] {
+            let script = try String(
+                contentsOf: repoRoot.appendingPathComponent(relativePath),
+                encoding: .utf8
+            )
+
+            XCTAssertTrue(
+                script.contains("script/patch_app_sdk.sh"),
+                "\(relativePath) 打包本地产物后必须调用 SDK 外观补丁"
+            )
         }
     }
 
@@ -147,6 +164,90 @@ final class RunScriptTests: XCTestCase {
             "",
             "同名普通文件不是 bundle(-type d),应回显空串而不是交给 xcrun xctest"
         )
+    }
+
+    /// `script/version.sh` 是版本号的**单一事实来源**(run.sh、release.sh、
+    /// generate_readme_screenshots.sh 都依赖它),此前 run.sh 与截图脚本各持一份互相
+    /// 矛盾的实现,收敛到本脚本后一直没有测试。这里真跑脚本锁定三条语义:
+    /// - 取**全局最新** tag(`--sort=-version:refname`),而不是 `git describe` 那样的
+    ///   "HEAD 可达 tag"——分支分叉后后者会取到旧版本号,打包版本与最新发布不符;
+    /// - 版本序按数字而非字典序:v0.0.10 必须排在 v0.0.9 之前;
+    /// - 非 `vX.Y.Z` 形态的 tag 一律忽略,无合法 tag 时回退 0.0.0 而不是失败。
+    func test_versionScriptDerivesLatestSemverTag() throws {
+        let tagged = try makeTaggedFixtureRepository(
+            tags: ["v0.0.1", "v0.0.9", "v0.0.10", "v1.2", "release-3.0.0", "0.0.4"]
+        )
+        XCTAssertEqual(
+            try runVersionScript(in: tagged),
+            "0.0.10",
+            "必须取全局最新 semver tag,并按数字序比较(字典序会得出 v0.0.9)"
+        )
+
+        let untagged = try makeTaggedFixtureRepository(tags: [])
+        XCTAssertEqual(
+            try runVersionScript(in: untagged),
+            "0.0.0",
+            "没有任何合法 tag 时必须回退 0.0.0:开发场景不该被版本号卡住"
+        )
+    }
+
+    /// 造一个带指定 tag 的临时 git 仓库。
+    private func makeTaggedFixtureRepository(tags: [String]) throws -> URL {
+        let root = makeTestRootURL()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let setup: [[String]] = [
+            ["git", "-C", root.path, "init"],
+            [
+                "git", "-C", root.path,
+                "-c", "user.email=tests@example.com",
+                "-c", "user.name=CCSpace Tests",
+                "commit", "--allow-empty", "-m", "init",
+            ],
+        ]
+        for arguments in setup {
+            let result = try ShellHelper.run(arguments)
+            XCTAssertEqual(
+                result.terminationStatus,
+                0,
+                "fixture 仓库准备失败(\(arguments.joined(separator: " "))): \(result.combinedOutput)"
+            )
+        }
+        for tag in tags {
+            let result = try ShellHelper.run(["git", "-C", root.path, "tag", tag])
+            XCTAssertEqual(result.terminationStatus, 0, "打 tag \(tag) 失败: \(result.combinedOutput)")
+        }
+        return root
+    }
+
+    /// 把 `script/version.sh` 拷进被测仓库的 `script/` 下再执行:脚本按 `BASH_SOURCE`
+    /// 反推仓库根,原地执行会取到本仓库自己的 tag。
+    private func runVersionScript(in repositoryRoot: URL) throws -> String {
+        let scriptDirectory = repositoryRoot.appendingPathComponent("script", isDirectory: true)
+        try FileManager.default.createDirectory(at: scriptDirectory, withIntermediateDirectories: true)
+        let scriptURL = scriptDirectory.appendingPathComponent("version.sh")
+        try Data(
+            contentsOf: repoRoot.appendingPathComponent("script/version.sh")
+        ).write(to: scriptURL)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [scriptURL.path]
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        // 先读管道再 wait(见 ShellHelper 注释);本脚本输出极小,不会触发管道写满。
+        let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
+        let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        XCTAssertEqual(
+            process.terminationStatus,
+            0,
+            "version.sh 应以 0 退出: \(String(data: stderrData, encoding: .utf8) ?? "")"
+        )
+        let output = String(data: stdoutData, encoding: .utf8) ?? ""
+        return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// 从 run.sh 抽出 locate_test_bundle 函数体(定义行到首个顶格 `}`),

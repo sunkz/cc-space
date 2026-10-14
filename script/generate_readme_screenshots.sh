@@ -4,7 +4,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 README_FILE="${ROOT_DIR}/README.md"
 FIXTURE_DIR="${ROOT_DIR}/script/readme-screenshot-fixture"
-SCREENSHOT_SKILL_DIR="${HOME}/.codex/skills/screenshot"
 
 APP_NAME="CCSpace"
 APP_BUNDLE="${ROOT_DIR}/dist/${APP_NAME}.app"
@@ -64,23 +63,12 @@ done
 
 require_commands() {
     local command_name
-    for command_name in git open osascript python3 swift; do
+    for command_name in git open osascript python3 swift screencapture; do
         command -v "${command_name}" >/dev/null 2>&1 || {
             echo "Missing required command: ${command_name}" >&2
             exit 1
         }
     done
-
-    [[ -f "${SCREENSHOT_SKILL_DIR}/scripts/ensure_macos_permissions.sh" ]] || {
-        echo "Missing screenshot permission helper: ${SCREENSHOT_SKILL_DIR}/scripts/ensure_macos_permissions.sh" >&2
-        echo "本脚本依赖仓库外的私有 screenshot skill(不在本仓库内),请先安装到 ${SCREENSHOT_SKILL_DIR},见 README「README 截图」。" >&2
-        exit 1
-    }
-    [[ -f "${SCREENSHOT_SKILL_DIR}/scripts/take_screenshot.py" ]] || {
-        echo "Missing screenshot capture helper: ${SCREENSHOT_SKILL_DIR}/scripts/take_screenshot.py" >&2
-        echo "本脚本依赖仓库外的私有 screenshot skill(不在本仓库内),请先安装到 ${SCREENSHOT_SKILL_DIR},见 README「README 截图」。" >&2
-        exit 1
-    }
 }
 
 cleanup() {
@@ -115,6 +103,11 @@ build_app_bundle() {
         --binary "${ROOT_DIR}/.build/debug/${APP_NAME}" \
         --output "${APP_BUNDLE}" \
         --version "${version}" >/dev/null
+
+    # 必须补 SDK 字段:未打的产物被 AppKit 判定为旧 SDK 链接、回退旧外观,
+    # README 里就会是一批老样子的截图(补丁与 run.sh 共用同一份实现)。
+    "${ROOT_DIR}/script/patch_app_sdk.sh" \
+        --binary "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
 }
 
 prepare_demo_data() {
@@ -346,8 +339,13 @@ wait_for_window_id() {
     exit 1
 }
 
-ensure_screenshot_permissions() {
-    bash "${SCREENSHOT_SKILL_DIR}/scripts/ensure_macos_permissions.sh" >/dev/null
+# 按 window id 抓单个窗口。不带 -o,保留窗口阴影——仓库现有 3 张正式截图就是
+# 含阴影的取景(产物带 alpha,四边是阴影的透明留白),对齐才不会让 README 图忽大忽小。
+capture_window() {
+    local window_id="$1"
+    local output_path="$2"
+
+    screencapture -x -l"${window_id}" "${output_path}" >/dev/null 2>&1
 }
 
 # 就绪信号:窗口像素内容连续 N 次采样哈希一致才认为渲染完成,替代固定 sleep。
@@ -375,8 +373,7 @@ wait_for_window_settle() {
     sleep "${floor_seconds}"
 
     for (( attempt = 1; attempt <= max_attempts; attempt++ )); do
-        if python3 "${SCREENSHOT_SKILL_DIR}/scripts/take_screenshot.py" \
-            --window-id "${window_id}" --path "${settle_shot}" >/dev/null 2>&1; then
+        if capture_window "${window_id}" "${settle_shot}"; then
             shot_ok=$((shot_ok + 1))
             hash="$(shasum -a 256 "${settle_shot}" | awk '{print $1}')"
             if [[ -n "${prev_hash}" && "${hash}" == "${prev_hash}" ]]; then
@@ -405,7 +402,7 @@ wait_for_window_settle() {
     # 两种终态分开报:一次都没截成功时,"内容不稳定"是假象,真因是截图工具本身挂了
     # (权限被吊销、skill 脚本损坏等)——混成一句会让排查方向跑偏。
     if [[ "${shot_ok}" -eq 0 ]]; then
-        echo "  错误: 截图工具连续 ${shot_failed} 次执行失败(${SCREENSHOT_SKILL_DIR}/scripts/take_screenshot.py),一次采样都没成功——请检查屏幕录制权限与该工具本身,这不是窗口内容不稳定" >&2
+        echo "  错误: 截图命令连续 ${shot_failed} 次执行失败(screencapture -x -l${window_id}),一次采样都没成功——请检查屏幕录制权限与该命令本身,这不是窗口内容不稳定" >&2
     else
         echo "  错误: 等待窗口内容稳定超时(共尝试 ${max_attempts} 次,其中成功采样 ${shot_ok} 次、截图命令失败 ${shot_failed} 次),截图内容可能未加载完整" >&2
     fi
@@ -457,9 +454,11 @@ capture_target() {
     fi
 
     osascript -e 'tell application "CCSpace" to activate' >/dev/null 2>&1 || true
-    python3 "${SCREENSHOT_SKILL_DIR}/scripts/take_screenshot.py" \
-        --window-id "${window_id}" \
-        --path "${target_path}" >/dev/null
+    if ! capture_window "${window_id}" "${target_path}"; then
+        pkill -x "${APP_NAME}" >/dev/null 2>&1 || true
+        echo "   !! screencapture 截图失败:${relative_target} 未更新(窗口 id ${window_id}),请检查屏幕录制权限。" >&2
+        exit 1
+    fi
     pkill -x "${APP_NAME}" >/dev/null 2>&1 || true
 
     echo "   Saved to ${target_path}"
@@ -470,7 +469,6 @@ main() {
     local target targets targets_rc=0
 
     require_commands
-    ensure_screenshot_permissions
     build_app_bundle
     prepare_demo_data
 

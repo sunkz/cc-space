@@ -19,6 +19,13 @@ final class AppViewModel: ObservableObject {
     ///   (上次选中项缺失/非法/已删)时传 false:那往往是本轮工作区记录被损坏重置的
     ///   结果,落盘 nil 会级联改写设置文件(旧版本该分支也是只切路由不写)。
     func showRoute(_ route: AppRoute, notifySelectionChange: Bool = true) {
+        // 刻意**不**做"值未变就提前返回"的空操作守卫(第八轮评审曾误判为优化点):
+        // 模型只知道自己的状态,不知道设置文件里已持久化的值。启动恢复走 .settings
+        // 时(默认路由即 .settings)内存态本就有 route == .settings && selected == nil,
+        // 守卫会拦掉这次回调,而文件里可能还留着上一轮的 lastSelectedWorkplaceID——
+        // 下一次启动的恢复逻辑读到它就会把 App 直接开进那个工作区,
+        // 变成"上次停在设置页,却打开在工作区页"的幽灵状态。
+        // 冗余的防抖写(同值覆写)代价远小于漏写一个已失效的选中项。
         self.route = route
         selectedWorkplaceID = nil
         onRouteChange?(route)

@@ -137,12 +137,10 @@ final class RepositoryWindowContext: ObservableObject {
         case directoryMissing(String)
     }
 
-    /// 按分页参数加载提交列表(全量或仅未推送);count 内部加一探测是否还有更多。
+    /// 按分页参数加载一页提交列表(全量 / 仅未推送,可带关键词搜索)。
+    /// 关键词过滤与偏移都由 `commitLogPage` 下推给 git,本类只负责目录探测与代际防过期写回。
     func loadCommits(
-        directory: String,
-        limit: Int,
-        rev: String?,
-        unpushedOnly: Bool,
+        request: CommitLogPageRequest,
         completion: @escaping @MainActor (CommitLogLoadOutcome) -> Void
     ) {
         logTask?.cancel()
@@ -155,6 +153,7 @@ final class RepositoryWindowContext: ObservableObject {
             // 探测走 Task.detached:外置盘/网盘的 stat 可达数百毫秒,本类是
             // @MainActor,Task{} 会继承主线程、Task.detached 才真正离开
             // (与项目内"fileExists 必须移出主线程"的既有约定对齐)。
+            let directory = request.directory
             let directoryExists: Bool = await Task.detached(priority: .userInitiated) {
                 FileManager.default.fileExists(atPath: directory)
             }.value
@@ -163,14 +162,9 @@ final class RepositoryWindowContext: ObservableObject {
                 completion(.directoryMissing(directory))
                 return
             }
-            let fetched: [GitCommitEntry]
-            if unpushedOnly {
-                fetched = await service.unpushedCommits(in: directory, count: limit + 1, rev: rev)
-            } else {
-                fetched = await service.recentCommits(in: directory, count: limit + 1, rev: rev)
-            }
+            let page = await service.commitLogPage(request)
             guard !Task.isCancelled, requestID == logRequestID else { return }
-            completion(.success(commits: fetched, hasMore: fetched.count > limit))
+            completion(.success(commits: page.commits, hasMore: page.hasMore))
         }
     }
 
@@ -179,32 +173,5 @@ final class RepositoryWindowContext: ObservableObject {
     /// 失败」由 DiffViewerView 提供,这里只给成因,避免标题与文案重复。
     static func localizedDiffFailureMessage(_ error: Error) -> String {
         UserFacingError.message(for: error)
-    }
-}
-
-/// 新增仓库的多步编排:建档 → 按 URL 回查 id → 回填 MR 目标分支 → 取更新后的实时记录。
-///
-/// 原先内联在 AddRepositorySheetView,View 不直接编排 store 的写入序列(AGENTS.md:
-/// 「View 不直接调 git」同一精神)。返回的必须是 update 之后的实时记录——此前上抛的是
-/// updateRepository **之前**查出的快照,"新增后直接编辑"弹窗里 MR 目标分支/默认分支
-/// 全是空值,改动基线也随之失真。按 URL 回查不到新增记录时返回 nil(调用方跳过回调)。
-@MainActor
-enum RepositoryAddOrchestrator {
-    static func addRepository(
-        gitURL: String,
-        mrTargetBranches: [String],
-        store: RepositoryStore
-    ) throws -> RepositoryConfig? {
-        try store.addRepository(gitURL: gitURL)
-        let addedID = store.repositories.first(where: { $0.gitURL == gitURL })?.id
-        if let addedID, mrTargetBranches.isEmpty == false {
-            try store.updateRepository(
-                id: addedID,
-                gitURL: gitURL,
-                mrTargetBranches: mrTargetBranches
-            )
-        }
-        guard let addedID else { return nil }
-        return store.repositories.first(where: { $0.id == addedID })
     }
 }

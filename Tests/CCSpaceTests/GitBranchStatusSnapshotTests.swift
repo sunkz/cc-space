@@ -19,7 +19,6 @@ final class GitBranchStatusSnapshotTests: XCTestCase {
         XCTAssertEqual(snapshot.behindCount, 0)
         XCTAssertFalse(snapshot.hasUnpushedCommits)
         XCTAssertFalse(snapshot.isBehindRemote)
-        XCTAssertTrue(snapshot.isClean)
     }
 
     func test_parsePorcelainV2DetectsDirtyAheadBehindBranch() {
@@ -41,7 +40,6 @@ final class GitBranchStatusSnapshotTests: XCTestCase {
         XCTAssertEqual(snapshot.behindCount, 1)
         XCTAssertTrue(snapshot.hasUnpushedCommits)
         XCTAssertTrue(snapshot.isBehindRemote)
-        XCTAssertFalse(snapshot.isClean)
     }
 
     func test_parsePorcelainV2DetectsBranchWithoutUpstream() {
@@ -59,7 +57,6 @@ final class GitBranchStatusSnapshotTests: XCTestCase {
         XCTAssertEqual(snapshot.behindCount, 0)
         XCTAssertFalse(snapshot.hasUnpushedCommits)
         XCTAssertFalse(snapshot.isBehindRemote)
-        XCTAssertFalse(snapshot.isClean)
     }
 
     func test_parsePorcelainV2KeepsLargerCounts() {
@@ -118,7 +115,6 @@ final class GitBranchStatusSnapshotTests: XCTestCase {
         XCTAssertEqual(snapshot.conflictCount, 2)
         XCTAssertEqual(snapshot.unmergedPaths, ["f.txt", "new/both_added.txt"])
         XCTAssertTrue(snapshot.hasUncommittedChanges)
-        XCTAssertFalse(snapshot.isClean)
         XCTAssertNil(snapshot.interruptedOperation)
     }
 
@@ -173,7 +169,6 @@ final class GitBranchStatusSnapshotTests: XCTestCase {
 
         XCTAssertFalse(snapshot.hasConflicts)
         XCTAssertEqual(snapshot.conflictCount, 0)
-        XCTAssertTrue(snapshot.isClean)
     }
 }
 

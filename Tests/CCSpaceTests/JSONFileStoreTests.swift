@@ -238,7 +238,7 @@ final class JSONFileStoreTests: XCTestCase {
         try fileManager.createDirectory(at: backup, withIntermediateDirectories: true)
         try Data("OLD-A".utf8).write(to: backup.appendingPathComponent("a.json"))
         try Data("NEW-B".utf8).write(to: staging.appendingPathComponent("b.json"))
-        try writeManifest(stagingName: stagingName, fileNames: ["a.json", "b.json"], in: root)
+        try writeManifest(stagingName: stagingName, fileNames: ["a.json", "b.json"], in: root, modificationDate: Date().addingTimeInterval(-30))
 
         JSONFileStore.cleanupStaleStagingDirectories(in: root, olderThan: 0)
 
@@ -271,7 +271,8 @@ final class JSONFileStoreTests: XCTestCase {
         try writeManifest(
             stagingName: stagingName,
             fileNames: ["a.json", "sync-states.json", "c.json"],
-            in: root
+            in: root,
+            modificationDate: Date().addingTimeInterval(-30)
         )
 
         JSONFileStore.cleanupStaleStagingDirectories(in: root, olderThan: 0)
@@ -296,13 +297,49 @@ final class JSONFileStoreTests: XCTestCase {
         try fileManager.createDirectory(at: backup, withIntermediateDirectories: true)
         try Data("OLD-A".utf8).write(to: backup.appendingPathComponent("a.json"))
         try Data("OLD-B".utf8).write(to: backup.appendingPathComponent("b.json"))
-        try writeManifest(stagingName: stagingName, fileNames: ["a.json", "b.json"], in: root)
+        try writeManifest(stagingName: stagingName, fileNames: ["a.json", "b.json"], in: root, modificationDate: Date().addingTimeInterval(-30))
 
         JSONFileStore.cleanupStaleStagingDirectories(in: root, olderThan: 0)
 
         XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("a.json"), encoding: .utf8), "NEW-A")
         XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("b.json"), encoding: .utf8), "NEW-B")
         XCTAssertFalse(fileManager.fileExists(atPath: staging.path))
+    }
+
+    /// 崩溃后用户继续使用、目标文件已被合法重写:陈旧清单在之后的启动里
+    /// 不得把"崩溃之后的新数据"回滚吞掉(10-10 review P1 防线)。
+    func test_startupRecoverySkipsRollbackForFilesRewrittenAfterCrash() throws {
+        let root = makeTestRootURL()
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+
+        // 崩溃发生在 1 小时前(a.json 已被事务提交,backup=OLD-A);
+        // 崩溃后用户继续使用,a.json 于"现在"被合法重写为 POST-CRASH-A。
+        try Data("POST-CRASH-A".utf8).write(to: root.appendingPathComponent("a.json"))
+        try Data("OLD-B".utf8).write(to: root.appendingPathComponent("b.json"))
+        let stagingName = ".ccspace-json-write-\(UUID().uuidString)"
+        let staging = root.appendingPathComponent(stagingName, isDirectory: true)
+        let backup = staging.appendingPathComponent("backup", isDirectory: true)
+        try fileManager.createDirectory(at: backup, withIntermediateDirectories: true)
+        try Data("OLD-A".utf8).write(to: backup.appendingPathComponent("a.json"))
+        try Data("NEW-B".utf8).write(to: staging.appendingPathComponent("b.json"))
+        try writeManifest(
+            stagingName: stagingName,
+            fileNames: ["a.json", "b.json"],
+            in: root,
+            modificationDate: Date().addingTimeInterval(-3600)
+        )
+
+        JSONFileStore.cleanupStaleStagingDirectories(in: root, olderThan: 0)
+
+        // a.json 的 mtime 比清单晚出阈值 → 判为崩溃后重写,跳过换回;
+        // b.json 从未提交,目标保持旧值;残留清单与暂存被前滚清理。
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("a.json"), encoding: .utf8), "POST-CRASH-A")
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("b.json"), encoding: .utf8), "OLD-B")
+        XCTAssertFalse(fileManager.fileExists(atPath: staging.path))
+        let manifests = try fileManager.contentsOfDirectory(atPath: root.path)
+            .filter { $0.hasPrefix(".ccspace-json-txn-") }
+        XCTAssertTrue(manifests.isEmpty)
     }
 
     func test_startupRecoveryLeavesFreshManifestAlone() throws {
@@ -379,6 +416,101 @@ final class JSONFileStoreTests: XCTestCase {
         XCTAssertThrowsError(
             try JSONFileStore.fsyncDirectory(atPath: root.appendingPathComponent("missing-dir").path)
         )
+    }
+
+    // MARK: - 损坏副本与回滚备份的保留策略
+
+    /// 损坏副本此前会永久累积(其中 settings.json 的副本含明文 API Key),
+    /// 必须只保留最近 5 份。
+    func test_preserveCorruptFileKeepsOnlyFiveMostRecentCopies() throws {
+        let root = makeTestRootURL()
+        let fileManager = FileManager.default
+        let store = JSONFileStore(rootDirectory: root)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent("settings.json")
+
+        for index in 0..<8 {
+            try Data("{\"apiKey\":\"secret-\(index)\"}".utf8).write(to: source)
+            store.preserveCorruptFile(named: "settings.json")
+        }
+
+        let copies = try fileManager.contentsOfDirectory(atPath: root.path)
+            .filter { $0.hasPrefix("settings.json.corrupt-") }
+        XCTAssertEqual(copies.count, 5, "损坏副本必须只保留最近 5 份")
+        // 保全优先改名(move):原文件必须已不在原地,否则后续保存会把它覆写成空数据。
+        XCTAssertFalse(fileManager.fileExists(atPath: source.path))
+        // 副本含明文 API Key,必须收紧为仅本人可读写。
+        let copyAttributes = try fileManager.attributesOfItem(
+            atPath: root.appendingPathComponent(copies[0]).path
+        )
+        XCTAssertEqual(copyAttributes[.posixPermissions] as? Int, 0o600)
+    }
+
+    /// 源文件不存在时保全必须是无害空操作,不得凭空造出空副本
+    /// (空副本会被误当成"损坏内容"误导排查)。
+    func test_preserveCorruptFileIsNoOpWhenSourceMissing() throws {
+        let root = makeTestRootURL()
+        let fileManager = FileManager.default
+        let store = JSONFileStore(rootDirectory: root)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+
+        store.preserveCorruptFile(named: "workplaces.json")
+
+        let entries = try fileManager.contentsOfDirectory(atPath: root.path)
+        XCTAssertTrue(entries.isEmpty, "源文件不存在时不得生成空副本: \(entries)")
+    }
+
+    /// 回滚备份目录逃过暂存目录清理(否则"可手工取回"落空),但并非永久保留:
+    /// 仅"超出保留份数 **且** 超过 24h 龄期"的才回收。
+    func test_startupCleanupPrunesAgedRollbackBackupsBeyondRetentionCount() throws {
+        let root = makeTestRootURL()
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        try makeRollbackBackups(count: 5, in: root, ageHours: 48)
+
+        JSONFileStore.cleanupStaleStagingDirectories(in: root)
+
+        XCTAssertEqual(
+            try rollbackBackupNames(in: root).count,
+            3,
+            "超出保留份数(3)且已过龄期的备份必须回收,否则会无限累积"
+        )
+    }
+
+    /// 年龄下限优先于保留份数:刚产生的备份(崩溃循环下用户尚未取回、且含明文 API Key)
+    /// 绝不能在下次启动就被剪掉。
+    func test_startupCleanupKeepsFreshRollbackBackupsBeyondRetentionCount() throws {
+        let root = makeTestRootURL()
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        try makeRollbackBackups(count: 5, in: root, ageHours: 0)
+
+        JSONFileStore.cleanupStaleStagingDirectories(in: root)
+
+        XCTAssertEqual(
+            try rollbackBackupNames(in: root).count,
+            5,
+            "未过 24h 龄期的备份一份都不许剪"
+        )
+    }
+
+    private func makeRollbackBackups(count: Int, in root: URL, ageHours: Double) throws {
+        for index in 0..<count {
+            let backup = root.appendingPathComponent(
+                ".ccspace-json-rollback-backup-\(index)",
+                isDirectory: true
+            )
+            try FileManager.default.createDirectory(at: backup, withIntermediateDirectories: true)
+            try FileManager.default.setAttributes(
+                [.modificationDate: Date().addingTimeInterval(-ageHours * 3600)],
+                ofItemAtPath: backup.path
+            )
+        }
+    }
+
+    private func rollbackBackupNames(in root: URL) throws -> [String] {
+        try FileManager.default.contentsOfDirectory(atPath: root.path)
+            .filter { $0.hasPrefix(".ccspace-json-rollback-backup-") }
     }
 }
 

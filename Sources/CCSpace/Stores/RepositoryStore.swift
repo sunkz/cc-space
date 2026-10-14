@@ -17,7 +17,11 @@ struct RepositoryBackupEntry: Codable, Equatable, Sendable {
         case mrTargetBranches
     }
 
-    init(gitURL: String, defaultBranch: String? = nil, mrTargetBranches: [String] = []) {
+    init(
+        gitURL: String,
+        defaultBranch: String? = nil,
+        mrTargetBranches: [String] = []
+    ) {
         self.gitURL = gitURL
         self.defaultBranch = defaultBranch
         self.mrTargetBranches = mrTargetBranches
@@ -62,6 +66,10 @@ struct RepositoryImportResult: Equatable, Sendable {
 struct RepositoryDeduplicationResult: Sendable {
     let repositories: [RepositoryConfig]
     let changed: Bool
+    /// 被删重复项 id → 保留项 id。引用重映射用它把 selected/pinned/syncState
+    /// 从被删项转到保留项——此前"直接摘除引用"会让同时引用两条重复项的
+    /// 工作区明明有同 URL 的存活配置却丢掉仓库。
+    var idRemapping: [UUID: UUID] = [:]
 }
 
 enum RepositoryStoreError: LocalizedError, Equatable {
@@ -69,7 +77,6 @@ enum RepositoryStoreError: LocalizedError, Equatable {
     case duplicateRepoName
     case invalidRepoName
     case notFound
-    case repoNameChangeNotSupported
     case invalidBackupFormat
     case unsupportedBackupVersion(Int)
     case emptyBackup
@@ -85,8 +92,6 @@ enum RepositoryStoreError: LocalizedError, Equatable {
             return "仓库名称不能包含路径分隔符，且不能为 . 或 .."
         case .notFound:
             return "仓库不存在"
-        case .repoNameChangeNotSupported:
-            return "暂不支持通过编辑修改仓库名称，请新增仓库后替换"
         case .invalidBackupFormat:
             return "备份文件格式无效"
         case .unsupportedBackupVersion(let version):
@@ -141,6 +146,18 @@ final class RepositoryStore: ObservableObject {
             ) {
                 self.repositories = RepositoryStore.deduplicatedIDs(tolerated.values)
                 repositoryStoreLog.error("event=recovered_partial_repositories kept=\(tolerated.values.count, privacy: .public) dropped=\(tolerated.droppedCount, privacy: .public)")
+                // 抢救成功即回写:preserveCorruptFile 会把原文件改名拿走,只把子集留在
+                // 内存不落盘的话,本会话若没有其它写盘动作,文件就保持缺失——下次启动
+                // loadIfPresent 见文件不存在直接返回空列表且不再有横幅,表现为"仓库凭空
+                // 少一批记录"。失败只留痕:init 不该因写盘失败让 App 起不来,数据仍可从
+                // .corrupt- 副本取回。
+                do {
+                    try fileStore.save(self.repositories, as: "repositories.json")
+                } catch {
+                    repositoryStoreLog.error(
+                        "event=salvaged_subset_rewrite_failed reason=\(error.localizedDescription, privacy: .public)"
+                    )
+                }
             } else {
                 self.repositories = []
             }
@@ -187,8 +204,14 @@ final class RepositoryStore: ObservableObject {
         JSONFileStore.makeDecoder()
     }
 
-    func addRepository(gitURL: String) throws {
-        let normalizedGitURL = gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// 建档一次落盘并返回创建好的记录:此前"建档→回填 MR 目标分支"两步写,
+    /// 第二步失败会留下"UI 报新增失败、记录已存在、重试撞 duplicateURL"的死角
+    /// )。返回实时记录供编排方直接使用,不必再按地址回查。
+    @discardableResult
+    func addRepository(gitURL: String) throws -> RepositoryConfig {
+        let normalizedGitURL = Self.expandingHomeDirectory(
+            gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
 
         guard repositories.contains(where: { Self.gitURLsMatch($0.gitURL, normalizedGitURL) }) == false else {
             throw RepositoryStoreError.duplicateURL
@@ -211,12 +234,22 @@ final class RepositoryStore: ObservableObject {
         var updatedRepositories = repositories
         updatedRepositories.append(repository)
         try persistRepositories(updatedRepositories)
+        return repository
     }
 
     /// internal:磁盘发现导入(`commitImportedRepositories`)要用同一套 URL 归一化口径
     /// 判断"这个远端是否已在仓库池里",另写一份必然与这里的规则漂移。
     nonisolated static func gitURLsMatch(_ lhs: String, _ rhs: String) -> Bool {
         normalizedGitURLForComparison(lhs) == normalizedGitURLForComparison(rhs)
+    }
+
+    /// 本地路径的 `~/` 在建档时展开成绝对路径:git 子进程不经过 shell,`~` 不会被展开,
+    /// 原样入库后 `ls-remote`/`clone` 必然失败(机理同 `./`,只是它长得像绝对路径)。
+    /// 只认整串以 `~` 开头的形态;`git@host:~/x` 里的 `~` 属远端 shell 语义,不能动。
+    nonisolated static func expandingHomeDirectory(_ gitURL: String) -> String {
+        guard gitURL == "~" || gitURL.hasPrefix("~/") else { return gitURL }
+        let home = NSHomeDirectory()
+        return gitURL == "~" ? home : home + gitURL.dropFirst(1)
     }
 
     nonisolated private static func normalizedGitURLForComparison(_ url: String) -> String {
@@ -249,12 +282,11 @@ final class RepositoryStore: ObservableObject {
         // 跨 Store 原子提交的前提是共用同一数据目录(注释级约定 → 运行时校验):
         // 注入分叉时 applyPersistedState 会把内存更新到新状态、对方目录文件还是旧的,
         // 内存与盘静默背离。宁可在提交前拦截。
-        guard fileStore.rootDirectory.standardizedFileURL
-            == workplaceStore.rootDirectoryForCrossStoreCheck.standardizedFileURL else {
+        guard repositoryStoreRootsMatch(workplaceStore) else {
             throw RepositoryStoreError.crossStoreRootMismatch
         }
-        // 与 updateRepository 一致校验 id 存在:不存在的 id 此前会照常触发
-        // 全量落盘(内容不变但 mtime/写放大照付),并把"删除成功"的假象传给调用方。
+        // id 不存在要当场拦:否则不存在的 id 会照常触发全量落盘
+        // (内容不变但 mtime/写放大照付),并把"删除成功"的假象传给调用方。
         guard repositories.contains(where: { $0.id == id }) else {
             throw RepositoryStoreError.notFound
         }
@@ -279,6 +311,9 @@ final class RepositoryStore: ObservableObject {
         }
     }
 
+    /// 仅测试直接调用的落库入口。生产路径一律走 `commitDiskRefresh`(它与
+    /// workplaces/sync-states 单批原子提交,消灭了"两步写之间被并发整体覆写"的窗口);
+    /// 新增生产调用点前先确认是否需要跨文件原子性,不要退回本方法。
     func applyDeduplicationResult(_ result: RepositoryDeduplicationResult) {
         guard result.changed else { return }
         // 自动去重是**硬删除**且立刻写盘、不可撤销。此前只有失败才留痕,
@@ -286,12 +321,7 @@ final class RepositoryStore: ObservableObject {
         let removedNames = Self.removedRepositoryNames(from: repositories, keeping: result.repositories)
         do {
             try persistRepositories(result.repositories)
-            // 可见提示由根视图消费(仅 os_log 用户看不到"仓库少了一个"的原因)。
-            lastDeduplicationCleanupCount = removedNames.count
-            deduplicationCleanupSequence += 1
-            repositoryStoreLog.notice(
-                "event=deduplication_removed count=\(removedNames.count) names=\(removedNames.joined(separator: ","), privacy: .private)"
-            )
+            announceDeduplicationCleanup(removedNames)
         } catch {
             repositoryStoreLog.error("event=deduplication_save_failed reason=\(error.localizedDescription, privacy: .public)")
         }
@@ -323,25 +353,102 @@ final class RepositoryStore: ObservableObject {
             return lhs.id.uuidString < rhs.id.uuidString
         }
 
-        var existingNormalizedURLs = Set<String>()
-        var existingNames = Set<String>()
-        var keptIDs = Set<UUID>()
+        // 被丢弃项的字段并入保留项(口径同 importBackup:缺省才回填/并集),
+        // 并记录 dropped→kept 的 id 映射供引用重映射(
+        // 此前硬删直接丢字段,引用被删项的工作区还要被摘除引用——明明有
+        // 同 URL 的存活配置却丢了仓库)。
+        var keptRepositories: [RepositoryConfig] = []
+        var keptIndexByURL: [String: Int] = [:]
+        var keptIndexByName: [String: Int] = [:]
+        var idRemapping: [UUID: UUID] = [:]
 
         for repository in prioritySorted {
             let normalizedURL = normalizedGitURLForComparison(repository.gitURL)
-            if existingNormalizedURLs.contains(normalizedURL) || existingNames.contains(repository.repoName) {
+            let duplicateIndex = keptIndexByURL[normalizedURL] ?? keptIndexByName[repository.repoName]
+            if let index = duplicateIndex {
+                let merged = mergingDuplicate(kept: keptRepositories[index], dropped: repository)
+                keptRepositories[index] = merged
+                idRemapping[repository.id] = merged.id
                 continue
             }
-            existingNormalizedURLs.insert(normalizedURL)
-            existingNames.insert(repository.repoName)
-            keptIDs.insert(repository.id)
+            keptIndexByURL[normalizedURL] = keptRepositories.count
+            keptIndexByName[repository.repoName] = keptRepositories.count
+            keptRepositories.append(repository)
         }
 
-        let deduplicatedRepositories = repositories.filter { keptIDs.contains($0.id) }
+        let mergedByID = Dictionary(
+            keptRepositories.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let deduplicatedRepositories = repositories.compactMap { mergedByID[$0.id] }
         return RepositoryDeduplicationResult(
             repositories: deduplicatedRepositories,
-            changed: deduplicatedRepositories.count != repositories.count
+            changed: deduplicatedRepositories.count != repositories.count,
+            idRemapping: idRemapping
         )
+    }
+
+    /// 重复项字段并入保留项:defaultBranch 缺省才回填;mrTargetBranches 保序并集。
+    nonisolated private static func mergingDuplicate(kept: RepositoryConfig, dropped: RepositoryConfig) -> RepositoryConfig {
+        var merged = kept
+        if merged.defaultBranch == nil {
+            merged.defaultBranch = dropped.defaultBranch
+        }
+        let existingBranches = Set(kept.mrTargetBranches)
+        let appended = kept.mrTargetBranches + dropped.mrTargetBranches.filter { !existingBranches.contains($0) }
+        merged.mrTargetBranches = RepositoryConfig.deduplicated(appended)
+        return merged
+    }
+
+    /// 引用重映射(取代摘除):selected/pinned 中被删项的 id 换成保留项 id,
+    /// 换完去重保序(同一工作区同时引用两条重复项时收敛为一条)。
+    nonisolated static func remappingReferences(
+        from workplaces: [Workplace],
+        idRemapping: [UUID: UUID]
+    ) -> [Workplace] {
+        guard idRemapping.isEmpty == false else { return workplaces }
+        return workplaces.map { workplace in
+            var updated = workplace
+            updated.selectedRepositoryIDs = remapUnique(workplace.selectedRepositoryIDs, idRemapping)
+            updated.pinnedRepositoryIDs = remapUnique(workplace.pinnedRepositoryIDs, idRemapping)
+            return updated
+        }
+    }
+
+    nonisolated private static func remapUnique(_ ids: [UUID], _ remapping: [UUID: UUID]) -> [UUID] {
+        var seen = Set<UUID>()
+        return ids.compactMap { id in
+            let mapped = remapping[id] ?? id
+            return seen.insert(mapped).inserted ? mapped : nil
+        }
+    }
+
+    /// sync-states 重映射:存活项自身的行优先保留,被删项的行改挂保留项 id 后
+    /// 按 (workplaceID, repositoryID) 去重(组合键唯一,同工作区双行会撞
+    /// `RepositorySyncState.id` 组合键——只保留存活项原行,被删项行丢弃)。
+    nonisolated static func remappingSyncStates(
+        _ syncStates: [RepositorySyncState],
+        idRemapping: [UUID: UUID]
+    ) -> [RepositorySyncState] {
+        guard idRemapping.isEmpty == false else { return syncStates }
+        let keptRows = syncStates.filter { idRemapping[$0.repositoryID] == nil }
+        var seenKeys = Set(keptRows.map { "\($0.workplaceID.uuidString)-\($0.repositoryID.uuidString)" })
+        var result = keptRows
+        for state in syncStates {
+            guard let newRepositoryID = idRemapping[state.repositoryID] else { continue }
+            let key = "\(state.workplaceID.uuidString)-\(newRepositoryID.uuidString)"
+            guard seenKeys.insert(key).inserted else { continue }
+            result.append(RepositorySyncState(
+                workplaceID: state.workplaceID,
+                repositoryID: newRepositoryID,
+                status: state.status,
+                localPath: state.localPath,
+                lastError: state.lastError,
+                lastSyncedAt: state.lastSyncedAt,
+                hasLocalDirectory: state.hasLocalDirectory
+            ))
+        }
+        return result
     }
 
     /// 从工作区记录中摘除对 `removedRepositoryIDs` 的选中/置顶引用(纯函数)。
@@ -372,20 +479,29 @@ final class RepositoryStore: ObservableObject {
         guard repositoryStoreRootsMatch(workplaceStore) else {
             throw RepositoryStoreError.crossStoreRootMismatch
         }
+        // 引用处理:先按 idRemapping 重映射到保留项(去重合并的新路径),
+        // 再对**未被映射覆盖**的被删 id 兜底摘除(调用方手工构造结果、
+        // 或未来新增删除来源时不留悬空引用)。基于**快照输入**
+        // (workplaceResult.workplaces)改写,与 diskRefreshResult 自身的
+        // 去重改写在同一份数据上完成。
         let keptIDs = Set(repositoryResult.repositories.map(\.id))
         let removedIDs = Set(repositories.map(\.id)).subtracting(keptIDs)
-        // 引用摘除基于**快照输入**(workplaceResult.workplaces,即刷新计算所用状态),
-        // 与 diskRefreshResult 自身的去重改写在同一份数据上完成,再单独 prune 一步省掉。
-        let prunedWorkplaces = Self.removingReferences(
-            from: workplaceResult.workplaces,
+        // 重映射在先:被删 id 的引用已换成保留 id(不在 removedIDs 中,不会被摘除);
+        // 摘除兜底在后:只命中"没有重映射记录"的悬空引用。
+        let remappedWorkplaces = Self.removingReferences(
+            from: Self.remappingReferences(
+                from: workplaceResult.workplaces,
+                idRemapping: repositoryResult.idRemapping
+            ),
             to: removedIDs
         )
-        let filteredSyncStates = workplaceResult.syncStates.filter {
-            removedIDs.contains($0.repositoryID) == false
-        }
+        let remappedSyncStates = Self.remappingSyncStates(
+            workplaceResult.syncStates,
+            idRemapping: repositoryResult.idRemapping
+        ).filter { removedIDs.contains($0.repositoryID) == false }
         let applyWorkplaceChanges = workplaceResult.changed
-            || prunedWorkplaces != workplaceResult.workplaces
-            || filteredSyncStates.count != workplaceResult.syncStates.count
+            || remappedWorkplaces != workplaceResult.workplaces
+            || remappedSyncStates != workplaceResult.syncStates
 
         var documents = [JSONFileStoreDocument]()
         if repositoryResult.changed {
@@ -393,8 +509,8 @@ final class RepositoryStore: ObservableObject {
         }
         if applyWorkplaceChanges {
             documents += try workplaceStore.persistenceDocuments(
-                workplaces: prunedWorkplaces,
-                syncStates: filteredSyncStates
+                workplaces: remappedWorkplaces,
+                syncStates: remappedSyncStates
             )
         }
         guard documents.isEmpty == false else { return }
@@ -403,16 +519,12 @@ final class RepositoryStore: ObservableObject {
         if repositoryResult.changed {
             let removedNames = Self.removedRepositoryNames(from: repositories, keeping: repositoryResult.repositories)
             repositories = repositoryResult.repositories
-            lastDeduplicationCleanupCount = removedNames.count
-            deduplicationCleanupSequence += 1
-            repositoryStoreLog.notice(
-                "event=deduplication_removed count=\(removedNames.count) names=\(removedNames.joined(separator: ","), privacy: .private)"
-            )
+            announceDeduplicationCleanup(removedNames)
         }
         if applyWorkplaceChanges {
             workplaceStore.applyPersistedState(
-                workplaces: prunedWorkplaces,
-                syncStates: filteredSyncStates
+                workplaces: remappedWorkplaces,
+                syncStates: remappedSyncStates
             )
         }
     }
@@ -464,9 +576,25 @@ final class RepositoryStore: ObservableObject {
         return result.importedCount
     }
 
+    /// 去重是硬删除、不可撤销:除了 os_log 还要留一份可见提示的计数,
+    /// 由根视图消费(只记日志用户不会知道"仓库少了一个"的原因)。
+    private func announceDeduplicationCleanup(_ removedNames: [String]) {
+        lastDeduplicationCleanupCount = removedNames.count
+        deduplicationCleanupSequence += 1
+        repositoryStoreLog.notice(
+            "event=deduplication_removed count=\(removedNames.count) names=\(removedNames.joined(separator: ","), privacy: .private)"
+        )
+    }
+
     private func repositoryStoreRootsMatch(_ workplaceStore: WorkplaceStore) -> Bool {
         fileStore.rootDirectory.standardizedFileURL
             == workplaceStore.rootDirectoryForCrossStoreCheck.standardizedFileURL
+    }
+
+    /// 按 id 取实时记录:视图里多处要按 id 回查最新值(面板闭包捕获的行快照从第二次
+    /// 点击起就是旧的),收成一个入口免得每处重抄谓词。
+    func repository(for id: UUID) -> RepositoryConfig? {
+        repositories.first { $0.id == id }
     }
 
     private func mutateRepository(id: UUID, _ mutate: (inout RepositoryConfig) -> Void) throws {
@@ -475,34 +603,6 @@ final class RepositoryStore: ObservableObject {
         }
         var updatedRepositories = repositories
         mutate(&updatedRepositories[index])
-        updatedRepositories[index].updatedAt = .now
-        try persistRepositories(updatedRepositories)
-    }
-
-    func updateRepository(id: UUID, gitURL: String, mrTargetBranches: [String]? = nil) throws {
-        let normalizedGitURL = gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard let index = repositories.firstIndex(where: { $0.id == id }) else {
-            throw RepositoryStoreError.notFound
-        }
-
-        guard !repositories.contains(where: { $0.id != id && Self.gitURLsMatch($0.gitURL, normalizedGitURL) }) else {
-            throw RepositoryStoreError.duplicateURL
-        }
-
-        let repoName = try validatedRepositoryName(from: normalizedGitURL)
-        guard repoName == repositories[index].repoName else {
-            throw RepositoryStoreError.repoNameChangeNotSupported
-        }
-        guard !repositories.contains(where: { $0.id != id && $0.repoName == repoName }) else {
-            throw RepositoryStoreError.duplicateRepoName
-        }
-
-        var updatedRepositories = repositories
-        updatedRepositories[index].gitURL = normalizedGitURL
-        if let mrTargetBranches {
-            updatedRepositories[index].mrTargetBranches = mrTargetBranches
-        }
         updatedRepositories[index].updatedAt = .now
         try persistRepositories(updatedRepositories)
     }
@@ -596,7 +696,11 @@ final class RepositoryStore: ObservableObject {
         var mergedCount = 0
 
         for (entryIndex, entry) in cleanedEntries.enumerated() {
-            let gitURL = entry.gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            // 与 addRepository 同一口径展开 `~/`:备份文件可被手工编辑,一条
+            // `~/remotes/x.git` 原样入库就是一个永远克隆不下来的死地址(git 不展波浪号)。
+            let gitURL = Self.expandingHomeDirectory(
+                entry.gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
             // 单条非法 URL 不得让整个导入中止:备份文件可能来自不同版本/手工编辑,
             // 一条坏数据毁掉全部有效条目(含本可合并的更新)是最差结果。计入 skipped。
             guard let repoName = try? validatedRepositoryName(from: gitURL) else {

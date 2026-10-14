@@ -89,6 +89,13 @@ final class WorkplaceStore: ObservableObject {
         self.fileStore = fileStore
         self.syncStatesDebounceInterval = syncStatesDebounceInterval
         self.flushRetryBaseSeconds = flushRetryBaseSeconds
+        // 逐元素抢救成功(而非"整个文件连 JSON 结构都不合法")时置位,init 末尾据此
+        // 立即把抢救出的子集回写磁盘。理由:`preserveCorruptFile` 会把原文件改名拿走,
+        // 若此时只把子集放进内存而不落盘,且本会话没有其它写盘动作(启动对账在恢复态
+        // 被显式跳过),文件就保持缺失——下次启动 `loadIfPresent` 见文件不存在直接返回
+        // 空列表、且 `didRecoverFromCorruptFile` 为 false,用户看到工作区/仓库凭空少一批
+        // 记录,连横幅都没有。回写让磁盘与内存一致,恢复态可被如实呈现。
+        var salvagedSubsetNeedsRewrite = false
         do {
             self.workplaces = WorkplaceStore.deduplicatedWorkplaces(
                 try fileStore.loadIfPresent([Workplace].self, from: "workplaces.json", default: [])
@@ -104,6 +111,7 @@ final class WorkplaceStore: ObservableObject {
             ) {
                 self.workplaces = WorkplaceStore.deduplicatedWorkplaces(tolerated.values)
                 workplaceStoreLog.error("event=recovered_partial_workplaces kept=\(tolerated.values.count, privacy: .public) dropped=\(tolerated.droppedCount, privacy: .public)")
+                salvagedSubsetNeedsRewrite = true
             } else {
                 self.workplaces = []
             }
@@ -122,10 +130,22 @@ final class WorkplaceStore: ObservableObject {
             ) {
                 self.syncStates = WorkplaceStore.deduplicatedSyncStates(tolerated.values)
                 workplaceStoreLog.error("event=recovered_partial_sync_states kept=\(tolerated.values.count, privacy: .public) dropped=\(tolerated.droppedCount, privacy: .public)")
+                salvagedSubsetNeedsRewrite = true
             } else {
                 self.syncStates = []
             }
             fileStore.preserveCorruptFile(named: "sync-states.json")
+        }
+        // 抢救出的子集立即回写(两份文档一次原子提交,保持跨文件一致)。
+        // 失败只留痕:init 不该因写盘失败让 App 起不来,数据仍可从 .corrupt- 副本取回。
+        if salvagedSubsetNeedsRewrite {
+            do {
+                try persist(workplaces: workplaces, syncStates: syncStates)
+            } catch {
+                workplaceStoreLog.error(
+                    "event=salvaged_subset_rewrite_failed reason=\(error.localizedDescription, privacy: .public)"
+                )
+            }
         }
     }
 
@@ -356,8 +376,12 @@ final class WorkplaceStore: ObservableObject {
         try persistWorkplaces(updatedWorkplaces)
     }
 
-    func createWorkplace(name: String, rootPath: String, selectedRepositories: [RepositoryConfig], branch: String? = nil) throws
-        -> Workplace
+    func createWorkplace(
+        name: String,
+        rootPath: String,
+        selectedRepositories: [RepositoryConfig],
+        branch: String? = nil
+    ) throws -> Workplace
     {
         let trimmedRootPath = rootPath.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -883,6 +907,9 @@ final class WorkplaceStore: ObservableObject {
         return String(normalizedPath[prefixRange.upperBound...])
     }
 
+    /// 仅测试直接调用的落库入口。生产路径一律走 `RepositoryStore.commitDiskRefresh`
+    /// (workplaces/sync-states 与 repositories 单批原子提交);本方法只写前两份文档,
+    /// 单独使用会在两次写之间留出被并发整体覆写的窗口。新增生产调用点前请改走原子提交。
     func applyDiskRefreshResult(_ result: WorkplaceDiskRefreshResult) {
         guard result.changed else { return }
         do {
@@ -1040,10 +1067,19 @@ final class WorkplaceStore: ObservableObject {
         )
 
         let normalizedNewPath = Self.normalizedPath(newPath)
-        guard !workplaces.contains(where: { $0.id != id && Self.normalizedPath($0.path) == normalizedNewPath }) else {
+        // 重复目录检查按大小写归一比较(口径同 WorkplaceEditService.saveWorkplaceEdit):
+        // 默认卷大小写不敏感,仅大小写不同的"改名"实际指向同一目录,
+        // 严格相等会把这种合法操作误报为"与其它工作区重名"。
+        let lowercasedNewPath = normalizedNewPath.lowercased()
+        guard !workplaces.contains(where: {
+            $0.id != id && Self.normalizedPath($0.path).lowercased() == lowercasedNewPath
+        }) else {
             throw WorkplaceStoreError.duplicatePath
         }
-        guard normalizedNewPath == Self.normalizedPath(oldPath) ||
+        // 存在性检查同样按大小写归一口径:默认卷大小写不敏感,仅大小写不同的改名会因
+        // fileExists 恒为真而误报"路径已存在"(与上方重名检查、WorkplaceEditService 同源)。
+        let normalizedOldPath = Self.normalizedPath(oldPath)
+        guard normalizedNewPath.lowercased() == normalizedOldPath.lowercased() ||
                 FileManager.default.fileExists(atPath: newPath) == false else {
             throw WorkplaceStoreError.pathAlreadyExistsOnDisk
         }
@@ -1062,7 +1098,7 @@ final class WorkplaceStore: ObservableObject {
         // 复用 `relativePath` 同款判定(与 rebasePlan 对齐),不再裸用大小写敏感的
         // hasPrefix + dropFirst 改写:那会把与 relativePath 判定不一致的 localPath
         // 静默留在旧路径上,且截位数问题与 relativePath 同源。
-        let normalizedOldRoot = Self.normalizedPath(oldPath)
+        let normalizedOldRoot = normalizedOldPath
         for i in updatedSyncStates.indices where updatedSyncStates[i].workplaceID == id {
             guard let remaining = Self.relativePath(
                 of: updatedSyncStates[i].localPath,

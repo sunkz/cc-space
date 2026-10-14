@@ -19,17 +19,37 @@ EOF
   exit 1
 }
 
-latest_semver_tag() {
-  local tag_list
-  # 区分"没有匹配的 tag"与"git 本身故障":后者若被 || true 吞掉,
-  # 会按 CURRENT_VERSION=0.0.0 算出 v0.0.1 继续走,留下误导性的失败现场。
-  if ! tag_list="$(git -C "$ROOT_DIR" tag --list "${TAG_PREFIX}[0-9]*.[0-9]*.[0-9]*" --sort=-version:refname)"; then
-    echo "错误: 读取 git tag 失败,请检查仓库状态" >&2
+# 版本号统一由 script/version.sh 推导(AGENTS.md「单一事实来源」:run.sh、截图脚本与本脚本共用同一份)。
+# 此前 release.sh 自带一份 `latest_semver_tag`,tag 匹配模式与 version.sh 不同,存在口径漂移风险。
+# 这里保留 release 特有的 fail-fast:version.sh 对 git 故障是"告警 + 回退 0.0.0"
+# (run 场景不该被版本号卡住),而发布路径把故障当成"无 tag"会算出误导性的 v0.0.1 并真的推出去。
+VERSION_SCRIPT="${ROOT_DIR}/script/version.sh"
+if [[ ! -f "$VERSION_SCRIPT" ]]; then
+  echo "错误: 找不到版本推导脚本 $VERSION_SCRIPT" >&2
+  exit 1
+fi
+
+read_current_version() {
+  if ! git -C "$ROOT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "错误: 读取 git 仓库状态失败,请检查仓库" >&2
     exit 1
   fi
-  # 严格匹配 vMAJOR.MINOR.PATCH，排除 v1.2.3-rc1 这类预发布 tag，
-  # 否则后续 $((PATCH+1)) 会对 "3-rc1" 报错退出。
-  printf '%s\n' "$tag_list" | grep -E "^${TAG_PREFIX}[0-9]+\.[0-9]+\.[0-9]+$" | head -n 1 || true
+  bash "$VERSION_SCRIPT"
+}
+
+# 版本号数值比较:$1 < $2 时返回 0。
+# 不依赖 `sort -V`:那是较新 BSD sort 才有的选项,旧机器上命令替换会取到空串,
+# 把"相等"误判成"回退发布"从而拒绝合法发布(见下方回退守卫)。
+version_is_lower() {
+  local -a lhs rhs
+  IFS='.' read -r -a lhs <<< "$1"
+  IFS='.' read -r -a rhs <<< "$2"
+  local i
+  for i in 0 1 2; do
+    if (( ${lhs[$i]:-0} < ${rhs[$i]:-0} )); then return 0; fi
+    if (( ${lhs[$i]:-0} > ${rhs[$i]:-0} )); then return 1; fi
+  done
+  return 1
 }
 
 BUMP="${1:-patch}"
@@ -78,12 +98,7 @@ if [[ -n "$remote_head" ]] && ! git -C "$ROOT_DIR" merge-base --is-ancestor "$re
   exit 1
 fi
 
-CURRENT_TAG="$(latest_semver_tag)"
-if [[ -n "$CURRENT_TAG" ]]; then
-  CURRENT_VERSION="${CURRENT_TAG#"${TAG_PREFIX}"}"
-else
-  CURRENT_VERSION="0.0.0"
-fi
+CURRENT_VERSION="$(read_current_version)"
 
 IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
 
@@ -121,7 +136,7 @@ fi
 
 # 禁止版本回退发布(主要防护显式版本号模式):v1.0.3 之后再发 1.0.1
 # 会破坏 "latest release" 语义——GitHub 的 latest 由 tag 创建时间决定,回退号会让旧语义的新 tag 反而不是最新。
-if [[ "$(printf '%s\n%s\n' "$CURRENT_VERSION" "$NEW_VERSION" | sort -V | head -n 1)" != "$CURRENT_VERSION" ]]; then
+if version_is_lower "$NEW_VERSION" "$CURRENT_VERSION"; then
   echo "错误: 新版本 $NEW_VERSION 低于当前最新发布 $CURRENT_VERSION,禁止回退发布" >&2
   exit 1
 fi

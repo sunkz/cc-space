@@ -1,6 +1,10 @@
 import Foundation
 
 enum GitURLParser {
+    /// 允许进入 git argv 的传输协议:`validateRemoteURL` 的白名单与设置页地址形态校验
+    /// 共用这一份,避免两处各自加协议时漂移。
+    static let allowedRemoteSchemes: Set<String> = ["http", "https", "ssh", "git", "file"]
+
     /// 校验用户配置的远端仓库 URL,阻止两类攻击面进入 git argv:
     /// 1. `ext::`/`fd::` 等可执行任意命令的传输形式(git 对用户直接发起的命令默认放行 ext::);
     /// 2. 以 `-` 开头的 URL 被 git 解析为选项(如 `--upload-pack=`)。
@@ -14,13 +18,14 @@ enum GitURLParser {
         guard trimmed.hasPrefix("-") == false else {
             throw gitURLParserError("仓库地址不合法：不能以 - 开头")
         }
-        guard trimmed.contains(where: { $0.asciiValue != nil && ($0 < " " || $0 == "\u{7f}") }) == false else {
+        // 控制字符拦截覆盖全部 Unicode Cc(此前只查 ASCII,U+0085 NEL 等
+        // 可躲过词法防线进入 argv)。
+        guard trimmed.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) == false else {
             throw gitURLParserError("仓库地址不合法：包含控制字符")
         }
         if let schemeEnd = trimmed.range(of: "://") {
             let scheme = String(trimmed[trimmed.startIndex..<schemeEnd.lowerBound]).lowercased()
-            let allowedSchemes: Set<String> = ["http", "https", "ssh", "git", "file"]
-            guard allowedSchemes.contains(scheme) else {
+            guard allowedRemoteSchemes.contains(scheme) else {
                 throw gitURLParserError("仓库地址不合法：不支持的协议 \(scheme)")
             }
             // 明文凭据防线:`https://user:pass@host/repo` 会原样进入 git argv,
@@ -92,10 +97,10 @@ enum GitURLParser {
             throw gitURLParserError("无法识别当前分支")
         }
         guard trimmedTargetBranch.isEmpty == false else {
-            throw gitURLParserError("无法识别仓库默认分支")
+            throw gitURLParserError("无法识别 MR 目标分支")
         }
         guard trimmedSourceBranch != trimmedTargetBranch else {
-            throw gitURLParserError("当前已在默认分支，无法创建 MR")
+            throw gitURLParserError("当前分支即 MR 目标分支，无法创建 MR")
         }
 
         let location = try repositoryWebLocation(from: remoteURL)
@@ -184,7 +189,12 @@ private extension GitURLParser {
         guard trimmedPath.isEmpty == false else { return nil }
 
         if trimmedPath.hasSuffix(".git") {
-            return String(trimmedPath.dropLast(4))
+            let repositoryPath = String(trimmedPath.dropLast(4))
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            // 路径只有 `.git` 时剥完是空串:返回空串会让 Web 链接解析器以为解析成功
+            // (产出 `https://host/`),而 Store 取仓库名时抛"无法解析仓库名称"——
+            // 同一个输入两处口径不一致。这里直接判失败,让"能否解析"一次定死。
+            return repositoryPath.isEmpty ? nil : repositoryPath
         }
         return trimmedPath
     }
@@ -270,7 +280,7 @@ private extension GitURLParser {
         if firstLabel("gitea") || firstLabel("gogs") || matches("gitea.com") {
             return .unsupported("Gitea")
         }
-        // P2-30 取舍说明:未知 host 维持 GitLab MR 格式兜底而非返回 .unsupported——
+        // 取舍说明:未知 host 维持 GitLab MR 格式兜底而非返回 .unsupported——
         // 枚举虽有 unsupported(String) 可用,但现有 MergeRequestServiceTests 以
         // 未知 host(code.example.com)锁定兜底行为,且自建 GitLab 场景兜底命中率
         // 不低;改为显式报错需要连同上游测试与产品预期一起调整,此处不强行切换。

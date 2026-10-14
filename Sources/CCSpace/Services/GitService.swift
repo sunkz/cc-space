@@ -144,11 +144,33 @@ enum GitServiceError: LocalizedError, Sendable {
         )
     }()
 
-    /// 把文本中形如 `scheme://user:pass@host` 的凭据替换为 `scheme://redacted@host`。
+    /// 匹配查询参数里的令牌:`?private_token=`、`&access_token=` 等。
+    /// 托管平台普遍支持以查询参数传令牌,GitLab 的 `?private_token=` 尤甚;
+    /// 而 git 的 fatal 消息(`unable to access 'https://...'`)会把整个远端 URL 回显进
+    /// stderr。只做 userinfo 打码时这类令牌会原样进入错误提示展示给用户(实测确认),
+    /// 与 `GitProcessRunner.redactedArgument` 的查询参数打码口径分叉。
+    /// 值段以 `&`/空白/引号收尾,避免越界吃掉后续内容。
+    private static let tokenQueryPattern: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: "([?&][A-Za-z0-9_\\-]*token[A-Za-z0-9_\\-]*=)([^&\\s'\"]+)",
+            options: [.caseInsensitive]
+        )
+    }()
+
+    /// 把文本中形如 `scheme://user:pass@host` 的凭据替换为 `scheme://redacted@host`,
+    /// 并把查询参数里的令牌值替换为 `redacted`。
     ///
     /// 未匹配到已知本地化规则的 stderr 会原样进入错误提示展示给用户,不做脱敏
     /// 等于把访问令牌显示在 UI 上(也可能随日志/截图外泄)。
+    ///
+    /// 与 `GitProcessRunner.redactedArgument`(作用于**单个 argv 片段**)是两份独立实现,
+    /// 口径必须同步演进:任一处漏打码都会把令牌写进日志/UI。测试对两边都有断言。
     static func redactCredentials(in text: String) -> String {
+        redactTokenQueryValues(in: redactUserInfoCredentials(in: text))
+    }
+
+    /// userinfo(`scheme://user:pass@host`)脱敏:替换为 `scheme://redacted@host`。
+    private static func redactUserInfoCredentials(in text: String) -> String {
         guard let regex = credentialPattern else { return text }
         let matches = regex.matches(
             in: text,
@@ -166,6 +188,17 @@ enum GitServiceError: LocalizedError, Sendable {
             result.replaceSubrange(range, with: "\(scheme)redacted@")
         }
         return result
+    }
+
+    /// 查询参数令牌脱敏:值一律替换为 `redacted`,参数名保留(便于用户判断是哪个令牌失效)。
+    private static func redactTokenQueryValues(in text: String) -> String {
+        guard let regex = tokenQueryPattern else { return text }
+        return regex.stringByReplacingMatches(
+            in: text,
+            options: [],
+            range: NSRange(text.startIndex..., in: text),
+            withTemplate: "$1redacted"
+        )
     }
 
     /// 剔除 OpenSSH 的建议性警告行(如后量子密钥交换提示),它们以 "**" 开头、与命令成败无关,不应进入错误提示。
@@ -206,7 +239,6 @@ protocol GitServicing: Sendable {
     /// 若被并发操作打乱,则按 SHA 找到对应条目 apply(**不 drop**,错位时的索引已不可信)。
     /// `.created(sha: nil)` 回退 `stashPop`;`.notCreated` 必须是空操作。
     func trackedStashRestore(sha: GitTrackedStash, in directory: String) async throws
-    func isGitAvailable() async -> Bool
     func defaultBranch(for remoteURL: String) async -> String?
     func defaultBranch(in directory: String) async -> String?
     func currentBranch(in directory: String) async -> String?
@@ -231,12 +263,12 @@ protocol GitServicing: Sendable {
     func recentCommits(in directory: String, count: Int, rev: String?) async -> [GitCommitEntry]
     /// 指定 ref 领先其上游的提交(`<rev>@{u}..<rev>`);ref 无上游或执行失败时返回空。
     func unpushedCommits(in directory: String, count: Int, rev: String?) async -> [GitCommitEntry]
+    /// 提交记录窗口的分页查询:关键词过滤与偏移(`--skip`)都下推到 git,
+    /// 因此能命中尚未加载进内存的历史提交,而不是只在已加载的首页里筛。
+    func commitLogPage(_ request: CommitLogPageRequest) async -> GitCommitLogPage
     /// 远端分支名单;`nil` 表示探测失败(URL 非法/网络失败),空数组是"远端确无分支"。
     /// 调用方据此区分:stale-while-revalidate 的展示方在 nil 时保留旧缓存。
     func remoteBranches(for remoteURL: String) async -> [String]?
-    /// 一次远端探测:同时取分支列表与默认分支。真实实现单次
-    /// `ls-remote --symref` 完成,省一半网络往返;默认实现回退到分头查询。
-    func probeRemoteInfo(for remoteURL: String) async -> (branches: [String], defaultBranch: String?)
     /// Stash 列表(stash@{0} 最新,在前)。
     func stashList(in directory: String) async -> [GitStashEntry]
     /// 手动 Stash 当前改动(含 untracked)。
@@ -274,8 +306,6 @@ protocol GitServicing: Sendable {
     /// 中止当前进行中的合并/变基/cherry-pick/revert/二分操作,返回被中止的操作。
     /// 无进行中操作时抛错;调用方(界面)负责二次确认。
     func abortInterruptedOperation(in directory: String) async throws -> GitInterruptedOperation
-    /// git 环境检测(设置页诊断展示用)。
-    func gitEnvironmentInfo() async -> GitEnvironmentInfo
 }
 
 extension GitServicing {
@@ -295,9 +325,6 @@ extension GitServicing {
     }
     func createBranch(fromRemoteBranch branch: String, baseBranch: String, in directory: String) async throws {
         throw GitServiceError.operationFailed(message: "当前实现不支持基于远端分支创建")
-    }
-    func gitEnvironmentInfo() async -> GitEnvironmentInfo {
-        GitEnvironmentInfo(isAvailable: false, version: nil, executablePath: nil)
     }
     func unpushedCommits(in directory: String, count: Int) async -> [GitCommitEntry] { [] }
     func stashList(in directory: String) async -> [GitStashEntry] { [] }
@@ -347,10 +374,19 @@ extension GitServicing {
     func unpushedCommits(in directory: String, count: Int, rev: String?) async -> [GitCommitEntry] {
         await unpushedCommits(in: directory, count: count)
     }
-    func probeRemoteInfo(for remoteURL: String) async -> (branches: [String], defaultBranch: String?) {
-        async let branchesTask = remoteBranches(for: remoteURL)
-        async let defaultBranchTask = defaultBranch(for: remoteURL)
-        return await (branchesTask ?? [], defaultBranchTask)
+    /// 测试替身回退通道:按 skip/count 切片既有全量查询,**不做关键词过滤**
+    /// (桩里没有可搜的历史)。真实 GitService 覆写本方法并把搜索下推到 git;
+    /// 搜索语义的用例请对 GitService 跑真实仓库。
+    func commitLogPage(_ request: CommitLogPageRequest) async -> GitCommitLogPage {
+        let headCount = max(0, request.skip) + max(1, request.count) + 1
+        let fetched: [GitCommitEntry]
+        if request.unpushedOnly {
+            fetched = await unpushedCommits(in: request.directory, count: headCount, rev: request.rev)
+        } else {
+            fetched = await recentCommits(in: request.directory, count: headCount, rev: request.rev)
+        }
+        let page = Array(fetched.dropFirst(max(0, request.skip)).prefix(max(1, request.count)))
+        return GitCommitLogPage(commits: page, hasMore: fetched.count > max(0, request.skip) + max(1, request.count))
     }
 }
 
@@ -407,6 +443,28 @@ struct GitCommitEntry: Identifiable, Equatable {
 
     /// 是否包含变更统计(用于 UI 决定是否展示统计行)。
     var hasStats: Bool { filesChanged != nil }
+}
+
+/// 提交记录窗口的分页查询参数。
+struct CommitLogPageRequest: Equatable {
+    let directory: String
+    /// 搜索关键词;`nil` 或归一后为空表示不过滤。非空时过滤下推到 git,
+    /// 命中范围是整条提交说明(标题+正文)、作者,以及形如 object ID 的关键词。
+    let searchText: String?
+    /// 结果级偏移(`--skip`),即上一页之前的命中数/已加载条数。
+    let skip: Int
+    /// 页大小;内部多取一条探测是否还有更多。
+    let count: Int
+    let rev: String?
+    let unpushedOnly: Bool
+}
+
+/// 一页提交记录 + 是否还有下一页。
+struct GitCommitLogPage: Equatable {
+    let commits: [GitCommitEntry]
+    let hasMore: Bool
+
+    static let empty = GitCommitLogPage(commits: [], hasMore: false)
 }
 
 /// 单个提交的完整详情(`git show -s` 按需取,不进列表日志格式,避免多行正文破坏行解析)。
@@ -533,16 +591,6 @@ struct GitRefDivergence: Equatable, Sendable {
     }
 }
 
-/// git 环境检测结果(设置页诊断展示用)。
-struct GitEnvironmentInfo: Equatable, Sendable {
-    /// `git --version` 可正常执行。
-    let isAvailable: Bool
-    /// `git --version` 输出原文,如 "git version 2.39.5 (Apple Git-150)"。
-    let version: String?
-    /// 探测到的 git 可执行文件路径,如 "/usr/bin/git";未找到任何候选时为 nil。
-    let executablePath: String?
-}
-
 enum GitMergeDefaultBranchOutcome: Equatable {
     case merged
     case skipped
@@ -595,13 +643,6 @@ struct GitBranchStatusSnapshot: Equatable {
     var isBehindRemote: Bool { behindCount > 0 }
     var hasConflicts: Bool { unmergedPaths.isEmpty == false }
     var conflictCount: Int { unmergedPaths.count }
-
-    var isClean: Bool {
-        hasUncommittedChanges == false &&
-        hasUnpushedCommits == false &&
-        isBehindRemote == false &&
-        hasRemoteTrackingBranch
-    }
 
     init(
         currentBranch: String?,
@@ -768,8 +809,8 @@ enum GitInterruptedOperation: String, CaseIterable, Codable, Equatable, Sendable
     var displayName: String {
         switch self {
         case .rebase: return "变基"
-        case .cherryPick: return "Cherry Pick"
-        case .revert: return "Revert"
+        case .cherryPick: return "拣选"
+        case .revert: return "还原"
         case .merge: return "合并"
         case .bisect: return "二分定位"
         }
@@ -1053,11 +1094,20 @@ struct GitService: GitServicing {
     // 4 路是吞吐与锁竞争的平衡点。
     private static let maxConcurrentBranchFfTasks = 4
 
+    /// 联网类 git 操作的超时。此前 clone 用 600s,而 pull/push/fetch 走 `runGit` 默认
+    /// 60s——同一仓库"能克隆却拉不动":大仓库或慢网络下一次 fetch 超过 60s 就被
+    /// SIGTERM/SIGKILL 强杀并落成失败,用户看到的是"网络慢"而不是"超时设置过短"。
+    /// 网络类操作统一放宽;只有本机探测(ls-remote / for-each-ref)保留 20s 短超时。
+    private static let networkOperationTimeout: TimeInterval = 300
+
+    /// clone 首次抓取整仓历史,比后续 fetch 更重,单列更长超时。
+    private static let cloneOperationTimeout: TimeInterval = 600
+
     func clone(repositoryURL: String, into directory: String) async throws {
         try GitURLParser.validateRemoteURL(repositoryURL)
         let directoryExistedBefore = FileManager.default.fileExists(atPath: directory)
         do {
-            try await runGit(arguments: ["clone", "--", repositoryURL, directory], timeout: 600)
+            try await runGit(arguments: ["clone", "--", repositoryURL, directory], timeout: Self.cloneOperationTimeout)
         } catch {
             // 超时 SIGKILL/取消/网络失败会留下"半克隆"目录:hasLocalDirectory=false 让
             // pull 阶段跳过它,重新 clone 又因"目标目录已存在"永远失败——无自愈路径的死局。
@@ -1093,10 +1143,10 @@ struct GitService: GitServicing {
 
     func pull(in directory: String) async throws {
         do {
-            try await runGit(arguments: ["-C", directory, "pull"])
+            try await runGit(arguments: ["-C", directory, "pull"], timeout: Self.networkOperationTimeout)
         } catch let error as GitServiceError where Self.isMissingPullStrategyError(error) {
             // git 2.34+ 在分叉且未配置 pull.rebase/pull.ff 时拒绝 pull,这里回退为显式合并。
-            try await runGit(arguments: ["-C", directory, "pull", "--no-rebase"])
+            try await runGit(arguments: ["-C", directory, "pull", "--no-rebase"], timeout: Self.networkOperationTimeout)
         }
         // pull 成功说明远端状态可能已变化,失效默认分支缓存(见 RemoteDefaultBranchCache 注释)。
         RemoteDefaultBranchCache.shared.invalidateAll()
@@ -1108,7 +1158,7 @@ struct GitService: GitServicing {
     }
 
     func pullAllBranches(in directory: String) async throws -> GitPullAllBranchesOutcome {
-        try await runGit(arguments: ["-C", directory, "fetch", "origin"])
+        try await runGit(arguments: ["-C", directory, "fetch", "origin"], timeout: Self.networkOperationTimeout)
         // fetch 成功:远端引用已刷新,失效默认分支缓存(粗粒度整体清空,取舍见缓存注释)。
         RemoteDefaultBranchCache.shared.invalidateAll()
         let current = await currentBranch(in: directory)
@@ -1306,7 +1356,7 @@ struct GitService: GitServicing {
             // 上游形如 `<remote>/<branch>`;异常前缀(空、以 `-` 开头会被当选项)退回 origin。
             let prefix = upstream.split(separator: "/", maxSplits: 1).first.map(String.init) ?? ""
             let remote = (prefix.isEmpty || prefix.hasPrefix("-")) ? "origin" : prefix
-            try await runGit(arguments: ["-C", directory, "push", remote, "--", currentBranch])
+            try await runGit(arguments: ["-C", directory, "push", remote, "--", currentBranch], timeout: Self.networkOperationTimeout)
             return
         }
 
@@ -1314,11 +1364,11 @@ struct GitService: GitServicing {
             throw gitOperationError("仓库未配置 origin 远端")
         }
 
-        try await runGit(arguments: ["-C", directory, "push", "-u", "origin", "--", currentBranch])
+        try await runGit(arguments: ["-C", directory, "push", "-u", "origin", "--", currentBranch], timeout: Self.networkOperationTimeout)
     }
 
     func stash(in directory: String) async throws {
-        try await stashPush(in: directory, message: "CCSpace temporary worktree safety stash")
+        try await stashPush(in: directory, message: "CCSpace 临时工作区安全暂存")
     }
 
     func stashPop(in directory: String) async throws {
@@ -1565,7 +1615,7 @@ struct GitService: GitServicing {
         ], timeout: 20) else {
             return nil
         }
-        let branch = Self.parseSymrefLsRemote(output: output).defaultBranch
+        let branch = Self.parseSymrefDefaultBranch(output: output)
         if let branch {
             RemoteDefaultBranchCache.shared.store(branch, for: remoteURL)
         }
@@ -1862,7 +1912,7 @@ struct GitService: GitServicing {
         guard Self.isSafeRefName(branch) else {
             throw gitOperationError("分支名不合法：\(branch)")
         }
-        try await runGit(arguments: ["-C", directory, "push", "origin", "--delete", "--", branch])
+        try await runGit(arguments: ["-C", directory, "push", "origin", "--delete", "--", branch], timeout: Self.networkOperationTimeout)
     }
 
     func mergeDefaultBranchIntoCurrent(in directory: String) async throws -> GitMergeDefaultBranchOutcome {
@@ -1882,7 +1932,7 @@ struct GitService: GitServicing {
             return .skipped
         }
 
-        try await runGit(arguments: ["-C", directory, "fetch", "origin", "--", defaultBranch])
+        try await runGit(arguments: ["-C", directory, "fetch", "origin", "--", defaultBranch], timeout: Self.networkOperationTimeout)
         // fetch 成功:远端引用已刷新,失效默认分支缓存(粗粒度整体清空,取舍见缓存注释)。
         RemoteDefaultBranchCache.shared.invalidateAll()
         try await runGit(arguments: ["-C", directory, "merge", "--no-edit", "--", "origin/\(defaultBranch)"])
@@ -1896,10 +1946,7 @@ struct GitService: GitServicing {
     func recentCommits(in directory: String, count: Int, rev: String?) async -> [GitCommitEntry] {
         if let rev, !Self.isSafeRefName(rev) { return [] }
         // 读取失败与"无提交"都返回 []:提交列表空态已由 UI 区分,与 unpushedCommits 同款取舍。
-        guard let output = await commitLogOutput(in: directory, count: count, range: rev) else {
-            return []
-        }
-        return Self.parseCommitLog(output)
+        return await commitLogEntries(in: directory, count: count, skip: 0, range: rev, options: [])
     }
 
     func unpushedCommits(in directory: String, count: Int) async -> [GitCommitEntry] {
@@ -1909,15 +1956,117 @@ struct GitService: GitServicing {
     func unpushedCommits(in directory: String, count: Int, rev: String?) async -> [GitCommitEntry] {
         if let rev, !Self.isSafeRefName(rev) { return [] }
         // 无上游分支时 `@{u}` 解析失败,返回空;调用方以 hasRemoteTrackingBranch 区分展示。
-        let range = rev.map { "\($0)@{u}..\($0)" } ?? "@{u}..HEAD"
-        guard let output = await commitLogOutput(in: directory, count: count, range: range) else {
+        let range = Self.commitLogRange(rev: rev, unpushedOnly: true)
+        return await commitLogEntries(in: directory, count: count, skip: 0, range: range, options: [])
+    }
+
+    func commitLogPage(_ request: CommitLogPageRequest) async -> GitCommitLogPage {
+        if let rev = request.rev, !Self.isSafeRefName(rev) { return .empty }
+        let count = max(1, request.count)
+        let skip = max(0, request.skip)
+        let range = Self.commitLogRange(rev: request.rev, unpushedOnly: request.unpushedOnly)
+
+        guard let searchText = Self.normalizedCommitLogSearchText(request.searchText) else {
+            // 非搜索态:`--skip` 在 git 侧过滤之后生效,是精确的结果级游标,
+            // 每页只取 pageSize+1 条,翻页不必从仓库头重拉。
+            let entries = await commitLogEntries(in: request.directory, count: count + 1, skip: skip, range: range, options: [])
+            return GitCommitLogPage(commits: Array(entries.prefix(count)), hasMore: entries.count > count)
+        }
+
+        // 搜索态:`--grep` 与 `--author` 混用是**与**语义(git 2.54 实测,并非直觉上的"或"),
+        // "说明或作者任一命中"只能两路查询再在内存取并集。两路都用作者时间倒序,
+        // 并集第 skip+count 名之前的命中必然落在各自前缀里,故各取 headCount 条即可。
+        let headCount = skip + count + 1
+        async let messageMatches = commitLogEntries(
+            in: request.directory,
+            count: headCount,
+            skip: 0,
+            range: range,
+            options: Self.commitLogSearchOptions(pattern: "--grep=\(searchText)")
+        )
+        async let authorMatches = commitLogEntries(
+            in: request.directory,
+            count: headCount,
+            skip: 0,
+            range: range,
+            options: Self.commitLogSearchOptions(pattern: "--author=\(searchText)")
+        )
+        // 关键词形如 object ID 时补一路直达查询:`--grep` 匹配不到哈希。
+        // "仅看未推送"下不做这路:未推送集合由 range 严格界定,把仓库里任意
+        // 可解析的同名对象塞进结果集会破坏该筛选的语义。
+        var lists: [[GitCommitEntry]] = [await messageMatches, await authorMatches]
+        if request.unpushedOnly == false, Self.isHexObjectID(searchText, maxLength: 64) {
+            lists.append(await commitLogEntries(in: request.directory, count: 1, skip: 0, range: searchText, options: []))
+        }
+        return Self.mergeCommitLogMatches(lists, skip: skip, count: count)
+    }
+
+    /// 提交日志的 revs 范围:"仅看未推送"取 `<rev>@{u}..<rev>`(未指定 rev 时 `@{u}..HEAD`),
+    /// 否则取指定 ref;两者皆无时为 nil(从 HEAD 走全部历史)。
+    private static func commitLogRange(rev: String?, unpushedOnly: Bool) -> String? {
+        guard unpushedOnly else { return rev }
+        return rev.map { "\($0)@{u}..\($0)" } ?? "@{u}..HEAD"
+    }
+
+    /// 搜索关键词归一:换行折成空格(`--grep` 的模式串按行匹配,带换行只会永远落空),
+    /// 去首尾空白;归一后为空返回 nil 表示不过滤。
+    /// 标记为 internal:纯函数,单测直接覆盖。
+    static func normalizedCommitLogSearchText(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let collapsed = raw
+            .split(whereSeparator: \.isNewline)
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespaces)
+        return collapsed.isEmpty ? nil : collapsed
+    }
+
+    /// 搜索态附加给 `git log` 的选项。`-F` 让关键词按字面量子串匹配(UI 的搜索语义如此,
+    /// 也免得用户输入的 `(`/`[` 被当正则;git 2.54 实测它同时作用于 `--grep` 与 `--author`),
+    /// `-i` 忽略大小写,`--author-date-order` 把两路结果钉到与列表展示同一个时间键,
+    /// 并集分页窗口才稳定。
+    private static func commitLogSearchOptions(pattern: String) -> [String] {
+        ["-F", "-i", "--author-date-order", pattern]
+    }
+
+    /// 合并多路命中:按哈希去重、按作者时间倒序(同刻按哈希),再取并集窗口 [skip, skip+count)。
+    private static func mergeCommitLogMatches(_ lists: [[GitCommitEntry]], skip: Int, count: Int) -> GitCommitLogPage {
+        var seen: Set<String> = []
+        var merged: [GitCommitEntry] = []
+        for list in lists {
+            for entry in list where seen.insert(entry.hash).inserted {
+                merged.append(entry)
+            }
+        }
+        merged.sort { lhs, rhs in
+            lhs.date == rhs.date ? lhs.hash < rhs.hash : lhs.date > rhs.date
+        }
+        let window = Array(merged.dropFirst(skip).prefix(count))
+        return GitCommitLogPage(commits: window, hasMore: merged.count > skip + count)
+    }
+
+    /// 取一页 `git log` 并解析;读取失败与"无提交"都返回 []。
+    private func commitLogEntries(
+        in directory: String,
+        count: Int,
+        skip: Int,
+        range: String?,
+        options: [String]
+    ) async -> [GitCommitEntry] {
+        guard let output = await commitLogOutput(in: directory, count: count, skip: skip, range: range, options: options) else {
             return []
         }
         return Self.parseCommitLog(output)
     }
 
-    /// 执行 `git log` 并返回原始输出;`range` 为可选的提交范围(如 "@{u}..HEAD")。
-    private func commitLogOutput(in directory: String, count: Int, range: String?) async -> String? {
+    /// 执行 `git log` 并返回原始输出;`range` 为可选的提交范围(如 "@{u}..HEAD")，
+    /// `skip` 是结果级偏移，`options` 是搜索态附加的过滤选项。
+    private func commitLogOutput(
+        in directory: String,
+        count: Int,
+        skip: Int = 0,
+        range: String?,
+        options: [String] = []
+    ) async -> String? {
         // 钳制到至少 1:count <= 0 会拼出 `git log -0`,git 直接报错。
         let clampedCount = max(1, count)
         let fieldSeparator = "\u{1F}"
@@ -1926,9 +2075,13 @@ struct GitService: GitServicing {
             "-C", directory,
             "log",
             "--format=\(format)",
-            "--numstat",
-            "-\(clampedCount)",
         ]
+        arguments.append(contentsOf: options)
+        if skip > 0 {
+            arguments.append("--skip=\(skip)")
+        }
+        arguments.append("--numstat")
+        arguments.append("-\(clampedCount)")
         if let range {
             // 注意:rev range 必须直接作为 revs 参数,不能放在 `--` 之后(`--` 后是路径语义)。
             arguments.append(range)
@@ -2223,48 +2376,26 @@ struct GitService: GitServicing {
             }
     }
 
-    /// 表单远端探测:一次 `ls-remote --symref`(带 `HEAD refs/heads/*` pattern
-    /// 限定输出规模)同时得到分支列表与默认分支,替代分头两次联网查询。
-    func probeRemoteInfo(for remoteURL: String) async -> (branches: [String], defaultBranch: String?) {
-        guard (try? GitURLParser.validateRemoteURL(remoteURL)) != nil else { return ([], nil) }
-        // 表单远端探测是最该快失败的路径:与 remoteBranches 统一 20s(此前 60s,弱网干等)。
-        guard let output = await readGitOutput(operation: "probe-remote-info", arguments: [
-            "ls-remote", "--symref", remoteURL, "HEAD", "refs/heads/*",
-        ], timeout: 20) else { return ([], nil) }
-        let parsed = Self.parseSymrefLsRemote(output: output)
-        if let defaultBranch = parsed.defaultBranch {
-            RemoteDefaultBranchCache.shared.store(defaultBranch, for: remoteURL)
-        }
-        return parsed
-    }
-
-    /// 解析 `git ls-remote --symref` 全量输出为 (分支列表, 默认分支)。
+    /// 解析 `git ls-remote --symref <url> HEAD` 输出里的默认分支(HEAD 的符号指向)。
     /// 行形态有两类:
     /// - `ref: refs/heads/main\tHEAD`——HEAD 的符号指向,即默认分支;
-    /// - `<sha>\t<refname>`——常规引用;`<sha>\tHEAD` 与 refs/heads/ 之外的引用跳过。
-    /// 标记为 internal:纯函数,供单测直接覆盖各分支。
-    static func parseSymrefLsRemote(output: String) -> (branches: [String], defaultBranch: String?) {
-        var branches: [String] = []
-        var defaultBranch: String?
+    /// - `<sha>\tHEAD` 等其他行一律忽略。
+    /// 不再顺带收集分支列表:命令只请求 HEAD,全量名单是 `remoteBranches`
+    /// (另一条 `ls-remote --heads`)的职责,留个恒空的字段只会让测试测取不到的东西。
+    /// 标记为 internal:纯函数,供单测直接覆盖各形态。
+    static func parseSymrefDefaultBranch(output: String) -> String? {
         let headsPrefix = "refs/heads/"
         for line in output.components(separatedBy: .newlines) {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard trimmed.isEmpty == false else { continue }
-            if trimmed.hasPrefix("ref:") {
-                // 符号引用行整形如 `ref: refs/heads/main\tHEAD`:先按 tab 切断尾部,再取指向。
-                let firstField = trimmed.split(separator: "\t", maxSplits: 1).first ?? ""
-                let target = firstField.dropFirst("ref:".count).trimmingCharacters(in: .whitespaces)
-                guard target.hasPrefix(headsPrefix) else { continue }
-                let name = String(target.dropFirst(headsPrefix.count))
-                if name.isEmpty == false { defaultBranch = name }
-                continue
-            }
-            let parts = trimmed.components(separatedBy: "\t")
-            guard parts.count == 2, parts[1].hasPrefix(headsPrefix) else { continue }
-            let name = String(parts[1].dropFirst(headsPrefix.count))
-            if name.isEmpty == false { branches.append(name) }
+            guard trimmed.hasPrefix("ref:") else { continue }
+            // 符号引用行整形如 `ref: refs/heads/main\tHEAD`:先按 tab 切断尾部,再取指向。
+            let firstField = trimmed.split(separator: "\t", maxSplits: 1).first ?? ""
+            let target = firstField.dropFirst("ref:".count).trimmingCharacters(in: .whitespaces)
+            guard target.hasPrefix(headsPrefix) else { continue }
+            let name = String(target.dropFirst(headsPrefix.count))
+            if name.isEmpty == false { return name }
         }
-        return (branches, defaultBranch)
+        return nil
     }
 
     /// 列出本地已有的远端跟踪分支(`git for-each-ref refs/remotes`,如 origin/main);
@@ -2285,20 +2416,6 @@ struct GitService: GitServicing {
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { $0.contains("/") }
-    }
-
-    func isGitAvailable() async -> Bool {
-        await gitEnvironmentInfo().isAvailable
-    }
-
-    func gitEnvironmentInfo() async -> GitEnvironmentInfo {
-        let version = (await readGitOutput(operation: "git-version", arguments: ["--version"]))?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return GitEnvironmentInfo(
-            isAvailable: version?.isEmpty == false,
-            version: version?.isEmpty == false ? version : nil,
-            executablePath: GitProcessRunner.gitExecutablePath
-        )
     }
 
     private func trackingBranch(in directory: String) async -> String? {
@@ -2367,7 +2484,7 @@ struct GitService: GitServicing {
             // 的祖先(如 force-push 过)会被 git 以 non-fast-forward 拒绝,
             // 而这正是"fetch 刷新过期引用"最该覆盖的场景。更新跟踪引用无风险。
             "+refs/heads/\(branch):refs/remotes/origin/\(branch)",
-        ])
+        ], timeout: Self.networkOperationTimeout)
     }
 
     private func isMissingRemoteBranchError(_ error: Error) -> Bool {

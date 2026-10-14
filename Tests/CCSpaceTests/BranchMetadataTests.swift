@@ -127,3 +127,33 @@ final class BranchActivityOrderTests: XCTestCase {
         )
     }
 }
+
+/// MR 目标分支面板的"已选置顶"排序。
+final class BranchSelectionOrderTests: XCTestCase {
+    func test_selectedBranchesMoveToTopKeepingRelativeOrder() {
+        XCTAssertEqual(
+            BranchSelectionOrder.selectedFirst(
+                ["a", "b", "c", "d"],
+                selected: ["d", "b"]
+            ),
+            ["b", "d", "a", "c"],
+            "两组内部各自稳定,只有被选中的整体上移"
+        )
+    }
+
+    func test_noSelectionOrEmptyListIsIdentity() {
+        XCTAssertEqual(
+            BranchSelectionOrder.selectedFirst(["a", "b"], selected: []),
+            ["a", "b"]
+        )
+        XCTAssertTrue(BranchSelectionOrder.selectedFirst([], selected: ["a"]).isEmpty)
+    }
+
+    func test_selectedNameMissingFromListAddsNoGhostRow() {
+        // 配置里存着远端已删除的分支:不能凭空多出一行,也不能打乱其余顺序。
+        XCTAssertEqual(
+            BranchSelectionOrder.selectedFirst(["a", "b"], selected: ["gone"]),
+            ["a", "b"]
+        )
+    }
+}

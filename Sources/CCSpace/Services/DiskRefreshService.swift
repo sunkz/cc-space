@@ -11,6 +11,27 @@ struct DiskRefreshStoreSnapshot: Equatable, Sendable {
     let repositories: [RepositoryConfig]
 }
 
+/// `DiskRefreshService.refresh` 的单飞守卫。
+///
+/// 标志不能放在 `DiskRefreshService` 自身:它是 `@MainActor struct`,且被
+/// `RootSplitView` 以计算属性构造——每次访问都是**新实例**,实例内的标志跨调用
+/// 不共享。故按 rootPath 键集中在这里,任何实例触发的刷新共用同一份在飞集合。
+@MainActor
+private final class DiskRefreshSingleFlight {
+    static let shared = DiskRefreshSingleFlight()
+
+    private var inFlightRootPaths: Set<String> = []
+
+    /// 标记该根开始刷新;已在飞(或已标记)时返回 false。
+    func begin(_ rootPath: String) -> Bool {
+        inFlightRootPaths.insert(rootPath).inserted
+    }
+
+    func end(_ rootPath: String) {
+        inFlightRootPaths.remove(rootPath)
+    }
+}
+
 struct DiskRefreshComputationResult: Sendable {
     let workplaceResult: WorkplaceDiskRefreshResult
     let repositoryResult: RepositoryDeduplicationResult
@@ -49,6 +70,17 @@ struct DiskRefreshService {
 
     @discardableResult
     func refresh(rootPath: String) async -> DiskRefreshOutcome {
+        // 单飞守卫:同一数据根上的并发刷新只让第一轮生效,其余立即返回。
+        // `refresh` 内含重试循环与多处 await,重入会重复 apply/import(导入阶段还会
+        // 真实写盘)。生产唯一调用方 RootSplitView.scheduleDiskRefresh 已用 refreshTask
+        // 单飞,这里是纵深防御——新增调用方漏掉单飞时不再出现两轮并发落库。
+        let gate = DiskRefreshSingleFlight.shared
+        guard gate.begin(rootPath) else {
+            diskRefreshLog.notice("event=refresh_skipped_in_flight")
+            return DiskRefreshOutcome(importedRepositoryCount: 0)
+        }
+        defer { gate.end(rootPath) }
+
         var retryCount = 0
         while Task.isCancelled == false {
             let snapshot = currentSnapshot()
@@ -127,6 +159,10 @@ struct DiskRefreshService {
                 gitURL: gitURL
             ))
         }
+
+        // 循环内守卫只看"下一个候选开始前";最后一个候选读远端期间才到达的
+        // 取消必须在这里也拦一道,否则取消语义下仍会提交导入。
+        guard Task.isCancelled == false else { return 0 }
 
         do {
             return try repositoryStore.commitImportedRepositories(

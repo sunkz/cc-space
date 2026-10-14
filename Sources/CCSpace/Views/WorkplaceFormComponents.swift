@@ -7,7 +7,6 @@ struct WorkplaceFormFieldsSection: View {
     @Binding var branch: String
     let isDisabled: Bool
     var branchValidationError: String? = nil
-    var autoFocusName: Bool = false
     var nameHint: String? = nil
     var branchHint: String? = nil
     let onInputChanged: () -> Void
@@ -16,13 +15,7 @@ struct WorkplaceFormFieldsSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            CCSpaceSectionTitle(
-                title: title,
-                subtitle: "",
-                titleFont: .title3,
-                titleWeight: .semibold,
-                titleColor: .primary
-            )
+            CCSpaceSectionTitle(title: title)
 
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 3) {
@@ -62,17 +55,21 @@ struct WorkplaceFormFieldsSection: View {
             }
         }
         .ccspacePanel(background: .clear, cornerRadius: 12, padding: 12, borderOpacity: 0.03)
+        // 打开弹窗即聚焦名称框;延后一拍是等同帧布局完成,同帧设焦点会被忽略。
         .task {
-            if autoFocusName {
-                try? await Task.sleep(for: .milliseconds(100))
-                isNameFocused = true
-            }
+            try? await Task.sleep(for: .milliseconds(100))
+            isNameFocused = true
         }
     }
 }
 
+/// 创建/编辑弹窗仓库列表的共享度量。列表**不再内滚、也不封顶**：全部行随弹窗
+/// 外层 ScrollView 一起展开,所以这里只剩行距一个常量。
+enum FormListMetrics {
+    static let rowSpacing: CGFloat = 6
+}
+
 struct WorkplaceRepositorySelectionSection: View {
-    let subtitle: String
     let repositories: [WorkplaceSelectableRepository]
     let selectedIDs: Set<UUID>
     let emptySubtitle: String
@@ -80,30 +77,22 @@ struct WorkplaceRepositorySelectionSection: View {
     let isDisabled: Bool
     let onToggle: (UUID) -> Void
 
-    private var presentationState: WorkplaceRepositorySelectionPresentationState {
-        WorkplaceRepositorySelectionPresentationState(
+    var body: some View {
+        // 展示状态与排序在每遍 body 求值只做一次:此前 `presentationState`/
+        // `displayedRepositories` 是计算属性、body 内各访问多次,搜索框每按一键
+        // 触发多遍 filter + prioritizeSelected(localizedStandardCompare)
+        // (对齐"body 顶部求值一次沿渲染路径下发"的仓库惯例)。
+        let state = WorkplaceRepositorySelectionPresentationState(
             repositories: repositories,
             searchText: searchText,
             emptySubtitle: emptySubtitle
         )
-    }
-
-    private var displayedRepositories: [WorkplaceSelectableRepository] {
-        WorkplaceSelectableRepositoryOrdering.prioritizeSelected(
-            repositories: presentationState.filteredRepositories,
+        let displayed = WorkplaceSelectableRepositoryOrdering.prioritizeSelected(
+            repositories: state.filteredRepositories,
             selectedIDs: selectedIDs
         )
-    }
-
-    var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            CCSpaceSectionTitle(
-                title: "选择仓库",
-                subtitle: subtitle,
-                titleFont: .title3,
-                titleWeight: .semibold,
-                titleColor: .primary
-            )
+            CCSpaceSectionTitle(title: "选择仓库")
 
             if repositories.isEmpty == false {
                 TextField("搜索仓库名称或地址", text: $searchText)
@@ -111,16 +100,17 @@ struct WorkplaceRepositorySelectionSection: View {
                     .disabled(isDisabled)
             }
 
-            if presentationState.filteredRepositories.isEmpty {
+            if state.filteredRepositories.isEmpty {
                 CCSpaceEmptyStateCard(
-                    title: presentationState.emptyTitle,
-                    subtitle: presentationState.emptySubtitle,
-                    systemImage: searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "shippingbox" : "magnifyingglass",
-                    tint: .accentColor
+                    title: state.emptyTitle,
+                    subtitle: state.emptySubtitle,
+                    systemImage: searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "shippingbox" : "magnifyingglass"
                 ) { EmptyView() }
             } else {
-                LazyVStack(spacing: 6) {
-                    ForEach(displayedRepositories) { repository in
+                // 逐行卡片(行=CCSpaceInteractiveCard,行距 6,无外层描边容器):
+                // 全部行直接展开,不再限高内滚——长列表由弹窗外层 ScrollView 承接。
+                LazyVStack(spacing: FormListMetrics.rowSpacing) {
+                    ForEach(displayed) { repository in
                         WorkplaceSelectableRepositoryRow(
                             repository: repository,
                             isSelected: selectedIDs.contains(repository.id),
@@ -143,20 +133,14 @@ struct WorkplaceFormFooter: View {
     let isSubmitting: Bool
     let isSubmitDisabled: Bool
     let progress: WorkplaceOperationProgress?
-    /// 提交中是否禁用取消。创建/编辑两个场景都传 false:克隆单仓最长 600 秒才超时,
-    /// 取消按钮是唯一的即时中止通道,禁用它会配合 interactiveDismissDisabled
-    /// 把用户锁死在弹窗里干等。
-    var isCancelDisabledWhileSubmitting: Bool = true
     let onCancel: () -> Void
     let onSubmit: () -> Void
 
-    private var isCancelDisabled: Bool {
-        isSubmitting && isCancelDisabledWhileSubmitting
-    }
-
-    /// 提交中且按钮可点时,语义是"中止进行中的操作并回滚",不是"关闭弹窗"。
+    /// 提交中按钮的语义是"中止进行中的操作并回滚",不是"关闭弹窗":克隆单仓最长
+    /// 600 秒才超时,弹窗又是 interactiveDismissDisabled,取消是唯一的即时出口,
+    /// 因此任何状态下都不禁用它。
     private var cancelTitle: String {
-        isSubmitting && isCancelDisabled == false ? "中止" : "取消"
+        isSubmitting ? "中止" : "取消"
     }
 
     var body: some View {
@@ -174,8 +158,6 @@ struct WorkplaceFormFooter: View {
                 .buttonStyle(.bordered)
                 .controlSize(.regular)
                 .keyboardShortcut(.cancelAction)
-                .disabled(isCancelDisabled)
-                .ccspaceQuickHelp(isCancelDisabled ? "操作进行中，请等待完成" : nil)
 
                 Button(action: onSubmit) {
                     if isSubmitting {
@@ -250,6 +232,8 @@ private struct WorkplaceFormProgressPanel: View {
     }
 }
 
+/// 仓库选择行:线上 release 版样式——`CCSpaceInteractiveCard` 逐行卡片
+/// (选中 accent 淡底/hover 浅灰由卡片自带),单行「仓库名 body 半粗 + 地址 caption 灰」。
 private struct WorkplaceSelectableRepositoryRow: View {
     let repository: WorkplaceSelectableRepository
     let isSelected: Bool
@@ -266,20 +250,25 @@ private struct WorkplaceSelectableRepositoryRow: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(repository.name)
                             .font(.body.weight(.medium))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+
+                        // 地址另起一行:与仓库名抢一行时只能截成
+                        // "…/CCS…/api-g…",既看不清也点不着。
                         Text(repository.url)
-                            .font(.footnote)
+                            .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
+                            .truncationMode(.middle)
                     }
 
-                    Spacer()
+                    Spacer(minLength: 8)
                 }
             }
         }
         .buttonStyle(.plain)
-        .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(repository.name)
+        .accessibilityLabel("\(repository.name)，地址 \(repository.url)")
         .accessibilityValue(isSelected ? "已选中" : "未选中")
         .accessibilityHint("切换仓库选择")
     }

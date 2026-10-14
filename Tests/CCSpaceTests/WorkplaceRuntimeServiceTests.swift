@@ -99,7 +99,6 @@ private actor WorkplaceRuntimeGitServiceSpy: GitServicing {
         }
     }
 
-    func isGitAvailable() async -> Bool { true }
     func defaultBranch(for remoteURL: String) async -> String? {
         defaultBranchCalls.append(remoteURL)
         return defaultBranchResult
@@ -395,7 +394,6 @@ private final class ConcurrentPushGitServiceSpy: GitServicing, @unchecked Sendab
     func stash(in directory: String) async throws {}
     func stashPop(in directory: String) async throws {}
 
-    func isGitAvailable() async -> Bool { true }
 
     func defaultBranch(for remoteURL: String) async -> String? { "main" }
 
@@ -2391,7 +2389,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         let stashPushes = await gitService.stashPushes()
         XCTAssertEqual(stashPushes.count, 1)
         XCTAssertEqual(stashPushes.first?.directory, state.localPath)
-        XCTAssertEqual(stashPushes.first?.message, "CCSpace manual stash")
+        XCTAssertEqual(stashPushes.first?.message, "CCSpace 手动暂存")
 
         let persistedState = try XCTUnwrap(
             syncState(for: state.repositoryID, workplaceID: workplace.id, in: workplaceStore)

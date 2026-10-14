@@ -11,6 +11,12 @@ private actor WorkplaceEditGitServiceSpy: GitServicing {
     private(set) var checkoutCalls: [(branch: String, directory: String)] = []
     var currentBranchByDirectory: [String: String] = [:]
     var branchStatusByDirectory: [String: GitBranchStatusSnapshot] = [:]
+    /// 模拟"克隆已把目录建出来、随后被取消":目录留在盘上,异常以 CancellationError 抛出。
+    private var cloneCancelsAfterCreatingDirectory = false
+
+    func setCloneCancelsAfterCreatingDirectory(_ value: Bool) {
+        cloneCancelsAfterCreatingDirectory = value
+    }
 
     func clone(repositoryURL: String, into directory: String) async throws {
         cloneCalls.append((repositoryURL: repositoryURL, directory: directory))
@@ -19,13 +25,15 @@ private actor WorkplaceEditGitServiceSpy: GitServicing {
             withIntermediateDirectories: true,
             attributes: nil
         )
+        if cloneCancelsAfterCreatingDirectory {
+            throw CancellationError()
+        }
     }
 
     func pull(in directory: String) async throws {}
     func push(in directory: String) async throws {}
     func stash(in directory: String) async throws {}
     func stashPop(in directory: String) async throws {}
-    func isGitAvailable() async -> Bool { true }
     func defaultBranch(for remoteURL: String) async -> String? { "main" }
     func defaultBranch(in directory: String) async -> String? { "main" }
     func currentBranch(in directory: String) async -> String? {
@@ -52,7 +60,6 @@ private actor WorkplaceEditGitServiceSpy: GitServicing {
     }
 
     func remoteBranchExists(branch: String, remoteURL: String) async -> Bool { false }
-
 
     func mergeDefaultBranchIntoCurrent(in directory: String) async throws -> GitMergeDefaultBranchOutcome {
         .merged
@@ -337,6 +344,71 @@ final class WorkplaceEditServiceTests: XCTestCase {
         XCTAssertEqual(syncStates.count, 1)
         XCTAssertEqual(syncStates.first?.repositoryID, apiRepository.id)
         XCTAssertEqual(syncStates.first?.localPath, originalRepoPath)
+    }
+
+    /// 取消克隆留下的半成品目录必须被回滚删除:它不属任何同步态行、工作区里也查不到,
+    /// 留着既白占磁盘,又会让用户下次重试时撞上"目标目录已存在且不是本次克隆创建的"而**永久失败**。
+    ///
+    /// 删除范围只能取"克隆已启动"清单(`onCloneStarted`),不能取预期清单:
+    /// 未启动的预期路径可能正是用户的既有同名目录,删掉就是毁数据。
+    func test_saveWorkplaceEditDeletesPartiallyClonedDirectoryWhenCloneIsCancelled() async throws {
+        let stores = try makeServiceStores()
+        let repositoryStore = stores.repositoryStore
+        let workplaceStore = stores.workplaceStore
+
+        try repositoryStore.addRepository(gitURL: "git@github.com:org/api.git")
+        try repositoryStore.addRepository(gitURL: "git@github.com:org/web.git")
+        let apiRepository = try XCTUnwrap(repositoryStore.repositories.first { $0.repoName == "api" })
+        let webRepository = try XCTUnwrap(repositoryStore.repositories.first { $0.repoName == "web" })
+        let workplace = try workplaceStore.createWorkplace(
+            name: "ios-dev",
+            rootPath: stores.workspaceRoot.path,
+            selectedRepositories: [apiRepository]
+        )
+        // 既有仓库 api 已落地(编辑时保留),web 是本次新增 → 进入克隆路径。
+        try FileManager.default.createDirectory(
+            atPath: URL(fileURLWithPath: workplace.path).appendingPathComponent("api").path,
+            withIntermediateDirectories: true
+        )
+
+        let gitService = WorkplaceEditGitServiceSpy()
+        // 目录先落盘再抛取消:复现"克隆到一半被取消"的磁盘形态。
+        await gitService.setCloneCancelsAfterCreatingDirectory(true)
+        let service = WorkplaceEditService(
+            workplaceStore: workplaceStore,
+            repositoryStore: repositoryStore,
+            syncCoordinator: SyncCoordinator(gitService: gitService),
+            gitService: gitService
+        )
+
+        await XCTAssertThrowsErrorAsync(CancellationError.self) {
+            try await service.saveWorkplaceEdit(
+                workplaceID: workplace.id,
+                name: "ios-dev",
+                selectedRepositoryIDs: [apiRepository.id, webRepository.id],
+                branch: nil
+            )
+        }
+
+        let clonedPath = URL(fileURLWithPath: workplace.path).appendingPathComponent("web").path
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: clonedPath),
+            "取消克隆留下的半成品目录必须被删除,否则下一次重试必然撞上同名目录"
+        )
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: URL(fileURLWithPath: workplace.path).appendingPathComponent("api").path
+            ),
+            "既有仓库目录不属本次克隆产物,不得被连带删除"
+        )
+
+        let persisted = try XCTUnwrap(workplaceStore.workplaces.first { $0.id == workplace.id })
+        XCTAssertEqual(persisted.selectedRepositoryIDs, [apiRepository.id], "记录必须回到编辑前")
+        XCTAssertEqual(
+            workplaceStore.syncStates.filter { $0.workplaceID == workplace.id }.map(\.repositoryID),
+            [apiRepository.id],
+            "被取消的克隆不得留下同步态残行"
+        )
     }
 
     func test_saveWorkplaceEditSkipsCheckoutWhenRepositoryAlreadyOnTargetBranch() async throws {

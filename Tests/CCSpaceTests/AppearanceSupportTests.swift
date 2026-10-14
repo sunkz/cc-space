@@ -7,10 +7,6 @@ final class AppearanceSupportTests: XCTestCase {
         XCTAssertEqual(AppSettings.AppearanceMode.light.nextInCycle, .dark)
         XCTAssertEqual(AppSettings.AppearanceMode.dark.nextInCycle, .system)
         XCTAssertEqual(AppSettings.AppearanceMode.system.nextInCycle, .light)
-        XCTAssertEqual(
-            AppSettings.AppearanceMode.cycleOrder,
-            [.light, .dark, .system]
-        )
     }
 
     func test_modeToolbarMetadata() {

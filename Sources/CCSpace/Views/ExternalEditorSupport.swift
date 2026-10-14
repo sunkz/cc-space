@@ -1,4 +1,5 @@
 import AppKit
+import CoreServices
 import Foundation
 
 enum OpenActionItem: Identifiable, Equatable {
@@ -84,8 +85,17 @@ struct ExternalEditorDetector: @unchecked Sendable {
     let candidates: [ExternalEditorCandidate]
 
     init(
-        resolveApplicationURL: @escaping @Sendable (String) -> URL? = {
-            NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0)
+        resolveApplicationURL: @escaping @Sendable (String) -> URL? = { bundleIdentifier in
+            // 刻意用 LaunchServices 的 LSCopyApplicationURLsForBundleIdentifier,而不是
+            // NSWorkspace.urlForApplication:本闭包在 `OpenActionsModel.refresh` 的
+            // Task.detached 里被调用,而 NSWorkspace 属 AppKit、未承诺线程安全。
+            // LSCopyApplicationURLsForBundleIdentifier 是 LaunchServices 的纯查询 API,
+            // 任意线程可调;返回该 bundle id 的已注册应用位置列表,取首个即可
+            // (调用方只拿它定位应用来 `open -a`,任一有效副本都成立)。
+            var error: Unmanaged<CFError>?
+            let urls = LSCopyApplicationURLsForBundleIdentifier(bundleIdentifier as CFString, &error)?
+                .takeRetainedValue() as? [URL]
+            return urls?.first
         },
         fileManager: FileManager = .default,
         searchRoots: [URL] = defaultSearchRoots(fileManager: .default),

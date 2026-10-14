@@ -6,7 +6,6 @@ import SwiftUI
 /// 单个按钮按 浅色 → 深色 → 跟随系统 循环,图标/文案跟随"当前持久化模式"
 /// (而非生效外观——system 态下系统可能正处浅色或深色,图标须稳定表达"跟随系统")。
 extension AppSettings.AppearanceMode {
-    static let cycleOrder: [AppSettings.AppearanceMode] = [.light, .dark, .system]
 
     var nextInCycle: AppSettings.AppearanceMode {
         switch self {

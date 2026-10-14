@@ -492,15 +492,25 @@ struct OnboardingView: View {
         }
     }
 
+    /// 与设置页同一口径的地址校验:引导页此前只判空就建档,而 Store 的仓库名解析
+    /// 有 legacy 兜底,"abc" 这种裸字符串照样建成一个垃圾仓库——两个入口共用一条规则。
     private func addRepository() {
         let trimmed = gitURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        let addState = RepositoryAddPresentationState(gitURL: trimmed)
+        guard addState.canSubmit else {
+            // 空输入是可达路径(输入框回车直接触发,按钮禁用挡不住它),要说"没填"而不是"填错了"。
+            feedback = CCSpaceFeedback(
+                style: .error,
+                message: addState.isURLFormatValid
+                    ? "请先输入 Git 仓库地址"
+                    : RepositoryURLFormat.invalidMessage
+            )
+            return
+        }
         do {
-            try repositoryStore.addRepository(gitURL: trimmed)
-            if let newRepo = repositoryStore.repositories.first(where: { $0.gitURL == trimmed }) {
-                withAnimation(.snappy(duration: 0.25)) {
-                    addedRepositoryIDs.append(newRepo.id)
-                }
+            let repository = try repositoryStore.addRepository(gitURL: trimmed)
+            withAnimation(.snappy(duration: 0.25)) {
+                addedRepositoryIDs.append(repository.id)
             }
             gitURLInput = ""
             feedback = CCSpaceFeedback(style: .success, message: "已添加")

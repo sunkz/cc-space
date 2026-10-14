@@ -56,36 +56,9 @@ cmd_run() {
         --output "${app_bundle}" \
         --version "${version}" >/dev/null
 
-    # Xcode 27 beta 的 SwiftPM 会把 LC_BUILD_VERSION 的 sdk 字段记成 deployment target
-    # (14.0),AppKit 据此判定为"macOS 26 SDK 之前链接"而回退旧外观,本地调试看不到
-    # Liquid Glass。这里把 sdk 字段改写为本机 SDK 版本并重签,与 CI 发布产物一致;
-    # 部署目标保持 14.0 不变。老工具链没有 vtool 或 SDK < 26 时静默跳过。
-    local app_binary="${app_bundle}/Contents/MacOS/${APP_NAME}"
-    local host_sdk_version
-    host_sdk_version="$(xcrun --sdk macosx --show-sdk-version 2>/dev/null || echo "0")"
-    # xcrun 输出空串/非数值(异常工具链)时,[ ... -ge 26 ] 会以 "integer expression
-    # expected" 语法错在 set -e 下直接中断 cmd_run。非数值一律按老工具链处理(跳过补丁)。
-    local host_sdk_major="${host_sdk_version%%.*}"
-    [[ "${host_sdk_major}" =~ ^[0-9]+$ ]] || host_sdk_major="0"
-    if command -v vtool >/dev/null 2>&1 \
-        && [ "${host_sdk_major}" -ge 26 ] \
-        && [ -f "${app_binary}" ]; then
-        # vtool 失败必须可见:此前 `|| true` 吞错后仍无条件打印 "Patched",
-        # 真失败(二进制不接受 -replace 等)会误导排查。补丁只影响外观,失败不阻断启动。
-        # 输出到临时文件、成功后再 mv 覆盖:vtool 以同一文件作输入与 -output 属原位重写,
-        # 中途失败(磁盘满/进程被杀)会留下损坏的二进制。
-        local patch_output patch_tmp="${app_binary}.vtool-tmp.$$"
-        if ! patch_output="$(vtool -set-build-version macos 14.0 "${host_sdk_version}" -replace \
-            -output "${patch_tmp}" "${app_binary}" 2>&1)" || ! mv -f "${patch_tmp}" "${app_binary}"; then
-            rm -f "${patch_tmp}"
-            echo "=> WARNING: vtool patch failed, macOS 26 appearance may not apply:" >&2
-            echo "${patch_output}" >&2
-        elif codesign --force -s - "${app_binary}" >/dev/null 2>&1; then
-            echo "=> Patched linked SDK version to ${host_sdk_version} (enables macOS 26 appearance)"
-        else
-            echo "=> WARNING: patched but ad-hoc re-sign failed; app may be killed on launch" >&2
-        fi
-    fi
+    # SDK 字段补丁:SwiftPM 把 sdk 字段记成 deployment target 的来龙去脉见脚本内注释。
+    # 与 README 截图脚本共用一份实现,不在两处各写一遍。
+    "${ROOT_DIR}/script/patch_app_sdk.sh" --binary "${app_bundle}/Contents/MacOS/${APP_NAME}"
 
     /usr/bin/open -n "${app_bundle}"
 }

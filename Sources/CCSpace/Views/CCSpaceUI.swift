@@ -85,18 +85,9 @@ extension View {
 /// 菜单里的 SwiftUI Button 会被转成 NSMenuItem,opacity/hidden 等修饰会被忽略,
 /// 只有"真实存在但不绘制内容"的图片才能既占住图标列宽度又不显形。
 enum MenuPlaceholderIcon {
-    /// 默认分支星标(MR 目标分支菜单)。
-    static let star: NSImage = {
-        let image = NSImage(systemSymbolName: "star", accessibilityDescription: "默认分支") ?? NSImage()
-        image.isTemplate = true
-        return image
-    }()
-
-    /// 空白占位图:尺寸与 star 完全一致,保证菜单图标列等宽、分支名文字左右对齐;
-    /// 菜单里的 SwiftUI Button 会被转成 NSMenuItem,opacity/hidden 等修饰会被忽略,
-    /// 只有"真实存在但不绘制内容"的图片才能既占住图标列宽度又不显形。
+    /// 空白占位图:14pt 见方与勾选/星标一列的符号图同档,保证图标列等宽、文字左对齐一致。
     static let blank: NSImage = {
-        let image = NSImage(size: star.size)
+        let image = NSImage(size: NSSize(width: 14, height: 14))
         image.isTemplate = true
         return image
     }()
@@ -106,7 +97,6 @@ struct CCSpaceEmptyStateCard<Actions: View>: View {
     let title: String
     let subtitle: String
     let systemImage: String
-    var tint: Color = .accentColor
     @ViewBuilder let actions: () -> Actions
 
     var body: some View {
@@ -133,24 +123,22 @@ struct CCSpaceEmptyStateCard<Actions: View>: View {
     }
 }
 
+/// 区块头:标题 + 可选副标题（副标题为空则不画）。全 app 只有这一种区块头样式，
+/// 早先的字体/颜色参数四个调用点清一色传同一套，已收进实现。
 struct CCSpaceSectionTitle: View {
     let title: String
     var subtitle: String = ""
-    var titleFont: Font = .footnote
-    var titleWeight: Font.Weight = .regular
-    var titleColor: Color = .secondary
-    var subtitleColor: Color = .secondary.opacity(0.7)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
             Text(title)
-                .font(titleFont)
-                .fontWeight(titleWeight)
-                .foregroundStyle(titleColor)
+                .font(.title3)
+                .fontWeight(.semibold)
+                .foregroundStyle(.primary)
             if subtitle.isEmpty == false {
                 Text(subtitle)
                     .font(.caption)
-                    .foregroundStyle(subtitleColor)
+                    .foregroundStyle(.secondary.opacity(0.7))
             }
         }
     }
@@ -158,7 +146,6 @@ struct CCSpaceSectionTitle: View {
 
 struct CCSpaceInteractiveCard<Content: View>: View {
     let selected: Bool
-    var accent: Color = .accentColor
     var cornerRadius: CGFloat = 10
     var padding: CGFloat = 8
     @ViewBuilder let content: () -> Content
@@ -167,7 +154,7 @@ struct CCSpaceInteractiveCard<Content: View>: View {
 
     private var backgroundColor: Color {
         if selected {
-            return accent.opacity(0.05)
+            return Color.accentColor.opacity(0.05)
         }
         if isHovering {
             return Color.primary.opacity(0.04)

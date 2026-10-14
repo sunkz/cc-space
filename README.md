@@ -26,13 +26,14 @@ macOS 多仓库工作区管理工具。配置常用 Git 仓库，按需组合创
 
 ## 功能介绍
 
-### 仓库库配置
+### 仓库配置
 
 在设置页面管理常用的 Git 仓库：
 
-- 粘贴 Git URL（HTTPS 或 SSH）即可添加，仓库名自动解析
-- 支持删除仓库
-- 自动校验重复的 URL 和仓库名
+- 在搜索框里粘贴 Git 地址，点「新增仓库」即可添加，仓库名自动解析、列表滚动定位到那一行
+- 支持 http(s)/ssh/git/file 协议、`user@host:path` 与本地绝对路径（`~` 会展开成绝对路径）
+- 每个仓库可配置多个 MR 目标分支：点行上的 ↗，从远端分支列表里多选
+- 自动校验重复的 URL 和仓库名，支持导出/导入 JSON 备份
 
 ### 创建工作区
 
@@ -157,10 +158,9 @@ macOS 多仓库工作区管理工具。配置常用 Git 仓库，按需组合创
 ./script/generate_readme_screenshots.sh
 ```
 
-前置条件（脚本依赖本仓库之外的资源，干净机器上会直接报错退出）：
+前置条件：
 
-- 安装私有 screenshot skill 到 `~/.codex/skills/screenshot`（脚本需要其中的 `scripts/ensure_macos_permissions.sh` 与 `scripts/take_screenshot.py`）
-- macOS 屏幕录制权限（脚本会调用上述 skill 的权限检查脚本辅助确认）
+- macOS 屏幕录制权限（截图用系统 `screencapture -x -l<window id>` 抓单个窗口，权限未授予时截到的是空白内容，脚本会在采样阶段失败并中止）
 
 如果只想先验收产物、不覆盖仓库里的正式图片，可以改写到临时目录：
 

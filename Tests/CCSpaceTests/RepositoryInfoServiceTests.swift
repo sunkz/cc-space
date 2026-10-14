@@ -46,31 +46,15 @@ final class RepositoryInfoServiceTests: XCTestCase {
         XCTAssertEqual(branches, ["main", "feature/x"])
     }
 
-    func test_probeRemoteReturnsBranchesAndDefaultBranch() async {
+    /// 内联新增/编辑表单落盘后靠它回补仓库配置的默认分支。
+    func test_defaultBranchProbesRemoteURL() async {
         let service = RepositoryInfoService(gitService: StubGitService(
-            stubbedRemoteBranches: ["main"],
             stubbedDefaultBranch: "main"
         ))
 
-        let probe = await service.probeRemote(gitURL: "https://example.com/repo.git")
+        let branch = await service.defaultBranch(for: "https://example.com/repo.git")
 
-        XCTAssertEqual(probe.branches, ["main"])
-        XCTAssertEqual(probe.defaultBranch, "main")
-    }
-
-    /// probeRemote 应走单次探测接口(真实实现一条 `ls-remote --symref` 完成),
-    /// 而不是分头的 remoteBranches + defaultBranch 两次查询。
-    func test_probeRemoteDelegatesToSingleProbeEndpoint() async {
-        let service = RepositoryInfoService(gitService: StubGitService(
-            stubbedRemoteBranches: ["should-not-be-used"],
-            stubbedDefaultBranch: "should-not-be-used",
-            stubbedProbeInfo: (branches: ["main", "dev"], defaultBranch: "main")
-        ))
-
-        let probe = await service.probeRemote(gitURL: "https://example.com/repo.git")
-
-        XCTAssertEqual(probe.branches, ["main", "dev"])
-        XCTAssertEqual(probe.defaultBranch, "main")
+        XCTAssertEqual(branch, "main")
     }
 }
 
@@ -80,8 +64,6 @@ final class RepositoryInfoServiceTests: XCTestCase {
 private struct StubGitService: GitServicing {
     var stubbedRemoteBranches: [String] = []
     var stubbedDefaultBranch: String?
-    /// 单次探测接口的桩数据;为 nil 时模拟协议默认实现(回退到分头两次查询)。
-    var stubbedProbeInfo: (branches: [String], defaultBranch: String?)?
 
     func remoteBranches(for remoteURL: String) async -> [String]? {
         stubbedRemoteBranches
@@ -89,10 +71,6 @@ private struct StubGitService: GitServicing {
 
     func defaultBranch(for remoteURL: String) async -> String? {
         stubbedDefaultBranch
-    }
-
-    func probeRemoteInfo(for remoteURL: String) async -> (branches: [String], defaultBranch: String?) {
-        stubbedProbeInfo ?? (stubbedRemoteBranches, stubbedDefaultBranch)
     }
 
     func remoteURL(in directory: String) async -> String? { nil }
@@ -106,7 +84,6 @@ private struct StubGitService: GitServicing {
     func push(in directory: String) async throws {}
     func stash(in directory: String) async throws {}
     func stashPop(in directory: String) async throws {}
-    func isGitAvailable() async -> Bool { false }
     func defaultBranch(in directory: String) async -> String? { nil }
     func currentBranch(in directory: String) async -> String? { nil }
     func branchStatus(in directory: String) async -> GitBranchStatusSnapshot? { nil }

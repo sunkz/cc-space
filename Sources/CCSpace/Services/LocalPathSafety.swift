@@ -119,6 +119,42 @@ enum LocalPathSafety {
         }
     }
 
+    /// 严格包含判定:`path` 必须位于 `rootPath` **之下**,不把"等于根"算作根内。
+    ///
+    /// 破坏性操作(递归删除、整树移动)必须用本判定而不是 `isWithinDirectory`:
+    /// 后者把"同一目录"也判为受管(创建子路径时才是想要的语义),但一旦记录路径被
+    /// 手工编辑/损坏成恰好等于受管根,`rm -rf <root>` 就会把整棵受管根(含其它工作区)
+    /// 一并删掉。本代码库对篡改 JSON 已有防护(NUL 字节等),这是同一威胁模型的缺口。
+    static func isStrictlyWithinDirectory(
+        _ path: String,
+        rootPath: String
+    ) -> Bool {
+        guard isWithinDirectory(path, rootPath: rootPath) else { return false }
+        let normalizedChildPath = normalizedPath(path)
+        let normalizedRootPath = normalizedPath(rootPath)
+        guard normalizedChildPath.isEmpty == false,
+              normalizedRootPath.isEmpty == false else {
+            return false
+        }
+        let resolvedChild = resolvedRealPath(of: normalizedChildPath)
+        let resolvedRoot = resolvedRealPath(of: normalizedRootPath)
+        // 大小写归一并排除:isWithinDirectory 走大小写不敏感分支放行时,两者本就
+        // 指向同一目录,不能算"严格包含"。
+        return resolvedChild != resolvedRoot
+            && resolvedChild.lowercased() != resolvedRoot.lowercased()
+    }
+
+    /// 破坏性操作的 containment 校验入口:`path` 必须**严格位于** `rootPath` 之下。
+    /// TOCTOU 契约同 `validateManagedPath`(紧邻操作前重新调用)。
+    static func validateStrictlyContainedPath(
+        _ path: String,
+        within rootPath: String
+    ) throws {
+        guard isStrictlyWithinDirectory(path, rootPath: rootPath) else {
+            throw LocalPathSafetyError.unsafeManagedPath
+        }
+    }
+
     /// containment 判定入口:两端先做归一化 + 符号链接解析,再比较词法前缀。
     ///
     /// TOCTOU:解析出的"真实位置"随磁盘状态变化,结论只在调用时刻成立,

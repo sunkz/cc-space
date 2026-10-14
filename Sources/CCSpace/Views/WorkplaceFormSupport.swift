@@ -260,7 +260,6 @@ enum WorkplaceSelectableRepositoryFactory {
 
 struct WorkplaceCreatePresentationState {
     let canSubmit: Bool
-    let selectedRepositorySubtitle: String
     let branchStrategyFeedback: CCSpaceFeedback?
     let missingRootPathFeedback: CCSpaceFeedback?
     let branchValidationError: String?
@@ -282,7 +281,6 @@ struct WorkplaceCreatePresentationState {
             selectedRepositoryCount > 0 &&
             !trimmedRootPath.isEmpty &&
             branchValidationError == nil
-        selectedRepositorySubtitle = selectedRepositoryCount == 0 ? "" : "\(selectedRepositoryCount) 个已选"
         branchStrategyFeedback =
             trimmedBranch.isEmpty
             ? nil
@@ -315,7 +313,6 @@ struct WorkplaceCreateSeedApplicationState: Equatable {
 
 struct WorkplaceEditPresentationState {
     let canSubmit: Bool
-    let selectedRepositorySubtitle: String
     /// 相对原选中集合被取消勾选的仓库数:>0 意味着保存会连带删除其本地目录,
     /// 视图据此在提交前强制二次确认。
     let removedRepositoryCount: Int
@@ -351,7 +348,6 @@ struct WorkplaceEditPresentationState {
             selectedRepositoryIDs.isEmpty == false &&
             hasChanges &&
             branchValidationError == nil
-        selectedRepositorySubtitle = selectedRepositoryIDs.isEmpty ? "" : "\(selectedRepositoryIDs.count) 个已选"
         removedRepositoryCount = removedCount
         removalWarningFeedback =
             removedCount > 0

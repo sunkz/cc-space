@@ -23,7 +23,7 @@ struct SettingsView: View {
     /// 重置引导的结果横幅:挂在引导区块自己的位置,错误不再落在视线外的顶部区块
     /// (此前与根目录共用 saveFeedback,横幅却只渲染在根目录区块内)。
     @State private var onboardingFeedback: CCSpaceFeedback?
-    /// 仓库搜索词:与 RepositorySettingsSection 共享——「回到顶部」按过滤后条数判断。
+    /// 仓库搜索词:提升到本页,仓库区与「回到顶部」共用同一份。
     @State private var searchText = ""
     /// 根目录是否真实存在:目录可能在 App 外被移动/删除,进入设置页要能看出来。
     @State private var rootDirectoryExists: Bool
@@ -71,16 +71,11 @@ struct SettingsView: View {
         // - 常驻:AI 表单里粘贴到一半的 Key 等未保存输入不会随切页被静默丢弃;
         // - 独立滚动:单 ScrollView 下两页签共享偏移,在通用页签滚到底再切 AI
         //   会停在空白区——各自持有时滚动位置随页签独立保留。
-        // 隐藏侧禁用命中测试并对辅助功能隐藏,交互与 if/else 等价。
+        // 隐藏侧的命中测试、读屏隐藏与悬浮提示开关由 ccspaceTabPane 一并处理,
+        // 交互与 if/else 等价。
         ZStack(alignment: .topLeading) {
-            generalTab
-                .opacity(selectedTab == .general ? 1 : 0)
-                .allowsHitTesting(selectedTab == .general)
-                .accessibilityHidden(selectedTab != .general)
-            aiTab
-                .opacity(selectedTab == .ai ? 1 : 0)
-                .allowsHitTesting(selectedTab == .ai)
-                .accessibilityHidden(selectedTab != .ai)
+            generalTab.ccspaceTabPane(isActive: selectedTab == .general)
+            aiTab.ccspaceTabPane(isActive: selectedTab == .ai)
         }
         .onChange(of: selectedTab) { _, _ in
             // 两页签视图常驻,隐藏侧的输入框不会自动交出第一响应者:
@@ -103,7 +98,13 @@ struct SettingsView: View {
                         repositoryStore: repositoryStore,
                         workplaceStore: workplaceStore,
                         gitService: gitService,
-                        searchText: $searchText
+                        searchText: $searchText,
+                        // 新增仓库后把那一行滚进视野:滚动只能由持有 reader 的外层做。
+                        scrollToRepository: { id in
+                            withAnimation(.snappy(duration: 0.35)) {
+                                scrollProxy.scrollTo(id, anchor: .center)
+                            }
+                        }
                     )
                     .ccspacePanel(
                         background: .clear,
@@ -137,9 +138,7 @@ struct SettingsView: View {
         }
     }
 
-    /// 「回到顶部」按**过滤后**的条数判断(纯逻辑见
-    /// `RepositorySearchPresentationState.showsBackToTop`):搜索收窄到少数几条时
-    /// 列表滚不出首屏,按钮没有意义——此前用原始总数,搜索态也会显示。
+    /// 判据(按过滤后条数)见 `RepositorySearchPresentationState.showsBackToTop`。
     private var showsBackToTop: Bool {
         RepositorySearchPresentationState(
             repositories: repositoryStore.repositories,
@@ -218,10 +217,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             CCSpaceSectionTitle(
                 title: "工作区根目录",
-                subtitle: "工作区将以子文件夹形式创建在此目录下。",
-                titleFont: .title3,
-                titleWeight: .semibold,
-                titleColor: .primary
+                subtitle: "工作区将以子文件夹形式创建在此目录下。"
             )
 
             HStack(spacing: 8) {

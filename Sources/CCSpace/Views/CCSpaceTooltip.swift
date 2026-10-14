@@ -1,6 +1,44 @@
 import AppKit
 import SwiftUI
 
+private struct CCSpaceQuickHelpEnabledKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
+extension EnvironmentValues {
+    /// 悬停提示总开关。常驻在层级里但被隐藏的内容(设置页未选中的页签)必须显式
+    /// 关掉这一路:`NSTrackingArea` 既不看 opacity 也不看命中测试,鼠标划过隐藏侧
+    /// 照样弹气泡。页签场景直接用 `ccspaceTabPane(isActive:)`,它把这一路连同
+    /// 命中测试、读屏隐藏一起封好了。
+    var ccspaceQuickHelpEnabled: Bool {
+        get { self[CCSpaceQuickHelpEnabledKey.self] }
+        set { self[CCSpaceQuickHelpEnabledKey.self] = newValue }
+    }
+}
+
+extension View {
+    /// 常驻在视图树里、只靠透明度切换的页签容器。
+    ///
+    /// 命中测试、读屏隐藏与悬浮提示开关(`ccspaceQuickHelpEnabled`)必须整体生效,
+    /// 少任何一件都会漏(透明度切换下隐藏侧照样能收到 tracking 事件)。
+    /// 新增页签请走这个修饰器,不要手抄那四行。
+    func ccspaceTabPane(isActive: Bool) -> some View {
+        modifier(CCSpaceTabPaneModifier(isActive: isActive))
+    }
+}
+
+private struct CCSpaceTabPaneModifier: ViewModifier {
+    let isActive: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(isActive ? 1 : 0)
+            .allowsHitTesting(isActive)
+            .accessibilityHidden(isActive == false)
+            .environment(\.ccspaceQuickHelpEnabled, isActive)
+    }
+}
+
 extension View {
     /// 悬浮提示。
     /// - Parameters:
@@ -69,8 +107,20 @@ private struct CCSpaceQuickHelpModifier: ViewModifier {
     let label: String?
     let hint: String?
 
+    @Environment(\.ccspaceQuickHelpEnabled) private var isEnabled
+
     @ViewBuilder
     func body(content: Content) -> some View {
+        // 隐藏页签里不挂桥接视图:没有 tracking area,也就不会被划出的鼠标事件弹出来。
+        if isEnabled == false {
+            content
+        } else {
+            attached(content)
+        }
+    }
+
+    @ViewBuilder
+    private func attached(_ content: Content) -> some View {
         // 分流只走 CCSpaceQuickHelpResolution(与单测同一份实现),这里只负责按结果挂属性。
         let resolution = CCSpaceQuickHelpResolution.resolve(
             text: text,
@@ -119,6 +169,55 @@ private struct CCSpaceQuickHelpBridge: NSViewRepresentable {
 
     static func dismantleNSView(_ nsView: CCSpaceQuickHelpTrackingView, coordinator: ()) {
         nsView.prepareForDismantle()
+    }
+}
+
+/// 「同一时刻只有一个持有者」状态机(纯值,便于单测)。
+///
+/// 弱引用持有,不拖住 owner:登记者是被 SwiftUI 随时拆除的视图,强引用会把
+/// 已离屏的视图连同它的气泡一起留在内存里。
+struct CCSpaceQuickHelpOwnership<Owner: AnyObject> {
+    private(set) weak var active: Owner?
+
+    /// 登记新持有者,返回需要被关掉的前任;与新人是同一对象时返回 nil。
+    /// **先登记后通知**:前任被通知时会回灌一次 `release(前任)`,
+    /// 此时新人已在位,不会被那次释放连带清掉。
+    mutating func claim(_ owner: Owner) -> Owner? {
+        let previous = active === owner ? nil : active
+        active = owner
+        return previous
+    }
+
+    /// 释放登记,仅在自己仍是登记持有者时生效(非持有者的关闭动作不得误删后继)。
+    mutating func release(_ owner: Owner) {
+        if active === owner {
+            active = nil
+        }
+    }
+}
+
+/// 全局「同一时刻只有一个气泡」协调器。
+///
+/// 每个 `ccspaceQuickHelp` 各持一个独立 `NSPopover`,彼此不知情:
+/// - 嵌套挂点(整行 + 行内图标按钮)的 overlay 会同时进入 → 两个气泡一起弹;
+/// - 快速扫过一排相邻按钮、或列表在静止的指针下重排时,前一个还没被关掉,
+///   后一个已经冒出,位置近的两个窗口直接叠在一起。
+/// 呈现新气泡前经此登记,把上一个立刻关掉;旧持有者自行关闭时释放登记。
+@MainActor
+private final class CCSpaceQuickHelpCoordinator {
+    static let shared = CCSpaceQuickHelpCoordinator()
+
+    private var ownership = CCSpaceQuickHelpOwnership<CCSpaceQuickHelpTrackingView>()
+
+    private init() {}
+
+    func claimActive(_ view: CCSpaceQuickHelpTrackingView) {
+        guard let previous = ownership.claim(view) else { return }
+        previous.closePopover()
+    }
+
+    func releaseActive(_ view: CCSpaceQuickHelpTrackingView) {
+        ownership.release(view)
     }
 }
 
@@ -187,6 +286,7 @@ private final class CCSpaceQuickHelpTrackingView: NSView {
     }
 
     func closePopover() {
+        CCSpaceQuickHelpCoordinator.shared.releaseActive(self)
         pendingShowTask?.cancel()
         pendingShowTask = nil
         removePopoverEventMonitor()
@@ -267,6 +367,10 @@ private final class CCSpaceQuickHelpTrackingView: NSView {
 
     private func showPopover() {
         guard text.isEmpty == false, window != nil, isPointerInsideTrackedBounds() else { return }
+
+        // 先抢占:上一个气泡(整行的、或刚划过去的相邻按钮的)立刻关掉,
+        // 避免两个 NSPopover 窗口同时在场、位置接近时叠在一起。
+        CCSpaceQuickHelpCoordinator.shared.claimActive(self)
 
         refreshPopoverContent()
 

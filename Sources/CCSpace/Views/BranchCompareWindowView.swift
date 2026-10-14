@@ -159,7 +159,7 @@ struct BranchCompareWindowView: View {
     }
 
     /// 分支选择器:复用分支弹窗的对比模式骨架(本地/远端页签 + 搜索),
-    /// 选中回调收展示名(本地裸名 / origin/ 前缀名,均为 git 可用引用)。
+    /// 选中回调上抛 git 可用引用(本地裸名 / origin/ 跟踪名);列表里展示的是去前缀的裸名。
     /// 锚点在系统标题栏上:弹窗内容会继承锚点环境的大字号,显式钉回常规尺寸
     /// (与提交记录窗口的分支选择器同一处理)。
     private func branchPicker(currentSelection: String?, onSelect: @escaping (String) -> Void) -> some View {

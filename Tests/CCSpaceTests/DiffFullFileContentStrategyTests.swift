@@ -118,7 +118,6 @@ private final class FullFileContentStubGitService: GitServicing, @unchecked Send
     func stash(in directory: String) async throws {}
     func stashPop(in directory: String) async throws {}
     func fetch(in directory: String) async throws {}
-    func isGitAvailable() async -> Bool { false }
     func defaultBranch(in directory: String) async -> String? { nil }
     func currentBranch(in directory: String) async -> String? { nil }
     func branchStatus(in directory: String) async -> GitBranchStatusSnapshot? { nil }

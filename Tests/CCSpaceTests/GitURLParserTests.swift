@@ -81,7 +81,7 @@ final class GitURLParserTests: XCTestCase {
         )
     }
 
-    func test_rejectsMergeRequestWhenAlreadyOnDefaultBranch() {
+    func test_rejectsMergeRequestWhenSourceIsTargetBranch() {
         XCTAssertThrowsError(
             try GitURLParser.mergeRequestURL(
                 from: "git@gitlab.example.com:team/mobile-app.git",
@@ -89,7 +89,7 @@ final class GitURLParserTests: XCTestCase {
                 targetBranch: "main"
             )
         ) { error in
-            XCTAssertEqual(error.localizedDescription, "当前已在默认分支，无法创建 MR")
+            XCTAssertEqual(error.localizedDescription, "当前分支即 MR 目标分支，无法创建 MR")
         }
     }
 

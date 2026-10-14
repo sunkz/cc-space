@@ -32,6 +32,8 @@ struct WorkplaceDetailActions {
     let onSwitchRepositoryToWorkBranch: (RepositorySyncState, String) -> Void
     let onMergeRepositoryDefaultBranchIntoCurrent: (RepositorySyncState, String) -> Void
     let onCreateMergeRequest: (RepositorySyncState, RepositoryConfig, String?) -> Void
+    /// 分支面板行内"向该分支创建 MR"（目标分支为末参，当前分支为源，不 Push）。
+    let onCreateMergeRequestForBranch: (RepositorySyncState, RepositoryConfig, String) -> Void
     /// 在浏览器打开仓库主页(仓库行右键/⋯ 菜单)。
     let onOpenRepositoryWeb: (RepositorySyncState, RepositoryConfig) -> Void
     let onDeleteRepository: (RepositorySyncState, String) -> Void
@@ -304,10 +306,10 @@ struct WorkplaceDetailView: View {
         // isActionLocked = isPerformingAction || isBusy,而 isBusy 只依赖
         // syncStates 中匹配 workplace.id + 选中集合的行,以及 workplace.selectedRepositoryIDs
         // (repositories 只参与 failedRepositories 的 filter,对 isBusy 零影响,见
-        // WorkplaceActionState)——这三条 onChange 合起来覆盖它的全部变化源,故不再单挂
-        // .onChange(of: presentationState.isActionLocked):
-        // 那会让 presentationState(构造 WorkplaceActionState:遍历全部 syncStates + 建 Set)
-        // 每帧多算一次,把详情页热路径刚收敛下来的成本又加回去。
+        // WorkplaceActionState)——这三条 onChange 合起来覆盖它的全部变化源。
+        // 因此下游一律观察镜像 mirroredIsActionLocked,**不再直接观察
+        // presentationState.isActionLocked**:那会让 presentationState(构造 WorkplaceActionState:
+        // 遍历全部 syncStates + 建 Set)每帧多算一次,把详情页热路径刚收敛下来的成本又加回去。
         .onChange(of: isPerformingAction, initial: true) { _, performing in
             syncActionLockedMirror(syncStates: syncStates, isPerformingAction: performing)
         }
@@ -331,7 +333,8 @@ struct WorkplaceDetailView: View {
         // 兜底:锁释放瞬间补一次快照重载。动作完成时的 invalidate 若恰好在
         // isActionLocked 仍为 true 的渲染帧里被消费,loadBranches 会被守卫跳过
         // 且不再有第二次 token 变化——分支面板对号停在旧值直到 30s 轮询。
-        .onChange(of: presentationState.isActionLocked) { _, locked in
+        // 观察镜像(而非 presentationState.isActionLocked)以免每帧多构造一次 presentationState。
+        .onChange(of: mirroredIsActionLocked) { _, locked in
             guard locked == false else { return }
             scheduleBranchSnapshotRefresh()
         }
@@ -644,20 +647,12 @@ struct WorkplaceDetailView: View {
         detailState: WorkplaceDetailPresentationState
     ) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            CCSpaceSectionTitle(
-                title: "Git 仓库",
-                subtitle: "",
-                titleFont: .title3,
-                titleWeight: .semibold,
-                titleColor: .primary
-            )
-
+            // 不渲染"Git 仓库"区块标题:详情页只此一区,标题冗余。
             if syncStates.isEmpty {
                 CCSpaceEmptyStateCard(
                     title: "暂无仓库",
                     subtitle: "点击编辑按钮添加仓库到此工作区",
-                    systemImage: "shippingbox",
-                    tint: .accentColor
+                    systemImage: "shippingbox"
                 ) {
                     Button("编辑") {
                         actions.onEdit()
@@ -731,6 +726,9 @@ struct WorkplaceDetailView: View {
             },
             onCreateMergeRequest: { repository, targetBranch in
                 actions.onCreateMergeRequest(state, repository, targetBranch)
+            },
+            onCreateMergeRequestForBranch: { repository, targetBranch in
+                actions.onCreateMergeRequestForBranch(state, repository, targetBranch)
             },
             onOpenRepositoryWeb: { repository in
                 actions.onOpenRepositoryWeb(state, repository)

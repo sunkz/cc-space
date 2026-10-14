@@ -56,7 +56,7 @@ swift test          # ⚠️ 勿用：部分工具链会确定性死锁（2026-0
 
 ### 脚本与发布
 - `release.sh [patch|minor|major|x.y.z]` 打 tag 推送，GitHub Actions 构建 universal binary 并发 Release——**不要本地手动打包发布**。交互确认之后、创建 tag 之前会先本地跑 `./run.sh lint && ./run.sh test`，门禁不过直接中止（此时还未创建提交/tag、未推送任何内容；按 `N` 取消则门禁不执行）。门禁强度随 `./run.sh lint` 的环境浮动：`python3`/PyYAML、`shellcheck` 都是其中的可选检查，缺失即跳过（见上文常用命令）。
-- README 截图由 `script/generate_readme_screenshots.sh`（`./run.sh readme-screenshots`）基于 `script/readme-screenshot-fixture/` 演示数据重建，仅覆盖 README 当前引用的图；依赖仓库外的私有 skill（`~/.codex/skills/screenshot`）与屏幕录制权限。
+- README 截图由 `script/generate_readme_screenshots.sh`（`./run.sh readme-screenshots`）基于 `script/readme-screenshot-fixture/` 演示数据重建，仅覆盖 README 当前引用的图；截图直接调系统 `screencapture -x -l<window id>`（含窗口阴影，与仓库现有产物取景一致），**不再依赖仓库外的私有 skill**，只需要屏幕录制权限。
 - app 版本号统一由 `script/version.sh` 推导（全局最新 `vX.Y.Z` tag），run.sh 与截图脚本共用，**不要**各自再写一份。
 
 ## 已知坑点

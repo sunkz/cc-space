@@ -118,8 +118,14 @@ private struct CCSpacePopoverAnchor<Content: View>: NSViewRepresentable {
                         // 代际号已推进(如随后立刻关闭)或已不再是本次请求:放弃呈现。
                         guard let self,
                               self.showRequestID == requestID,
-                              self.isPresentationRequested,
-                              self.window != nil else { return }
+                              self.isPresentationRequested else { return }
+                        // 仍是本次请求却没有锚点(宿主视图离开窗口):静默丢弃会让
+                        // binding 停在 true,用户表现为"点了没反应,再点一次才关"。
+                        guard self.window != nil else {
+                            self.isPresentationRequested = false
+                            self.onDismiss?()
+                            return
+                        }
                         self.show(arrowEdge: arrowEdge, build: build)
                     }
                     return

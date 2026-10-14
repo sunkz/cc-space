@@ -25,7 +25,21 @@ final class CommitLogPresentationStateTests: XCTestCase {
         ]
     }
 
-    func test_emptySearchReturnsAllCommits() {
+    func test_commitsArePassedThroughUnfiltered() {
+        // 关键词过滤已下推到 git:展示层再筛一遍会把 git 命中的**正文**提交判掉
+        // (本类型只持有 subject/author/hash)。因此列表原样透传,与搜索词无关。
+        let state = CommitLogPresentationState(
+            commits: makeCommits(),
+            searchText: "不存在",
+            scope: .all,
+            hasUpstream: true
+        )
+
+        XCTAssertEqual(state.visibleCommits.count, 2)
+        XCTAssertEqual(state.countLabel, "匹配 2 条提交")
+    }
+
+    func test_emptySearchUsesPlainCountLabel() {
         let state = CommitLogPresentationState(
             commits: makeCommits(),
             searchText: "   ",
@@ -33,36 +47,30 @@ final class CommitLogPresentationStateTests: XCTestCase {
             hasUpstream: true
         )
 
-        XCTAssertEqual(state.filteredCommits.count, 2)
+        XCTAssertEqual(state.visibleCommits.count, 2)
         XCTAssertEqual(state.countLabel, "2 条提交")
-        XCTAssertEqual(state.emptyTitle, "未找到匹配提交")
     }
 
-    func test_searchMatchesSubjectAuthorAndHashCaseInsensitively() {
-        let commits = makeCommits()
-
-        let bySubject = CommitLogPresentationState(
-            commits: commits, searchText: "登录", scope: .all, hasUpstream: true
-        )
-        XCTAssertEqual(bySubject.filteredCommits.map(\.hash), ["aaaaaa1111111111"])
-
-        let byAuthor = CommitLogPresentationState(
-            commits: commits, searchText: "alice", scope: .all, hasUpstream: true
-        )
-        XCTAssertEqual(byAuthor.filteredCommits.map(\.hash), ["bbbbbb2222222222"])
-
-        // hash 前缀(不区分大小写)也可命中。
-        let byHash = CommitLogPresentationState(
-            commits: commits, searchText: "AAAAAA", scope: .all, hasUpstream: true
-        )
-        XCTAssertEqual(byHash.filteredCommits.map(\.hash), ["aaaaaa1111111111"])
-
+    func test_searchEmptyTextTellsUserTheWholeHistoryWasSearched() {
         let noMatch = CommitLogPresentationState(
-            commits: commits, searchText: "不存在", scope: .all, hasUpstream: true
+            commits: [],
+            searchText: "不存在",
+            scope: .all,
+            hasUpstream: true
         )
-        XCTAssertTrue(noMatch.filteredCommits.isEmpty)
+        XCTAssertTrue(noMatch.visibleCommits.isEmpty)
         XCTAssertEqual(noMatch.emptyTitle, "未找到匹配提交")
-        XCTAssertEqual(noMatch.emptySubtitle, "试试提交说明、作者或 commit ID 中的关键词。")
+        XCTAssertTrue(noMatch.emptySubtitle.contains("全部历史"))
+
+        // 搜索态优先于"没有未推送的提交":空列表在勾选筛选时同样该说明搜过什么。
+        let unpushedNoMatch = CommitLogPresentationState(
+            commits: [],
+            searchText: "不存在",
+            scope: .unpushedOnly,
+            hasUpstream: true
+        )
+        XCTAssertEqual(unpushedNoMatch.emptyTitle, "未找到匹配提交")
+        XCTAssertEqual(unpushedNoMatch.countLabel, "匹配 0 条未推送提交")
     }
 
     func test_unpushedScopeUsesDedicatedCountLabelAndEmptyText() {
@@ -80,7 +88,7 @@ final class CommitLogPresentationStateTests: XCTestCase {
             scope: .unpushedOnly,
             hasUpstream: true
         )
-        XCTAssertTrue(empty.filteredCommits.isEmpty)
+        XCTAssertTrue(empty.visibleCommits.isEmpty)
         XCTAssertEqual(empty.emptyTitle, "没有未推送的提交")
         XCTAssertEqual(empty.emptySubtitle, "当前分支的提交都已推送到远端")
 
@@ -193,13 +201,58 @@ final class BranchSwitchRemotePresentationStateTests: XCTestCase {
         XCTAssertEqual(state.remoteBranchNames, ["main"])
     }
 
-    func test_displayNameAddsOriginPrefixAndBranchNameStripsIt() {
-        let state = BranchSwitchRemotePresentationState(remoteBranches: ["feature"])
+    /// 面板统一展示裸分支名:对比模式喂进来的跟踪引用(origin/x)去掉前缀,
+    /// 只切首段 remote 名,分支名自带的 "/" 必须保留。
+    func test_trackingRefDisplayStripsOnlyLeadingRemoteName() {
+        XCTAssertEqual(BranchRemoteRef.bareName(ofTrackingRef: "origin/feature/checkout"), "feature/checkout")
+        XCTAssertEqual(BranchRemoteRef.bareName(ofTrackingRef: "origin/main"), "main")
+        // 没有 "/" 的输入(如异常数据)原样返回,不能截成空串。
+        XCTAssertEqual(BranchRemoteRef.bareName(ofTrackingRef: "main"), "main")
+        // 只有 remote 名的畸形引用(`origin/`)也不能产出空标签。
+        XCTAssertEqual(BranchRemoteRef.bareName(ofTrackingRef: "origin/"), "origin/")
+    }
 
-        XCTAssertEqual(state.displayName(for: "feature"), "origin/feature")
-        XCTAssertEqual(state.branchName(fromDisplayName: "origin/feature"), "feature")
-        // 非远端展示名原样返回(本地页签共用同一条还原路径)。
-        XCTAssertEqual(state.branchName(fromDisplayName: "main"), "main")
+    /// 多 remote 仓库(fork + upstream)下两行会裸成同一个名字:必须挑出来,
+    /// 让它们保留 `remote/` 前缀,否则用户无从分辨要比的是哪一个。
+    func test_ambiguousBareNamesDetectsCrossRemoteCollisions() {
+        XCTAssertEqual(
+            BranchRemoteRef.ambiguousBareNames(ofTrackingRefs: ["origin/main", "fork/main", "origin/dev"]),
+            ["main"]
+        )
+        XCTAssertEqual(
+            BranchRemoteRef.ambiguousBareNames(ofTrackingRefs: ["origin/main", "upstream/trunk"]),
+            []
+        )
+    }
+
+    /// 行展示名的取舍只在"对比 + 远端页签"这一格里生效:其他页签返回 nil,
+    /// 由行显示自身值(把 nil 读成"显示空"会让本地分支整列没有名字)。
+    func test_displayBranchOnlyBareNamesTheCompareRemoteTab() {
+        let ambiguous = BranchRemoteRef.ambiguousBareNames(ofTrackingRefs: ["origin/main", "fork/main"])
+
+        XCTAssertEqual(
+            BranchRemoteRef.displayBranch(
+                ofTrackingRef: "origin/dev",
+                ambiguousBareNames: ambiguous,
+                showsBareRemoteNames: true
+            ),
+            "dev"
+        )
+        XCTAssertNil(
+            BranchRemoteRef.displayBranch(
+                ofTrackingRef: "origin/main",
+                ambiguousBareNames: ambiguous,
+                showsBareRemoteNames: true
+            ),
+            "裸名撞车时回退完整跟踪引用"
+        )
+        XCTAssertNil(
+            BranchRemoteRef.displayBranch(
+                ofTrackingRef: "main",
+                ambiguousBareNames: [],
+                showsBareRemoteNames: false
+            )
+        )
     }
 }
 
@@ -254,9 +307,9 @@ final class BranchSwitchListPresentationStateTests: XCTestCase {
             source: .remote,
             searchText: "hot"
         )
-        // 远端页签的行是 origin/ 前缀展示名,且包含本地已有的分支。
+        // 远端页签的行是裸分支名(面板不再展示 origin/ 前缀),且包含本地已有的分支。
         // "hot" 除子串命中 hotfix 外,还是 checkout 的子序列(h…o…t),模糊匹配一并命中。
-        XCTAssertEqual(state.filteredBranches, ["origin/feature/checkout", "origin/feature/hotfix"])
+        XCTAssertEqual(state.filteredBranches, ["feature/checkout", "feature/hotfix"])
     }
 
     func test_localSourceFuzzyMatchesSubsequenceQuery() {
@@ -277,8 +330,9 @@ final class BranchSwitchListPresentationStateTests: XCTestCase {
             source: .remote,
             searchText: ""
         )
-        // 本地已有的远端分支如实列出,不再被"远端独有"过滤掉;顺序为归一后的输入顺序。
-        XCTAssertEqual(state.filteredBranches, ["origin/feature/x", "origin/main", "origin/release"])
+        // 本地已有的远端分支如实列出,不再被"远端独有"过滤掉;顺序为归一后的输入顺序,
+        // 展示一律裸名。
+        XCTAssertEqual(state.filteredBranches, ["feature/x", "main", "release"])
     }
 
     func test_remoteSourceSearchMatchesWithOrWithoutOriginPrefix() {
@@ -294,9 +348,9 @@ final class BranchSwitchListPresentationStateTests: XCTestCase {
             source: .remote,
             searchText: "origin/checkout"
         )
-        // 搜索按展示名匹配:带不带 origin/ 前缀都能命中同一分支。
+        // 行展示裸名,搜索带不带 origin/ 前缀都命中同一分支。
         XCTAssertEqual(bare.filteredBranches, prefixed.filteredBranches)
-        XCTAssertEqual(prefixed.filteredBranches, ["origin/feature/checkout"])
+        XCTAssertEqual(prefixed.filteredBranches, ["feature/checkout"])
     }
 
     func test_searchNoMatchYieldsMatchEmptyText() {
@@ -341,73 +395,16 @@ final class BranchSwitchListPresentationStateTests: XCTestCase {
         XCTAssertEqual(remoteNoMatch.emptyTitle, "未找到匹配分支")
     }
 
-    func test_listHeightIsFixedRegardlessOfBranchCount() {
-        func height(localCount: Int, remoteCount: Int?) -> CGFloat {
-            let branches = (0..<localCount).map { "branch/\($0)" }
-            let remote: [String]? = remoteCount.map { count in (0..<count).map { "remote/\($0)" } }
-            return BranchSwitchListPresentationState(
-                localBranches: branches,
-                remoteBranchNames: remote,
-                source: .local,
-                searchText: ""
-            ).listHeight
-        }
-
-        // 宽高全固定:0 条、5 条、100 条,远端未加载/已加载,高度恒为固定值。
-        let fixed = BranchSwitchListPresentationState.fixedListHeight
-        XCTAssertEqual(height(localCount: 0, remoteCount: nil), fixed)
-        XCTAssertEqual(height(localCount: 5, remoteCount: nil), fixed)
-        XCTAssertEqual(height(localCount: 100, remoteCount: nil), fixed)
-        XCTAssertEqual(height(localCount: 2, remoteCount: 200), fixed)
-    }
-
-    func test_listHeightIgnoresSearchFilter() {
+    func test_searchOnlyFiltersRows() {
         let branches = ["main", "release", "feature/a", "feature/b", "feature/c"]
 
-        let unfiltered = BranchSwitchListPresentationState(
-            localBranches: branches,
-            remoteBranchNames: nil,
-            source: .local,
-            searchText: ""
-        )
         let filteredToOne = BranchSwitchListPresentationState(
             localBranches: branches,
             remoteBranchNames: nil,
             source: .local,
             searchText: "main"
         )
-        let noMatch = BranchSwitchListPresentationState(
-            localBranches: branches,
-            remoteBranchNames: nil,
-            source: .local,
-            searchText: "zzz"
-        )
 
-        // 搜索只过滤行,高度固定,输入时不跳动。
         XCTAssertEqual(filteredToOne.filteredBranches, ["main"])
-        XCTAssertEqual(unfiltered.listHeight, filteredToOne.listHeight)
-        XCTAssertEqual(unfiltered.listHeight, noMatch.listHeight)
-    }
-
-    func test_listHeightStableAcrossTabSwitch() {
-        let manyRemote = (0..<6).map { "feature/\($0)" }
-        let fewLocal = ["main", "release"]
-
-        let localState = BranchSwitchListPresentationState(
-            localBranches: fewLocal,
-            remoteBranchNames: fewLocal + manyRemote,
-            source: .local,
-            searchText: ""
-        )
-        let remoteState = BranchSwitchListPresentationState(
-            localBranches: fewLocal,
-            remoteBranchNames: fewLocal + manyRemote,
-            source: .remote,
-            searchText: ""
-        )
-
-        // 本地 2 条、远端 8 条:两页签同高(固定值),切换页签不跳动,本地页签底部留白。
-        XCTAssertEqual(localState.listHeight, BranchSwitchListPresentationState.fixedListHeight)
-        XCTAssertEqual(localState.listHeight, remoteState.listHeight)
     }
 }

@@ -466,8 +466,8 @@ enum BranchNameDisplay {
 
     /// 弹窗固定宽度:不随分支名单变化,切页签/搜索/加载都不跳动。
     /// **所有分支面板共用这一个常量**(切换 / 对比选择器 / MR 目标分支多选 / 远端加载态),
-    /// 统一 300pt:长名靠 .head 省略 + hover 全名兜底。
-    static let fixedPopoverWidth: CGFloat = 300
+    /// 统一 330pt:比原先略宽,让常规长度的 `feature/xxx` 少依赖 .head 省略 + hover 兜底。
+    static let fixedPopoverWidth: CGFloat = 330
 
     /// 展示文本:不超过阈值原样返回;超长保留首个"/"前的层级前缀,其余空间给尾部。
     static func displayText(for branch: String) -> String {

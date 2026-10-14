@@ -178,9 +178,9 @@ struct WorkplaceEditView: View {
                 }
             )
         }
-        // 弹窗尺寸固定 520×640:与创建工作区同值(两处一起改才对齐),宽高均不可拖拽。
-        // 仓库列表改为全量展开后内容更高,故从原先的 500 加高到 640;再超出仍走外层 ScrollView。
-        .frame(width: 520, height: 640)
+        // 弹窗尺寸固定 520×560:与创建工作区同值(两处一起改才对齐),宽高均不可拖拽。
+        // 底部按钮在滚动区之外,降高度只缩中间列表的可视范围;仓库多到超出时走外层 ScrollView。
+        .frame(width: 520, height: 560)
         .navigationTitle("编辑工作区")
         .ccspaceAutoDismissFeedback($feedback)
         .interactiveDismissDisabled(isSaving)

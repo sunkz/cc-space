@@ -136,6 +136,13 @@ final class RepositoryStore: ObservableObject {
 
     init(fileStore: JSONFileStore) {
         self.fileStore = fileStore
+        // 抢救子集的回写必须排在 preserveCorruptFile **之后**(口径同 WorkplaceStore):
+        // save 走 rename 原子覆写,先回写就把磁盘上的原始损坏字节销毁了,随后
+        // preserveCorruptFile 优先 moveItem,会把**刚写好的抢救子集**改名成
+        // .corrupt- 副本拿走——repositories.json 直接不存在。下次启动 loadIfPresent
+        // 见文件缺失返回空列表且不再置 didRecoverFromCorruptFile(横幅与启动对账的
+        // 跳过闸门一并失效),表现为整池仓库凭空消失,并对账级联清空所有工作区选中项。
+        var salvagedSubsetNeedsRewrite = false
         do {
             self.repositories = RepositoryStore.deduplicatedIDs(
                 try fileStore.loadIfPresent([RepositoryConfig].self, from: "repositories.json", default: [])
@@ -151,22 +158,21 @@ final class RepositoryStore: ObservableObject {
             ) {
                 self.repositories = RepositoryStore.deduplicatedIDs(tolerated.values)
                 repositoryStoreLog.error("event=recovered_partial_repositories kept=\(tolerated.values.count, privacy: .public) dropped=\(tolerated.droppedCount, privacy: .public)")
-                // 抢救成功即回写:preserveCorruptFile 会把原文件改名拿走,只把子集留在
-                // 内存不落盘的话,本会话若没有其它写盘动作,文件就保持缺失——下次启动
-                // loadIfPresent 见文件不存在直接返回空列表且不再有横幅,表现为"仓库凭空
-                // 少一批记录"。失败只留痕:init 不该因写盘失败让 App 起不来,数据仍可从
-                // .corrupt- 副本取回。
-                do {
-                    try fileStore.save(self.repositories, as: "repositories.json")
-                } catch {
-                    repositoryStoreLog.error(
-                        "event=salvaged_subset_rewrite_failed reason=\(error.localizedDescription, privacy: .public)"
-                    )
-                }
+                salvagedSubsetNeedsRewrite = true
             } else {
                 self.repositories = []
             }
             fileStore.preserveCorruptFile(named: "repositories.json")
+        }
+        // 保留成功后再回写子集:此刻原内容已存为 .corrupt- 副本,覆写才安全。
+        if salvagedSubsetNeedsRewrite {
+            do {
+                try fileStore.save(self.repositories, as: "repositories.json")
+            } catch {
+                repositoryStoreLog.error(
+                    "event=salvaged_subset_rewrite_failed reason=\(error.localizedDescription, privacy: .public)"
+                )
+            }
         }
     }
 
@@ -343,7 +349,8 @@ final class RepositoryStore: ObservableObject {
     nonisolated static func deduplicationResult(
         for repositories: [RepositoryConfig],
         protectedRepositoryIDs: Set<UUID> = []
-    ) -> RepositoryDeduplicationResult {        // 保留优先级排序:被工作区/同步态引用者 > createdAt 更早者 > 其余。
+    ) -> RepositoryDeduplicationResult {
+        // 保留优先级排序:被工作区/同步态引用者 > createdAt 更早者 > 其余。
         // 旧逻辑按数组顺序"保留第一条、硬删其余",可能删掉的恰是被工作区引用的
         // 那条而留下新添加的重复记录——工作区静默丢仓库。结果仍按原数组顺序输出,
         // 不改变列表展示序。
@@ -377,6 +384,9 @@ final class RepositoryStore: ObservableObject {
         var keptIndexByName: [String: Int] = [:]
         var idRemapping: [UUID: UUID] = [:]
         var crossURLNameConflicts: [String] = []
+        // 因"同名不同 URL"被丢弃的项,按归一化 URL 暂存其 id:后面若出现**同 URL** 的
+        // 存活配置,那些引用就该挂到它身上(指向的还是同一个远端),而不是被兜底摘除。
+        var pendingSameURLRemaps: [String: [UUID]] = [:]
 
         for repository in prioritySorted {
             let normalizedURL = normalizedGitURLForComparison(repository.gitURL)
@@ -388,10 +398,17 @@ final class RepositoryStore: ObservableObject {
             }
             if let index = keptIndexByName[repository.repoName] {
                 crossURLNameConflicts.append(repository.repoName)
+                pendingSameURLRemaps[normalizedURL, default: []].append(repository.id)
                 repositoryStoreLog.error(
                     "event=dedup_rejected_cross_url_name_conflict repo_name=\(repository.repoName, privacy: .public) dropped_url=\(repository.gitURL, privacy: .public) kept_url=\(keptRepositories[index].gitURL, privacy: .public) reason=同名不同远端,重映射会把工作区指向未配置过的远端,改为摘除引用"
                 )
                 continue
+            }
+            // 存活项的 URL 命中此前丢弃项:那些被丢弃的引用改挂到本条(同远端,安全)。
+            if let pendingIDs = pendingSameURLRemaps.removeValue(forKey: normalizedURL) {
+                for droppedID in pendingIDs {
+                    idRemapping[droppedID] = repository.id
+                }
             }
             keptIndexByURL[normalizedURL] = keptRepositories.count
             keptIndexByName[repository.repoName] = keptRepositories.count
@@ -448,20 +465,27 @@ final class RepositoryStore: ObservableObject {
 
     /// sync-states 重映射:存活项自身的行优先保留,被删项的行改挂保留项 id 后
     /// 按 (workplaceID, repositoryID) 去重(组合键唯一,同工作区双行会撞
-    /// `RepositorySyncState.id` 组合键——只保留存活项原行,被删项行丢弃)。
+    /// `RepositorySyncState.id` 组合键)。
+    ///
+    /// 撞组合键时**优先保留 `hasLocalDirectory == true` 的那一行**:这一位为 true
+    /// 说明磁盘上确实有克隆。按"先到先得"留 false 的行会让 UI 误报"本地目录缺失",
+    /// 并诱发一次多余的重新克隆(对已有未提交改动的目录是破坏性的)。
     nonisolated static func remappingSyncStates(
         _ syncStates: [RepositorySyncState],
         idRemapping: [UUID: UUID]
     ) -> [RepositorySyncState] {
         guard idRemapping.isEmpty == false else { return syncStates }
         let keptRows = syncStates.filter { idRemapping[$0.repositoryID] == nil }
-        var seenKeys = Set(keptRows.map { "\($0.workplaceID.uuidString)-\($0.repositoryID.uuidString)" })
         var result = keptRows
+        var keptIndexByKey: [String: Int] = [:]
+        for (index, row) in keptRows.enumerated() {
+            // 组合键理论上唯一;真出现双行时维持既有的"留第一条"口径。
+            keptIndexByKey["\(row.workplaceID.uuidString)-\(row.repositoryID.uuidString)"] = index
+        }
         for state in syncStates {
             guard let newRepositoryID = idRemapping[state.repositoryID] else { continue }
             let key = "\(state.workplaceID.uuidString)-\(newRepositoryID.uuidString)"
-            guard seenKeys.insert(key).inserted else { continue }
-            result.append(RepositorySyncState(
+            let remapped = RepositorySyncState(
                 workplaceID: state.workplaceID,
                 repositoryID: newRepositoryID,
                 status: state.status,
@@ -469,7 +493,16 @@ final class RepositoryStore: ObservableObject {
                 lastError: state.lastError,
                 lastSyncedAt: state.lastSyncedAt,
                 hasLocalDirectory: state.hasLocalDirectory
-            ))
+            )
+            guard let existingIndex = keptIndexByKey[key] else {
+                keptIndexByKey[key] = result.count
+                result.append(remapped)
+                continue
+            }
+            guard state.hasLocalDirectory, result[existingIndex].hasLocalDirectory == false else {
+                continue
+            }
+            result[existingIndex] = remapped
         }
         return result
     }
@@ -739,10 +772,17 @@ final class RepositoryStore: ObservableObject {
                     changed = true
                 }
                 if !entry.mrTargetBranches.isEmpty {
-                    let existing = Set(updatedRepositories[existingIndex].mrTargetBranches)
-                    let newBranches = entry.mrTargetBranches.filter { !existing.contains($0) }
-                    if !newBranches.isEmpty {
-                        updatedRepositories[existingIndex].mrTargetBranches += newBranches
+                    // 必须过 `RepositoryConfig.deduplicated` 这一不变式收敛点:
+                    // `RepositoryBackupEntry.init(from:)` 不做去重(与 RepositoryConfig
+                    // 解码不同口径),而按"现有集合"过滤只拦得下跨条目重复,条目自身的
+                    // 重复(备份文件可手工编辑,正是本函数反复防御的场景)会原样并入——
+                    // 分支胶囊 ForEach(id: \.self) 出现重复身份,且开关只摘除首个匹配,
+                    // 用户点掉后那颗永远还在。顺带把既有行的历史重复一并收敛。
+                    let mergedBranches = RepositoryConfig.deduplicated(
+                        updatedRepositories[existingIndex].mrTargetBranches + entry.mrTargetBranches
+                    )
+                    if mergedBranches != updatedRepositories[existingIndex].mrTargetBranches {
+                        updatedRepositories[existingIndex].mrTargetBranches = mergedBranches
                         changed = true
                     }
                 }

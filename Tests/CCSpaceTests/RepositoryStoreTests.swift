@@ -42,6 +42,55 @@ final class RepositoryStoreTests: XCTestCase {
         }
     }
 
+    // MARK: - 损坏仓库文件的抢救顺序(P1 回归锁:整池仓库消失)
+
+    /// 抢救子集的回写必须排在 preserveCorruptFile 之后:先回写会让 rename 覆写销毁
+    /// 原始损坏字节,随后 preserve 又优先 moveItem,把刚写好的子集改名拿走——
+    /// repositories.json 就此不存在,下次启动空池且无横幅,并对账级联清空选中项。
+    func test_corruptRepositoriesFileSalvagesSubsetWithoutLosingTheFile() throws {
+        let root = makeTestRootURL()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let fileURL = root.appendingPathComponent("repositories.json")
+        let sentinel = "https://example.com/SENTINEL-BROKEN.git"
+        let json = """
+        [
+          {
+            "id": "1F6A4D3A-7B9E-4C1B-8F4A-2D5E6A7B8C9D",
+            "gitURL": "git@github.com:org/good.git",
+            "repoName": "good",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z"
+          },
+          { "gitURL": "\(sentinel)", "id": "not-a-uuid" }
+        ]
+        """
+        try Data(json.utf8).write(to: fileURL)
+
+        let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
+
+        XCTAssertEqual(store.repositories.map(\.gitURL), ["git@github.com:org/good.git"])
+        XCTAssertTrue(store.didRecoverFromCorruptFile)
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: fileURL.path),
+            "抢救出的子集必须留在原位,不能被子集自身的回写/保全流程搬走"
+        )
+
+        let contents = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        let corruptName = try XCTUnwrap(
+            contents.first { $0.hasPrefix("repositories.json.corrupt-") },
+            "原始损坏文件应被改名保全"
+        )
+        let preserved = try String(
+            contentsOf: root.appendingPathComponent(corruptName),
+            encoding: .utf8
+        )
+        XCTAssertTrue(preserved.contains(sentinel), ".corrupt- 副本里必须是原始字节,不是抢救子集")
+
+        let relaunched = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
+        XCTAssertEqual(relaunched.repositories.count, 1, "重启后仓库池不得清空")
+        XCTAssertFalse(relaunched.didRecoverFromCorruptFile)
+    }
+
     func test_removeRepositoryDeletesAndPersists() async throws {
         let root = makeTestRootURL()
         let fileStore = JSONFileStore(rootDirectory: root)
@@ -201,6 +250,41 @@ final class RepositoryStoreTests: XCTestCase {
                 "git@github.com:org/ios.git",
             ])
         )
+    }
+
+    /// 回归锁:备份**合并**路径必须走 `mrTargetBranches` 去重不变式。
+    /// `RepositoryBackupEntry` 解码不去重(与 `RepositoryConfig` 不同口径),而旧的
+    /// 合并写法只按"现有集合"过滤,条目自身的重复(备份文件可手工编辑)原样并入:
+    /// 分支胶囊 `ForEach(id: \.self)` 撞重复身份,开关只摘除首个匹配 → 点掉后永远还在。
+    func test_importBackupMergeDeduplicatesMRTargetBranches() throws {
+        let root = makeTestRootURL()
+        let store = RepositoryStore(fileStore: JSONFileStore(rootDirectory: root))
+        let backupURL = root.appendingPathComponent("repositories-backup.json")
+
+        try store.addRepository(gitURL: "git@github.com:org/api.git")
+
+        let v2JSON = """
+        {
+          "version": 2,
+          "exportedAt": "2024-01-01T00:00:00Z",
+          "repositories": [
+            {
+              "gitURL": "git@github.com:org/api.git",
+              "mrTargetBranches": ["dev", "dev", "main", "main", "main"]
+            }
+          ]
+        }
+        """
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data(v2JSON.utf8).write(to: backupURL, options: .atomic)
+
+        let result = try store.importBackup(from: backupURL)
+        XCTAssertEqual(result.mergedCount, 1)
+
+        let api = try XCTUnwrap(
+            store.repositories.first { $0.gitURL == "git@github.com:org/api.git" }
+        )
+        XCTAssertEqual(api.mrTargetBranches, ["dev", "main"], "合并结果必须保序去重")
     }
 
     func test_importBackupRejectsInvalidBackupFormat() {
@@ -478,6 +562,44 @@ final class RepositoryStoreTests: XCTestCase {
         XCTAssertNil(result.repositories.first?.defaultBranch)
     }
 
+    /// 因"同名不同远端"被丢弃的那条,后面若出现**同远端**的存活配置,引用必须改挂到它身上。
+    ///
+    /// 此前丢弃项的 URL 从不登记,`api-gitlab`(与丢弃项同一远端)存活下来时也不会发出
+    /// `idRemapping`,于是工作区对那个远端的引用被兜底静默摘除——明明池子里还有一条
+    /// 指向同一远端的记录。跨远端重映射仍然禁止(见上一个用例)。
+    func test_deduplicationRemapsDroppedItemToLaterSameURLSurvivor() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let keptByName = RepositoryConfig(
+            id: UUID(),
+            gitURL: "git@github.com:org/api.git",
+            repoName: "api",
+            createdAt: now,
+            updatedAt: now
+        )
+        let droppedCrossURL = RepositoryConfig(
+            id: UUID(),
+            gitURL: "https://gitlab.com/other/api",
+            repoName: "api",
+            createdAt: now.addingTimeInterval(100),
+            updatedAt: now.addingTimeInterval(100)
+        )
+        let sameURLDifferentName = RepositoryConfig(
+            id: UUID(),
+            // 与丢弃项同一远端(尾随 `.git/` 归一化后相等),但名字不撞。
+            gitURL: "https://gitlab.com/other/api.git/",
+            repoName: "api-gitlab",
+            createdAt: now.addingTimeInterval(200),
+            updatedAt: now.addingTimeInterval(200)
+        )
+
+        let result = RepositoryStore.deduplicationResult(for: [keptByName, droppedCrossURL, sameURLDifferentName])
+
+        XCTAssertEqual(Set(result.repositories.map(\.id)), [keptByName.id, sameURLDifferentName.id])
+        XCTAssertEqual(result.idRemapping[droppedCrossURL.id], sameURLDifferentName.id, "同远端的引用应改挂存活项")
+        XCTAssertNil(result.idRemapping[keptByName.id])
+        XCTAssertEqual(result.crossURLNameConflicts, ["api"], "同名不同远端的冲突记录不受影响")
+    }
+
     /// 引用重映射:工作区对被删项的选中/置顶换成保留项并按首现去重;
     /// sync-states 同工作区双行时保留存活项原行,孤行改挂保留 id
     /// (10-10 review P2:此前直接摘除引用,工作区白丢仓库)。
@@ -517,6 +639,56 @@ final class RepositoryStoreTests: XCTestCase {
         let lone = RepositoryStore.remappingSyncStates([droppedRow], idRemapping: [droppedID: keptID])
         XCTAssertEqual(lone.count, 1)
         XCTAssertEqual(lone.first?.repositoryID, keptID)
+    }
+
+    /// 撞组合键时优先留"磁盘上确实有克隆"的那一行。
+    ///
+    /// 此前按先到先得:存活项原行(`hasLocalDirectory == false`)赢,被删项那行记录的
+    /// "目录存在"事实被丢掉 → UI 报"本地目录缺失",并可能诱发一次多余重新克隆,
+    /// 而那个目录里或许正躺着未提交的改动。
+    func test_remappingSyncStatesPrefersRowWithExistingLocalDirectory() throws {
+        let workplaceID = UUID()
+        let keptID = UUID()
+        let droppedID = UUID()
+        let keptRowWithoutDirectory = RepositorySyncState(
+            workplaceID: workplaceID, repositoryID: keptID, status: .success, localPath: "/tmp/w/api"
+        )
+        let droppedRowWithDirectory = RepositorySyncState(
+            workplaceID: workplaceID,
+            repositoryID: droppedID,
+            status: .failed,
+            localPath: "/tmp/w/api",
+            lastError: "上次拉取失败",
+            hasLocalDirectory: true
+        )
+
+        let merged = RepositoryStore.remappingSyncStates(
+            [keptRowWithoutDirectory, droppedRowWithDirectory],
+            idRemapping: [droppedID: keptID]
+        )
+        XCTAssertEqual(merged.count, 1, "组合键仍只留一行")
+        let survivor = try XCTUnwrap(merged.first)
+        XCTAssertEqual(survivor.repositoryID, keptID, "被删项行要改挂存活 id,不能整行照搬")
+        XCTAssertTrue(survivor.hasLocalDirectory, "存在性事实必须保住")
+
+        // 反向:存活项已经知道目录存在时,不被 false 的行改写。
+        let keptRowWithDirectory = RepositorySyncState(
+            workplaceID: workplaceID,
+            repositoryID: keptID,
+            status: .success,
+            localPath: "/tmp/w/api",
+            hasLocalDirectory: true
+        )
+        let droppedRowWithoutDirectory = RepositorySyncState(
+            workplaceID: workplaceID, repositoryID: droppedID, status: .failed, localPath: "/tmp/w/api"
+        )
+        let notOverwritten = RepositoryStore.remappingSyncStates(
+            [keptRowWithDirectory, droppedRowWithoutDirectory],
+            idRemapping: [droppedID: keptID]
+        )
+        XCTAssertEqual(notOverwritten.count, 1)
+        XCTAssertEqual(notOverwritten.first?.status, .success)
+        XCTAssertTrue(notOverwritten.first?.hasLocalDirectory ?? false)
     }
 
     /// 建档返回实时记录(调用方不必再按地址回查——10-10 review P2 的"两步写"死角

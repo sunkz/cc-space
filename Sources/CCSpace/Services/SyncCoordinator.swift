@@ -237,7 +237,22 @@ struct SyncCoordinator: Sendable {
             gitService: gitService
         )
 
-        let pullingStates = preparation.pullable.map { state -> RepositorySyncState in
+        // 预标与本轮拉取都要避开"行上已挂着其它在途操作瞬态"的仓库
+        // (口径同下方取消收口的 `current.status == .pulling` 判定)。
+        // 无条件写 .pulling 会盖掉别家的 .switching:那个操作的进度指示当场消失,
+        // 而本批结果回写又把它的瞬态归成 .success/.failed,它自己收口时已认不出
+        // "我标的那一瞬"——行最后停在一个谁都不负责的状态上。
+        // 这些仓库本轮不拉,计入 skippedCount,由下一次拉取或该操作自己收口。
+        let inFlightKeys = Set(
+            workplaceStore.syncStates
+                .filter { WorkplaceStore.isTransientSyncStatus($0.status) }
+                .map(\.id)
+        )
+        let pullable = preparation.pullable.filter { inFlightKeys.contains($0.id) == false }
+        let failed = preparation.failed.filter { inFlightKeys.contains($0.id) == false }
+        let deferredCount = (preparation.pullable.count - pullable.count) + (preparation.failed.count - failed.count)
+
+        let pullingStates = pullable.map { state -> RepositorySyncState in
             var pullingState = state
             pullingState.status = .pulling
             pullingState.lastError = nil
@@ -249,7 +264,7 @@ struct SyncCoordinator: Sendable {
         // 而 prepare 内部各仓库并发 branchStatus 探测要挂起一段时间,用 updateSyncStates
         // 整行写会把窗口内磁盘刷新写入的 hasLocalDirectory/lastError 等字段退回旧值
         // (lost update)。收口侧早已改成字段增量合并,预标侧同口径。
-        let premarkSource = preparation.failed + pullingStates
+        let premarkSource = failed + pullingStates
         let premarkStates = premarkSource.map { incoming -> RepositorySyncState in
             guard let current = workplaceStore.syncStates.first(where: { existing in
                 existing.workplaceID == incoming.workplaceID && existing.repositoryID == incoming.repositoryID
@@ -267,9 +282,9 @@ struct SyncCoordinator: Sendable {
         let gitService = gitService
         let repoLock = RepositoryOperationLock.shared
         var successCount = 0
-        var failedCount = preparation.failed.count
+        var failedCount = failed.count
         let pulledResults = await Self.runLimitedTasks(
-            preparation.pullable,
+            pullable,
             maxConcurrentTasks: Self.maxConcurrentPullTasks
         ) { state -> (original: RepositorySyncState, result: RepositorySyncState, summary: RepositoryBranchPullOutcomeSummary?, cancelled: Bool) in
             let localPath = state.localPath
@@ -369,7 +384,7 @@ struct SyncCoordinator: Sendable {
 
         // 失败名单须覆盖两段:准备阶段探测失败(branchStatus 不可读/目录异常,未进
         // pull 任务)与 pull 任务内失败的仓库,否则通知里只报后者、前者凭空消失。
-        let failedNames = preparation.failed.map { URL(fileURLWithPath: $0.localPath).lastPathComponent }
+        let failedNames = failed.map { URL(fileURLWithPath: $0.localPath).lastPathComponent }
             + results
                 .filter { $0.result.status == .failed }
                 .map { URL(fileURLWithPath: $0.result.localPath).lastPathComponent }
@@ -377,7 +392,7 @@ struct SyncCoordinator: Sendable {
         return RepositoryPullResult(
             successCount: successCount,
             failedCount: failedCount,
-            skippedCount: preparation.skippedCount,
+            skippedCount: preparation.skippedCount + deferredCount,
             failedNames: failedNames,
             branchSummaries: branchSummaries
         )

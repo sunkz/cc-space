@@ -971,7 +971,15 @@ final class WorkplaceStore: ObservableObject {
         // 当成用户删除而连记录带 sync states 一并清掉。探测失败(路径不可达)与
         // 枚举为空同样落入候选,由 allMissing 兜底保住。
         let fm = FileManager.default
-        let deletableCandidates = refreshedWorkplaces.filter { workplace in
+        // 删除候选与"全缺"兜底的分母都必须先按 rootPath 收敛。兜底防的是"根目录整体
+        // 不可达/换根"这类局部事件:根外的记录一旦也进分母,只要根外恰好还有任何一条
+        // 在盘上(换根后用户新建一个工作区即是此形态),`候选数 == 总数` 就不成立、
+        // 兜底整体失效,一次刷新就会把根下全部旧记录连同 sync states 永久删除。
+        // 根外记录不属于本轮根目录的普查范围,交由其所在根的刷新处理。
+        let workplacesUnderRoot = refreshedWorkplaces.filter { workplace in
+            LocalPathSafety.isWithinDirectory(workplace.path, rootPath: trimmedRoot)
+        }
+        let deletableCandidates = workplacesUnderRoot.filter { workplace in
             fm.fileExists(atPath: workplace.path) == false
         }
         let deletableMissing = deletableCandidates.filter { workplace in
@@ -984,8 +992,8 @@ final class WorkplaceStore: ObservableObject {
         // Safety: when *every* workplace is missing at once, that is far more likely a
         // configuration change (root path switched) or an unavailable volume than N deliberate
         // deletions. Skip the cleanup so one refresh can never wipe the whole library.
-        let allMissing = !refreshedWorkplaces.isEmpty
-            && deletableCandidates.count == refreshedWorkplaces.count
+        let allMissing = !workplacesUnderRoot.isEmpty
+            && deletableCandidates.count == workplacesUnderRoot.count
         let removedIDs = allMissing ? Set<UUID>() : Set(deletableMissing.map(\.id))
         if !removedIDs.isEmpty {
             refreshedWorkplaces.removeAll { removedIDs.contains($0.id) }
@@ -1151,7 +1159,10 @@ final class WorkplaceStore: ObservableObject {
     /// 该同步状态是否属于"本进程内正在进行的长操作"(瞬态)。
     /// 瞬态只由活跃操作写入,重启解码时已归位为 .idle(见 RepositorySyncState.init(from:)),
     /// 因此瞬态可以安全地当作"进行中"信号使用。
-    nonisolated private static func isTransientSyncStatus(_ status: SyncStatus) -> Bool {
+    ///
+    /// internal:`SyncCoordinator` 的 pull 预标要用同一判据避让别家操作在途的行,
+    /// 两处各写一份 switch 会随新状态加入而漂移(口径不一致 = 谁都不认的瞬态)。
+    nonisolated static func isTransientSyncStatus(_ status: SyncStatus) -> Bool {
         switch status {
         case .cloning, .pulling, .switching, .removing:
             return true

@@ -19,13 +19,19 @@ struct WorkplaceEditView: View {
     /// 没有句柄就没有中止通道,用户只能对着 `interactiveDismissDisabled` 的弹窗干等。
     @State private var saveTask: Task<Void, Never>?
 
+    /// 打开弹窗那一刻的工作区快照,改动统计与删除确认数都以它为基线。
+    /// 直接读 `workplace` 会让基线跟着 store 漂(弹窗可以开几分钟,期间定时磁盘刷新
+    /// 会重写记录):"移除 N 个仓库"的 N 在用户看清之前自己变成另一个数,
+    /// 而保存是按**当前**基线执行的——确认的破坏性范围就此失真。
+    @State private var baseline: Workplace
+
     private var presentationState: WorkplaceEditPresentationState {
         WorkplaceEditPresentationState(
-            originalName: workplace.name,
+            originalName: baseline.name,
             name: name,
-            originalBranch: workplace.branch,
+            originalBranch: baseline.branch,
             branch: branch,
-            originalSelectedRepositoryIDs: workplace.selectedRepositoryIDs,
+            originalSelectedRepositoryIDs: baseline.selectedRepositoryIDs,
             selectedRepositoryIDs: selectedRepositoryIDs,
             isSaving: isSaving
         )
@@ -51,6 +57,7 @@ struct WorkplaceEditView: View {
         self.repositories = repositories
         self.syncStates = syncStates
         self.onSave = onSave
+        _baseline = State(initialValue: workplace)
         _selectedRepositoryIDs = State(initialValue: Set(workplace.selectedRepositoryIDs))
         _name = State(initialValue: workplace.name)
         _branch = State(initialValue: workplace.branch ?? "")

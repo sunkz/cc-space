@@ -436,6 +436,92 @@ final class SyncCoordinatorTests: XCTestCase {
         )
     }
 
+    /// 回归锁:批量 pull 的预标不得覆盖**其它在途操作**已标的瞬态。
+    ///
+    /// 预标此前无条件把每个 pullable 行写成 `.pulling`:切分支操作刚标的 `.switching`
+    /// 被就地盖掉,那个操作的进度指示当场消失;随后本批结果回写又把它归成 `.success`,
+    /// 切分支自己收口时已认不出"我标的那一瞬"——行最后停在一个谁都不负责的状态。
+    /// 现在这类行本轮直接跳过(计入 skippedCount),由该操作自行收口。
+    func test_pullRepositoriesSkipsRowsCarryingAnotherOperationsTransient() async throws {
+        let root = makeTestRootURL()
+        let workspaceRoot = makeTestRootURL()
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: workspaceRoot)
+        }
+        let fileStore = JSONFileStore(rootDirectory: root)
+        let store = WorkplaceStore(fileStore: fileStore)
+        let switchingRepository = RepositoryConfig(
+            id: UUID(), gitURL: "git@github.com:org/switching.git",
+            repoName: "switching", createdAt: .now, updatedAt: .now
+        )
+        let normalRepository = RepositoryConfig(
+            id: UUID(), gitURL: "git@github.com:org/normal.git",
+            repoName: "normal", createdAt: .now, updatedAt: .now
+        )
+        let workplace = try store.createWorkplace(
+            name: "pull-defer-busy",
+            rootPath: workspaceRoot.path,
+            selectedRepositories: [switchingRepository, normalRepository]
+        )
+
+        for repository in [switchingRepository, normalRepository] {
+            var state = try XCTUnwrap(
+                store.syncStates.first {
+                    $0.workplaceID == workplace.id && $0.repositoryID == repository.id
+                }
+            )
+            state.status = repository.id == switchingRepository.id ? .switching : .success
+            state.hasLocalDirectory = true
+            state.localPath = URL(fileURLWithPath: workplace.path).appendingPathComponent(repository.repoName).path
+            try FileManager.default.createDirectory(
+                atPath: state.localPath,
+                withIntermediateDirectories: true,
+                attributes: nil
+            )
+            store.updateSyncState(state)
+        }
+
+        let coordinator = SyncCoordinator(
+            gitService: GitServiceStub(behavior: .success),
+            fileSystemService: FileSystemServiceSpy()
+        )
+
+        // 输入快照刻意保留 `.success`:批量 pull 的候选筛选只看调用方传进来的快照,
+        // 而 store 里这一行此刻已被切分支操作标成 `.switching`——这正是真实的时序窗口
+        // (快照读于操作开始前,prepare 的并发探测又要挂起一段时间)。
+        var snapshot = store.syncStates.filter { $0.workplaceID == workplace.id }
+        if let index = snapshot.firstIndex(where: { $0.repositoryID == switchingRepository.id }) {
+            snapshot[index].status = .success
+        }
+
+        let result = await coordinator.pullRepositories(
+            syncStates: snapshot,
+            workplaceStore: store
+        )
+
+        XCTAssertEqual(result.successCount, 1, "只拉未被占的那一行")
+        XCTAssertEqual(result.skippedCount, 1, "避让在途行要如实计入跳过")
+        XCTAssertEqual(result.failedCount, 0)
+
+        let switchingRow = try XCTUnwrap(
+            store.syncStates.first {
+                $0.workplaceID == workplace.id && $0.repositoryID == switchingRepository.id
+            }
+        )
+        XCTAssertEqual(
+            switchingRow.status, .switching,
+            "切分支的瞬态必须原样保留,由它自己收口"
+        )
+        let normalRow = try XCTUnwrap(
+            store.syncStates.first {
+                $0.workplaceID == workplace.id && $0.repositoryID == normalRepository.id
+            }
+        )
+        XCTAssertEqual(normalRow.status, .success)
+        XCTAssertNotNil(normalRow.lastSyncedAt, "未被占的行要真的拉过")
+    }
+
     /// 回归锁:批量 pull 中途取消后,不得有任何行停留在 .pulling 瞬态。
     /// pullRepositories 会先把全部 pullable 行预标 .pulling 落库,再逐仓拉取;
     /// 曾有版本在取消时跳过剩余仓库的任务调度,那些行永远等不到终态回写,

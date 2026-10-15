@@ -1459,7 +1459,107 @@ final class WorkplaceStoreTests: XCTestCase {
         XCTAssertTrue(result.changed)
     }
 
-        /// 解码失败时原文件必须被改名保全,否则下次保存会用空数据覆写导致原内容不可恢复。
+    /// 回归锁:换根后新根下**只要有一条记录还在盘上**,旧的根外记录不得被"全缺兜底
+    /// 被击穿"连带删除——删除候选与兜底分母都必须先按 rootPath 收敛。
+    func test_diskRefreshResultKeepsWholeRootMissingGuardWhenOutsideRecordsExist() throws {
+        let rootURL = tempRoot()
+        try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        // 模拟"记录仍指向旧根"的工作区:目录在盘上,但不在本轮刷新根之下。
+        let outsideURL = tempRoot()
+        try FileManager.default.createDirectory(
+            at: outsideURL.appendingPathComponent("old-dev"),
+            withIntermediateDirectories: true
+        )
+        defer {
+            try? FileManager.default.removeItem(at: rootURL)
+            try? FileManager.default.removeItem(at: outsideURL)
+        }
+
+        let outsideID = UUID()
+        let goneAID = UUID()
+        let goneBID = UUID()
+        let repositoryID = UUID()
+        let workplaces = [
+            Workplace(
+                id: outsideID, name: "old-dev",
+                path: outsideURL.appendingPathComponent("old-dev").path,
+                selectedRepositoryIDs: [], createdAt: .now, updatedAt: .now
+            ),
+            Workplace(
+                id: goneAID, name: "a", path: rootURL.appendingPathComponent("a").path,
+                selectedRepositoryIDs: [repositoryID], createdAt: .now, updatedAt: .now
+            ),
+            Workplace(
+                id: goneBID, name: "b", path: rootURL.appendingPathComponent("b").path,
+                selectedRepositoryIDs: [repositoryID], createdAt: .now, updatedAt: .now
+            )
+        ]
+        let syncStates = [
+            RepositorySyncState(
+                workplaceID: goneAID, repositoryID: repositoryID, status: .idle,
+                localPath: rootURL.appendingPathComponent("a/api").path
+            )
+        ]
+
+        let result = WorkplaceStore.diskRefreshResult(
+            workplaces: workplaces,
+            syncStates: syncStates,
+            rootPath: rootURL.path
+        )
+
+        XCTAssertEqual(
+            result.workplaces.count, 3,
+            "根下记录全缺 = 整卷不可达/换根,兜底必须生效;根外记录不属本轮普查范围"
+        )
+        XCTAssertTrue(result.syncStates.contains { $0.workplaceID == goneAID }, "兜底生效时不得连带删行")
+    }
+
+    /// 反向边界:根外那条记录即便在盘上**不存在**,也不归本轮根目录的删除逻辑管
+    /// (它指向的根由那一轮刷新负责),避免一次刷新跨根删数据。
+    func test_diskRefreshResultDoesNotDeleteWorkplacesOutsideRefreshRoot() throws {
+        let rootURL = tempRoot()
+        try FileManager.default.createDirectory(
+            at: rootURL.appendingPathComponent("kept"),
+            withIntermediateDirectories: true
+        )
+        let outsideURL = tempRoot()
+        defer {
+            try? FileManager.default.removeItem(at: rootURL)
+            try? FileManager.default.removeItem(at: outsideURL)
+        }
+
+        let keptID = UUID()
+        let outsideGoneID = UUID()
+        let rootGoneID = UUID()
+        let workplaces = [
+            Workplace(
+                id: keptID, name: "kept",
+                path: rootURL.appendingPathComponent("kept").path,
+                selectedRepositoryIDs: [], createdAt: .now, updatedAt: .now
+            ),
+            Workplace(
+                id: outsideGoneID, name: "outside-gone",
+                path: outsideURL.appendingPathComponent("gone").path,
+                selectedRepositoryIDs: [], createdAt: .now, updatedAt: .now
+            ),
+            Workplace(
+                id: rootGoneID, name: "root-gone",
+                path: rootURL.appendingPathComponent("gone").path,
+                selectedRepositoryIDs: [], createdAt: .now, updatedAt: .now
+            )
+        ]
+
+        let result = WorkplaceStore.diskRefreshResult(
+            workplaces: workplaces,
+            syncStates: [],
+            rootPath: rootURL.path
+        )
+
+        XCTAssertTrue(result.workplaces.contains { $0.id == outsideGoneID }, "根外记录不得被本轮删除")
+        XCTAssertFalse(result.workplaces.contains { $0.id == rootGoneID }, "根下确实缺失的记录照旧清理")
+    }
+
+    /// 解码失败时原文件必须被改名保全,否则下次保存会用空数据覆写导致原内容不可恢复。
     func test_corruptWorkplacesFileIsPreservedAsideAndResetInMemory() throws {
         let root = tempRoot()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

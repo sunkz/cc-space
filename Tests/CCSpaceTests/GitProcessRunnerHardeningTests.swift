@@ -1,6 +1,28 @@
 import XCTest
 @testable import CCSpace
 
+/// 凭据 helper 发现桩:按脚本依次给出"读取失败(nil)"/具体值/可信空值,并统计实际调用次数。
+private actor ScriptedHelperLoader {
+    private var remainingFailures: Int
+    private var results: [[String]]
+    private(set) var callCount = 0
+
+    init(failures: Int, results: [[String]]) {
+        remainingFailures = failures
+        self.results = results
+    }
+
+    func next() -> [String]? {
+        callCount += 1
+        if remainingFailures > 0 {
+            remainingFailures -= 1
+            return nil
+        }
+        guard results.isEmpty == false else { return ["should-not-be-read"] }
+        return results.removeFirst()
+    }
+}
+
 /// git 子进程执行面加固的回归锁。
 ///
 /// 仓库自带的 `.git/config` 可以把若干配置键指到任意可执行程序,而 `git status`/
@@ -84,6 +106,41 @@ final class GitProcessRunnerHardeningTests: XCTestCase {
         let data = Data("osxkeychain\n\nstore\n".utf8)
         XCTAssertEqual(GitProcessRunner.decodedConfigLines(data), ["osxkeychain", "store"])
         XCTAssertEqual(GitProcessRunner.decodedConfigLines(Data()), [])
+    }
+
+    /// 凭据 helper 发现:只允许缓存"确实读到过"的结果。
+    /// 把 nil(启动失败/超时/解码失败)当 [] 缓存 = 一次瞬时故障钉死整个进程:
+    /// 之后每个 git 调用只下发 `-c credential.helper=` 而不回填用户的 osxkeychain,
+    /// 私有仓库全线认证失败且只有重启才恢复。
+    /// 反过来,[] 本身(退出码 1 = 确实没配)是可信空值,必须缓存,否则每次 git
+    /// 调用都要多起一个子进程。
+    func test_userCredentialHelperCacheKeepsFailuresOutOfCache() async {
+        let failureLoader = ScriptedHelperLoader(failures: 1, results: [["osxkeychain"]])
+        let cache = GitProcessRunner.UserCredentialHelperCache()
+        // `await` 不能写进 XCTAssertEqual 的 autoclosure(非并发 autoclosure),全部先取到本地。
+        let firstRound = await cache.helpers(loader: { await failureLoader.next() })
+        XCTAssertEqual(firstRound, [], "读取失败那一轮仍要 fail-closed(只重置不回填)")
+
+        let secondRound = await cache.helpers(loader: { await failureLoader.next() })
+        XCTAssertEqual(secondRound, ["osxkeychain"], "失败不得入缓存:下一次调用必须重新发现")
+
+        let exhaustedLoader = ScriptedHelperLoader(failures: 0, results: [["should-not-be-read"]])
+        let thirdRound = await cache.helpers(loader: { await exhaustedLoader.next() })
+        XCTAssertEqual(thirdRound, ["osxkeychain"], "成功结果只读一次,后续走缓存")
+        let failureCalls = await failureLoader.callCount
+        let exhaustedCalls = await exhaustedLoader.callCount
+        XCTAssertEqual(failureCalls, 2)
+        XCTAssertEqual(exhaustedCalls, 0, "命中缓存后不得再起发现子进程")
+
+        let emptyLoader = ScriptedHelperLoader(failures: 0, results: [[], ["should-not-be-read"]])
+        let emptyCache = GitProcessRunner.UserCredentialHelperCache()
+        let emptyFirstRound = await emptyCache.helpers(loader: { await emptyLoader.next() })
+        XCTAssertEqual(emptyFirstRound, [], "退出码 1(确实一个 helper 都没配)是可信空值")
+
+        let emptySecondRound = await emptyCache.helpers(loader: { await emptyLoader.next() })
+        XCTAssertEqual(emptySecondRound, [], "可信空值必须入缓存")
+        let emptyCalls = await emptyLoader.callCount
+        XCTAssertEqual(emptyCalls, 1)
     }
 
     /// 继承环境里"指向可执行程序"的键必须被剥掉;而属用户信任域的 askpass 环境变量

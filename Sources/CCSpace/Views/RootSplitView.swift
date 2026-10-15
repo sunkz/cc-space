@@ -1312,18 +1312,28 @@ struct RootSplitView: View {
         refreshGeneration += 1
         let generation = refreshGeneration
         isInFlightDiskRefreshForced = force
+        // 接手式取消只是把旧任务推进取消状态:它此刻多半正挂在 `refreshCalculator`
+        // 里逐候选跑 ls-remote(秒级),要等回到下一个 `Task.isCancelled` 检查点才退出,
+        // 也就到那时才执行 `defer { gate.end(rootPath) }` 释放 DiskRefreshService 的
+        // 进程级单飞闸门。新任务若直接抢跑,`gate.begin` 失败 → 立刻返回
+        // `importedRepositoryCount: 0`:用户点的"刷新"静默无事发生,没有反馈、
+        // 也没有重试入口。因此先等前一轮真正收尾(含释放闸门)再开始本轮。
+        let previousTask = refreshTask
         refreshTask = Task {
+            await previousTask?.value
             let outcome = await diskRefreshService.refresh(rootPath: rootPath)
-            if outcome.importedRepositoryCount > 0 {
-                // 仓库是"自己冒出来"的,不给提示用户只会看到一个没配过的仓库出现在列表里。
-                appearanceFeedback = CCSpaceFeedbackFactory.actionSuccess(
-                    "已自动纳入 \(outcome.importedRepositoryCount) 个拷入工作区目录的 Git 仓库"
-                )
-            }
             let isCurrentGeneration = refreshGeneration == generation
             if isCurrentGeneration {
                 refreshTask = nil
                 isInFlightDiskRefreshForced = false
+                // 反馈同样只在当前代发布:被取代的旧任务此前会绕过所有归属检查,
+                // 把过期消息盖到唯一槽位上(连启动期的损坏文件横幅都会被顶掉)。
+                if outcome.importedRepositoryCount > 0 {
+                    // 仓库是"自己冒出来"的,不给提示用户只会看到一个没配过的仓库出现在列表里。
+                    appearanceFeedback = CCSpaceFeedbackFactory.actionSuccess(
+                        "已自动纳入 \(outcome.importedRepositoryCount) 个拷入工作区目录的 Git 仓库"
+                    )
+                }
                 // 被取消的旧任务绝不能触碰句柄与分支缓存:它返回时新任务可能正在跑,
                 // 清句柄会导致下一轮调度与前一轮并发。
                 if Task.isCancelled == false, shouldInvalidateBranches {

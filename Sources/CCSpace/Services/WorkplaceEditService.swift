@@ -356,7 +356,12 @@ struct WorkplaceEditService {
                     updated: updated,
                     onto: original,
                     in: latest,
-                    premarkedTransient: nil
+                    // 入口将本轮全部保留行预标为 .switching(见上方磁盘刷新豁免),
+                    // 收口必须声明该瞬态归本操作所有:否则"结果恰好等于快照"的行
+                    // (只改名、增删仓库、原样保存,或仓库本就在目标分支)会走到
+                    // `?? latest`,把 .switching 原样落库——磁盘刷新与 pull 都跳过
+                    // 瞬态行,没有任何流程收口,行永久停在转轮直到重启。
+                    premarkedTransient: .switching
                 ) ?? latest
                 merged.localPath = updated.localPath
                 return merged

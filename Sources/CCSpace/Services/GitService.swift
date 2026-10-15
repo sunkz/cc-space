@@ -2475,43 +2475,111 @@ struct GitService: GitServicing {
         return trackingBranch.isEmpty ? nil : trackingBranch
     }
 
+    /// 该仓库在 `git remote` 里登记的远端名,按 ref 名守卫过滤。
+    ///
+    /// `.git/config` 属仓库自带数据(磁盘导入的远端不可控),名字过不了守卫的
+    /// 远端直接跳过——它们要拼进 `refs/remotes/<remote>/<branch>`。
+    private func remoteNames(in directory: String) async -> [String] {
+        guard let output = await readGitOutput(
+            operation: "remote-list",
+            arguments: ["-C", directory, "remote"]
+        ) else {
+            return []
+        }
+        return output
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.isEmpty == false && Self.isSafeRefName($0) }
+    }
+
+    /// 多远端时 origin 优先,其余保持 `git remote` 的顺序:同名分支同时存在于多个远端
+    /// 时选谁必须可预期,不能取决于 config 里的登记顺序。
+    private static func preferredRemoteOrder(_ remotes: [String]) -> [String] {
+        guard let originIndex = remotes.firstIndex(of: "origin"), originIndex != 0 else {
+            return remotes
+        }
+        var ordered = remotes
+        ordered.remove(at: originIndex)
+        ordered.insert("origin", at: 0)
+        return ordered
+    }
+
+    private func hasRemoteTrackingReference(
+        remote: String,
+        branch: String,
+        in directory: String
+    ) async -> Bool {
+        guard let output = await readGitOutput(
+            operation: "remote-ref-exists",
+            arguments: ["-C", directory, "rev-parse", "--verify", "-q", "--", "refs/remotes/\(remote)/\(branch)"]
+        ) else {
+            return false
+        }
+        return output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
+
+    private func checkoutTrackingBranch(
+        _ branch: String,
+        remote: String,
+        in directory: String
+    ) async throws {
+        try await runGit(arguments: [
+            "-C", directory,
+            "checkout",
+            "--track",
+            "\(remote)/\(branch)",
+        ])
+    }
+
+    /// 本地没有同名分支时,改跟踪**任一**远端的同名分支。
+    ///
+    /// 此前只认 `origin`:远端改名、或用 `upstream`/`mirror` 的仓库里分支明明存在却查不到,
+    /// 于是返回 false 让调用方兜底 `checkout -b` —— 在 HEAD 上**新建**一个同名本地分支。
+    /// 用户看到"已切到 feature/x",实际拿到的是一份当前分支的代码,而且全程静默。
     private func checkoutRemoteTrackingBranchIfAvailable(
         _ branch: String,
         in directory: String
     ) async throws -> Bool {
-        do {
-            try await runGit(arguments: [
-                "-C", directory,
-                "checkout",
-                "--track",
-                "origin/\(branch)",
-            ])
-            return true
-        } catch {
-            guard await remoteURL(in: directory) != nil else {
-                return false
-            }
+        let remotes = Self.preferredRemoteOrder(await remoteNames(in: directory))
+        guard remotes.isEmpty == false else {
+            return false
+        }
 
+        // 先查已有的远端跟踪引用:零网络,且覆盖 fetch 过但引用未清理的正常场景。
+        for remote in remotes {
+            guard await hasRemoteTrackingReference(remote: remote, branch: branch, in: directory) else {
+                continue
+            }
             do {
-                try await fetchRemoteBranchReference(branch, in: directory)
-                try await runGit(arguments: [
-                    "-C", directory,
-                    "checkout",
-                    "--track",
-                    "origin/\(branch)",
-                ])
+                try await checkoutTrackingBranch(branch, remote: remote, in: directory)
                 return true
             } catch {
-                if isMissingRemoteBranchError(error) {
-                    return false
-                }
+                // 引用明明存在却切不过去(工作树冲突等)必须照抛:
+                // 按"分支不存在"收场会让调用方去新建同名分支,把真实故障盖掉。
+                if isMissingRemoteBranchError(error) { continue }
                 throw error
             }
         }
+
+        // 一个远端都没有跟踪引用:逐个 fetch 该分支,命中即止。
+        // 取舍:分支确实不存在时最坏是 N 次网络往返(N 为远端数,工作区仓库通常为 1),
+        // 换来的是"存在于非 origin 远端的分支不再被静默新建"。
+        for remote in remotes {
+            do {
+                try await fetchRemoteBranchReference(branch, remote: remote, in: directory)
+                try await checkoutTrackingBranch(branch, remote: remote, in: directory)
+                return true
+            } catch {
+                if isMissingRemoteBranchError(error) { continue }
+                throw error
+            }
+        }
+        return false
     }
 
     private func fetchRemoteBranchReference(
         _ branch: String,
+        remote: String = "origin",
         in directory: String
     ) async throws {
         // branch 拼进 refspec(`+refs/heads/<branch>:...`),无 `--` 可加,外来名先过守卫。
@@ -2521,11 +2589,11 @@ struct GitService: GitServicing {
         try await runGit(arguments: [
             "-C", directory,
             "fetch",
-            "origin",
+            remote,
             // refspec 带 `+` 强制更新远端跟踪引用:不带时远端新值不是本地跟踪引用
             // 的祖先(如 force-push 过)会被 git 以 non-fast-forward 拒绝,
             // 而这正是"fetch 刷新过期引用"最该覆盖的场景。更新跟踪引用无风险。
-            "+refs/heads/\(branch):refs/remotes/origin/\(branch)",
+            "+refs/heads/\(branch):refs/remotes/\(remote)/\(branch)",
         ], timeout: Self.networkOperationTimeout)
     }
 

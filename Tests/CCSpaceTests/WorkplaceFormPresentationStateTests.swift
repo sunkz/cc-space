@@ -486,6 +486,47 @@ final class WorkplaceFormPresentationStateTests: XCTestCase {
         XCTAssertNil(BranchNameValidation.validate("   "))
     }
 
+    /// 回归锁:编辑弹窗的改动基线必须在打开时冻结，不能跟着 `workplace` 漂。
+    ///
+    /// `WorkplaceEditPresentationState` 本身是纯函数（上面一串用例已覆盖），
+    /// 但"基线来自哪一刻的数据"发生在 View 里:此前直接把 `let workplace`
+    /// （store 的实时记录）当 original 用,弹窗可以开几分钟,期间定时磁盘刷新会重写
+    /// 记录 → "将移除 N 个仓库"的 N 在用户看清之前自己变,而保存按当前基线执行,
+    /// 二次确认里承诺的破坏性范围就此失真。SwiftUI 的 `@State` 初值只在首次渲染生效,
+    /// 所以基线要存进 `@State`。这条约定无法用纯函数用例表达,改为源码文本守护
+    /// （同 LayeringGuardTests 把"View 不许直接调 git"变成可执行约束的做法）。
+    func test_editViewChangeBaselineIsFrozenAtOpenTime() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // CCSpaceTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // 仓库根
+            .appendingPathComponent("Sources/CCSpace/Views/WorkplaceEditView.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        XCTAssertTrue(
+            source.contains("@State private var baseline: Workplace"),
+            "基线必须存进 @State(初值只取首次渲染的 workplace),否则每次 store 刷新都会漂移"
+        )
+
+        guard let stateStart = source.range(of: "WorkplaceEditPresentationState(") else {
+            return XCTFail("找不到 WorkplaceEditPresentationState 构造点,守护测试本身已失效")
+        }
+        guard let stateEnd = source.range(
+            of: ")",
+            range: stateStart.upperBound..<source.endIndex
+        ) else {
+            return XCTFail("WorkplaceEditPresentationState 构造块无法定位结尾")
+        }
+        let construction = String(source[stateStart.upperBound..<stateEnd.lowerBound])
+        XCTAssertFalse(
+            construction.contains("workplace."),
+            "original* 三项必须来自冻结基线,不得再读实时的 workplace: \(construction)"
+        )
+        for required in ["baseline.name", "baseline.branch", "baseline.selectedRepositoryIDs"] {
+            XCTAssertTrue(construction.contains(required), "构造参数应包含 \(required)")
+        }
+    }
+
     private func makeRepository(
         repoName: String,
         id: UUID = UUID()

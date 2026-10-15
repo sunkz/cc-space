@@ -89,8 +89,9 @@ struct GitProcessRunner {
         fixedGlobalConfigurationArguments + credentialGuardArguments(userHelpers: userHelpers)
     }
 
-    /// 用户全局/系统 credential helper,首次 git 调用时读一次并缓存。
-    /// 读取失败按空处理 = fail-closed:宁可不回填(认证明确失败可归因),
+    /// 用户全局/系统 credential helper。读取成功才缓存;读取失败(nil)不缓存,
+    /// 下次 git 调用重试——否则一次瞬时故障会把整进程的私有仓库认证钉死到重启。
+    /// 失败那一轮按空处理 = fail-closed:宁可不回填(认证明确失败可归因),
     /// 也不能把仓库带来的 helper 留在链上悄悄执行。
     private static let userHelpersCache = UserCredentialHelperCache()
 
@@ -99,15 +100,33 @@ struct GitProcessRunner {
     /// 用 actor 而不是 `NSLock`:Swift 6 SDK 起 `lock()/unlock()` 在 async 上下文
     /// 直接不可用(`NS_SWIFT_UNAVAILABLE_FROM_ASYNC`),而发现本身要起子进程、
     /// 必须跨调用复用同一结果。
-    private actor UserCredentialHelperCache {
+    ///
+    /// internal(而非 private)只为让单测注入 loader,覆盖"没读成功"与"确实没配
+    /// helper"这两种空值的分歧——生产里它们只差一个 `nil`。
+    actor UserCredentialHelperCache {
         private var cached: [String]?
 
         func helpers() async -> [String] {
+            await helpers(loader: {
+                // 阻塞式 Process 读取必须离开 actor 的 executor(调用方可能是主线程)。
+                await Task.detached(priority: .utility) {
+                    GitProcessRunner.readUserCredentialHelpers()
+                }.value
+            })
+        }
+
+        /// 只缓存"确实读到过"的结果:`loader` 返回 nil = 启动失败/超时/被信号终止/
+        /// 解码失败,返回 [] = 用户确实一个 helper 都没配。把前者当后者缓存,一次瞬时
+        /// 故障(句柄耗尽、`[include]` 指向卡住的挂载)就会钉死整个进程——此后每个 git
+        /// 调用只下发 `-c credential.helper=` 而不回填用户的 osxkeychain,私有仓库
+        /// 全线认证失败,且只有重启才恢复。
+        func helpers(loader: @Sendable () async -> [String]?) async -> [String] {
             if let cached { return cached }
-            // 阻塞式 Process 读取必须离开 actor 的 executor(调用方可能是主线程)。
-            let loaded = await Task.detached(priority: .utility) {
-                GitProcessRunner.readUserCredentialHelpers()
-            }.value
+            guard let loaded = await loader() else {
+                // 本轮仍按 fail-closed 返回空(宁可不回填,也不能把仓库带来的 helper
+                // 留在链上悄悄执行),但不入缓存:下次 git 调用重试发现。
+                return []
+            }
             cached = loaded
             return loaded
         }
@@ -116,6 +135,13 @@ struct GitProcessRunner {
     static func resolvedGlobalConfigurationArguments() async -> [String] {
         Self.globalConfigurationArguments(userHelpers: await Self.userHelpersCache.helpers())
     }
+
+    /// 凭据 helper 发现的等待上限。
+    ///
+    /// 发现结果虽只缓存一次,但它坐在**每次** git 调用的关键路径上(`run()` 会 await
+    /// `resolvedGlobalConfigurationArguments()`),而 `waitUntilExit` 本身没有时限:
+    /// 一条阻塞的 `git config` 足以冻住整个 app 的 git 能力。
+    private nonisolated static let credentialDiscoveryTimeout: TimeInterval = 5
 
     /// 读用户自己的 credential.helper(system + global 合并值)。
     ///
@@ -129,8 +155,11 @@ struct GitProcessRunner {
     /// (非任何工作区仓库),合并结果即 system+global,不含仓库自带的 local 值。
     /// 环境仍过 `childEnvironment`:继承来的 `GIT_DIR`/`GIT_CONFIG_*` 已被剔除,
     /// 不会被外部指向到别的仓库或配置文件。
-    private nonisolated static func readUserCredentialHelpers() -> [String] {
-        guard let gitURL else { return [] }
+    ///
+    /// 返回值区分两种空:`[]` = 确实未配置(可信,可缓存);`nil` = 没读成功
+    /// (启动失败/超时/被信号终止/解码失败,不可信,调用方不得缓存)。
+    private nonisolated static func readUserCredentialHelpers() -> [String]? {
+        guard let gitURL else { return nil }
         let process = Process()
         process.executableURL = gitURL
         process.arguments = ["config", "--get-all", "credential.helper"]
@@ -154,12 +183,29 @@ struct GitProcessRunner {
         guard launched, exception == nil else {
             // 读不到就 fail-closed:仍下发重置(见 credentialGuardArguments),
             // 宁可不回填,也不能把仓库带来的 helper 留在链上悄悄执行。
-            return []
+            return nil
         }
+
+        let processBox = SendableProcessBox(process)
+        let timeoutWork = DispatchWorkItem {
+            guard processBox.process.isRunning else { return }
+            Self.objCBridgedTerminate(processBox.process)
+        }
+        DispatchQueue.global(qos: .utility).asyncAfter(
+            deadline: .now() + Self.credentialDiscoveryTimeout,
+            execute: timeoutWork
+        )
         process.waitUntilExit()
-        // 退出码非 0 = 没有任何 helper 配置,按空处理。
+        timeoutWork.cancel()
+
+        // 被信号终止(含上面那次超时兜底)不等于"没有配置"。
+        guard process.terminationReason == .exit else { return nil }
+        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        // `--get-all` 无匹配时以退出码 1 结束:这是"确实一个 helper 都没配"的可信空值。
+        guard process.terminationStatus == 0 || process.terminationStatus == 1 else { return nil }
         guard process.terminationStatus == 0 else { return [] }
-        return Self.decodedConfigLines(outputPipe.fileHandleForReading.readDataToEndOfFile())
+        guard String(data: data, encoding: .utf8) != nil else { return nil }
+        return Self.decodedConfigLines(data)
     }
 
     /// 按行拆分 git config 输出并去掉空行(纯函数,便于单测覆盖多行/尾换行形态)。
@@ -410,6 +456,15 @@ struct GitProcessRunner {
                             )
                             return
                         }
+                        // 截断检查:与 terminationHandler 路径同因,见那里注释。
+                        if stdoutBox.isTruncated || stderrBox.isTruncated {
+                            continuationBox.resume(
+                                throwing: GitProcessExecutionError.outputLimitExceeded(
+                                    command: commandDescription
+                                )
+                            )
+                            return
+                        }
                         continuationBox.resume(
                             returning: GitProcessResult(
                                 terminationStatus: processBox.process.terminationStatus,
@@ -468,6 +523,20 @@ struct GitProcessRunner {
                     timeoutBox.release()
                     guard continuationClaim.claim() else { return }
                     scheduleDrainFallback(false) {
+                        // 截断即失败,不得按成功返回:溢出回调与进程退出抢同一个 claim,
+                        // 若 terminationHandler 先认领,`handleOutputOverflow` 的
+                        // `claim()` 会失败并直接 return,超限错误永远发不出去;而此刻管道
+                        // 仍可能剩最后一块(读缓冲 + 64 KB 内核 pipe)未交付,截断正是在
+                        // 这次退出之后才发生的。此时若照旧 resume 成功,调用方会拿到
+                        // 「退出码 0 + 被砍断的输出」并当作合法 git 输出去解析。
+                        if stdoutBox.isTruncated || stderrBox.isTruncated {
+                            continuationBox.resume(
+                                throwing: GitProcessExecutionError.outputLimitExceeded(
+                                    command: commandDescription
+                                )
+                            )
+                            return
+                        }
                         continuationBox.resume(
                             returning: GitProcessResult(
                                 terminationStatus: completedProcess.terminationStatus,
@@ -710,6 +779,14 @@ final class SendableDataBox: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return _data
+    }
+
+    /// 本次运行中该流是否因触到上限被截断。恢复续体前必须复查:见 `run` 里两处
+    /// 截断守卫的注释——溢出回调与进程退出竞态时,截断的数据不得按成功返回。
+    var isTruncated: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return _truncated
     }
 
     func append(_ chunk: Data) {

@@ -180,6 +180,71 @@ final class WorkplaceEditServiceTests: XCTestCase {
         )
     }
 
+    /// 回归锁:分支未变的编辑(只改名、增删仓库、甚至原样保存)必须把入口预标的
+    /// `.switching` 收口回编辑前的终态。合并时若不给 `premarkedTransient`,
+    /// "结果恰好等于快照"的行会走 `?? latest` 把转轮原样落库,而磁盘刷新与 pull
+    /// 都跳过瞬态行,没有任何流程自愈,行永久卡在"切换中"直到重启。
+    func test_saveWorkplaceEditWithUnchangedBranchConcludesPremarkedTransient() async throws {
+        let stores = try makeServiceStores()
+        let repositoryStore = stores.repositoryStore
+        let workplaceStore = stores.workplaceStore
+        let workspaceRoot = stores.workspaceRoot
+
+        try repositoryStore.addRepository(gitURL: "git@github.com:org/api.git")
+        let apiRepository = try XCTUnwrap(repositoryStore.repositories.first { $0.repoName == "api" })
+        let workplace = try workplaceStore.createWorkplace(
+            name: "ios-dev",
+            rootPath: workspaceRoot.path,
+            selectedRepositories: [apiRepository]
+        )
+        try FileManager.default.createDirectory(
+            atPath: workplace.path,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        try FileManager.default.createDirectory(
+            atPath: URL(fileURLWithPath: workplace.path).appendingPathComponent("api").path,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        var existingState = try XCTUnwrap(
+            workplaceStore.syncStates.first {
+                $0.workplaceID == workplace.id && $0.repositoryID == apiRepository.id
+            }
+        )
+        existingState.status = .success
+        existingState.hasLocalDirectory = true
+        existingState.lastSyncedAt = .now
+        workplaceStore.updateSyncState(existingState)
+
+        let gitService = WorkplaceEditGitServiceSpy()
+        let service = WorkplaceEditService(
+            workplaceStore: workplaceStore,
+            repositoryStore: repositoryStore,
+            syncCoordinator: SyncCoordinator(gitService: gitService),
+            gitService: gitService
+        )
+
+        // 仅改名:分支沿用工作区当前值,增删仓库各为零。
+        try await service.saveWorkplaceEdit(
+            workplaceID: workplace.id,
+            name: "ios-renamed",
+            selectedRepositoryIDs: [apiRepository.id],
+            branch: workplace.branch
+        )
+
+        let finalState = try XCTUnwrap(
+            workplaceStore.syncStates.first {
+                $0.workplaceID == workplace.id && $0.repositoryID == apiRepository.id
+            }
+        )
+        XCTAssertEqual(
+            finalState.status,
+            .success,
+            "编辑收口后必须回到编辑前的终态,不得遗留 .switching 转轮"
+        )
+    }
+
     func test_saveWorkplaceEditReportsProgressAcrossRemovalBranchSwitchAndClone() async throws {
         let stores = try makeServiceStores()
         let repositoryStore = stores.repositoryStore

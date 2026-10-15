@@ -48,6 +48,43 @@ final class GitProcessRunnerOutputLimitTests: XCTestCase {
         )
     }
 
+    /// 截断的输出**永远不得按成功返回**,即使溢出回调没抢到续体认领:
+    /// 命令越过后随即正常退出(退出码 0),`terminationHandler` 与 `handleOutputOverflow`
+    /// 抢的是同一个 claim——handler 先认领时,溢出回调的 `claim()` 失败直接 return,
+    /// 超限错误发不出去;而截断是在这次退出之后才被读到的。修复前这条时序会恢复成
+    /// 「退出码 0 + 被砍断的输出」,调用方(如 `git diff` 解析)把它当合法结果用。
+    ///
+    /// 8 KB 一次性写入恒小于 64 KB 管道缓冲,进程写完立即退出,把上述竞态变成稳定复现的
+    /// 常见交错;断言只有"必须 outputLimitExceeded"这一条,不依赖哪一方抢到认领。
+    func test_truncatedOutputNeverResumesAsSuccessEvenWhenProcessExitsCleanly() async throws {
+        let started = Date()
+        do {
+            let result = try await GitProcessRunner().run(
+                arguments: [
+                    "-c",
+                    "alias.ccspace-truncated=!head -c 8192 /dev/zero",
+                    "ccspace-truncated",
+                ],
+                captureStdout: true,
+                captureStderr: true,
+                timeout: 60,
+                outputLimitBytes: 1024
+            )
+            XCTFail(
+                "被截断的输出不得按成功返回,实际退出码 \(result.terminationStatus)、stdout \(result.stdoutData.count) 字节"
+            )
+        } catch let error as GitProcessExecutionError {
+            guard case .outputLimitExceeded = error else {
+                return XCTFail("应抛 outputLimitExceeded,实际: \(error)")
+            }
+        }
+        XCTAssertLessThan(
+            Date().timeIntervalSince(started),
+            20,
+            "截断复查应在排水落地时立刻失败,不得退化成等 60s 超时兜底"
+        )
+    }
+
     /// 截断与"恰好一次溢出回调"是 `SendableDataBox` 的核心契约,直接驱动它而非赌进程时序:
     /// - 未触及上限不得回调(否则正常的大输出也会被误判为超限);
     /// - 越限 chunk 只保留到恰好上限(截断),不得整块丢弃或整块写入;
@@ -60,11 +97,13 @@ final class GitProcessRunnerOutputLimitTests: XCTestCase {
         box.append(Data(repeating: 0x41, count: 5))
         XCTAssertEqual(box.data.count, 5)
         XCTAssertEqual(counter.value, 0, "未越过上限不得触发溢出回调")
+        XCTAssertFalse(box.isTruncated, "未越过上限时 isTruncated 必须为 false,否则正常大输出会被误判")
 
         // 第二个 chunk 越过上限:只追加到恰好 8 字节。
         box.append(Data(repeating: 0x42, count: 5))
         XCTAssertEqual(box.data.count, 8, "越限 chunk 应截断到恰好上限")
         XCTAssertEqual(counter.value, 1)
+        XCTAssertTrue(box.isTruncated, "截断必须可被恢复续体前的复查读到")
 
         for _ in 0..<20 {
             box.append(Data(repeating: 0x43, count: 1024))

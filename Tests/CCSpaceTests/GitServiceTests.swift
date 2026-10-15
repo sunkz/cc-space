@@ -169,6 +169,71 @@ final class GitServiceTests: XCTestCase {
         XCTAssertNotEqual(localHead, mainHead)
     }
 
+    /// 远端不叫 origin 时也必须跟踪到真正的远端分支。
+    ///
+    /// 此前兜底只认 `origin/<branch>`:这类仓库里分支明明存在却查不到,于是返回 false,
+    /// 调用方 `checkout -b` 在 HEAD 上**新建**同名本地分支——行面上"切过去了",
+    /// 实际代码是当前分支的内容,全程静默。
+    /// 刻意先删掉 `mirror/feature/demo` 跟踪引用,让用例走"无引用 → 向该远端 fetch"分支。
+    func test_checkoutBranchTracksBranchOnNonOriginRemoteInsteadOfCreatingAtHead() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("source")
+        let bareRemote = root.appendingPathComponent("remote.git")
+        let clone = root.appendingPathComponent("clone")
+
+        _ = try shell(["git", "init", source.path])
+        _ = try shell(["git", "-C", source.path, "config", "user.email", "test@example.com"])
+        _ = try shell(["git", "-C", source.path, "config", "user.name", "test"])
+        _ = try shell(["git", "-C", source.path, "branch", "-m", "main"])
+        FileManager.default.createFile(
+            atPath: source.appendingPathComponent("README.md").path,
+            contents: Data("hello".utf8)
+        )
+        _ = try shell(["git", "-C", source.path, "add", "README.md"])
+        _ = try shell(["git", "-C", source.path, "commit", "-m", "init"])
+        _ = try shell(["git", "init", "--bare", bareRemote.path])
+        _ = try shell(["git", "-C", source.path, "remote", "add", "mirror", bareRemote.path])
+        _ = try shell(["git", "-C", source.path, "push", "-u", "mirror", "main"])
+        _ = try shell(["git", "-C", bareRemote.path, "symbolic-ref", "HEAD", "refs/heads/main"])
+
+        _ = try shell(["git", "-C", source.path, "checkout", "-b", "feature/demo"])
+        FileManager.default.createFile(
+            atPath: source.appendingPathComponent("FEATURE.md").path,
+            contents: Data("remote branch".utf8)
+        )
+        _ = try shell(["git", "-C", source.path, "add", "FEATURE.md"])
+        _ = try shell(["git", "-C", source.path, "commit", "-m", "feature"])
+        _ = try shell(["git", "-C", source.path, "push", "-u", "mirror", "feature/demo"])
+
+        // `--origin mirror`:远端集合里根本没有 origin,只有 mirror。
+        _ = try shell(["git", "clone", "--origin", "mirror", bareRemote.path, clone.path])
+        _ = try shell(["git", "-C", clone.path, "checkout", "main"])
+        _ = try shell(["git", "-C", clone.path, "branch", "-r", "-D", "mirror/feature/demo"])
+        let missingTrackingRef = try shell(["git", "-C", clone.path, "branch", "-r", "--list", "mirror/feature/demo"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertTrue(missingTrackingRef.isEmpty)
+
+        let service = makeIsolatedService()
+        try await service.checkoutBranch("feature/demo", in: clone.path)
+
+        let currentBranch = await service.currentBranch(in: clone.path)
+        let localHead = try shell(["git", "-C", clone.path, "rev-parse", "HEAD"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let remoteFeatureHead = try shell(["git", "-C", bareRemote.path, "rev-parse", "refs/heads/feature/demo"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let mainHead = try shell(["git", "-C", clone.path, "rev-parse", "main"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let upstream = try shell(["git", "-C", clone.path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        XCTAssertEqual(currentBranch, "feature/demo")
+        // 关键断言:拿到的是远端分支的内容,而不是在 main 的 HEAD 上凭空建的同名分支。
+        XCTAssertEqual(localHead, remoteFeatureHead)
+        XCTAssertNotEqual(localHead, mainHead)
+        XCTAssertEqual(upstream, "mirror/feature/demo")
+    }
+
     func test_checkoutBranchCreatesLocalBranchFromCurrentHeadWhenRemoteBranchMissing() async throws {
         let root = try makeTempRoot()
         defer { try? FileManager.default.removeItem(at: root) }

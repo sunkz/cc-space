@@ -70,6 +70,11 @@ struct RepositoryDeduplicationResult: Sendable {
     /// 从被删项转到保留项——此前"直接摘除引用"会让同时引用两条重复项的
     /// 工作区明明有同 URL 的存活配置却丢掉仓库。
     var idRemapping: [UUID: UUID] = [:]
+    /// 同名但 URL 不同的冲突项(被丢弃那条的 repoName)。
+    ///
+    /// 这些 id **不在** `idRemapping` 里:引用会走兜底摘除,工作区显示"该仓库缺失",
+    /// 而不是被静默指向另一个远端。列出来供调用方留痕/提示用户重新添加。
+    var crossURLNameConflicts: [String] = []
 }
 
 enum RepositoryStoreError: LocalizedError, Equatable {
@@ -353,22 +358,39 @@ final class RepositoryStore: ObservableObject {
             return lhs.id.uuidString < rhs.id.uuidString
         }
 
-        // 被丢弃项的字段并入保留项(口径同 importBackup:缺省才回填/并集),
-        // 并记录 dropped→kept 的 id 映射供引用重映射(
-        // 此前硬删直接丢字段,引用被删项的工作区还要被摘除引用——明明有
-        // 同 URL 的存活配置却丢了仓库)。
+        // 两种"重复"必须分开处理,它们的安全性完全不同:
+        //
+        // 1) **同 URL**(归一化后相等):确实是同一远端被登记了两次。丢弃项的字段并入
+        //    保留项,并记入 idRemapping 做引用重映射——保留项与被丢弃项指向同一个远端,
+        //    把引用换过去是安全的(此前直接摘除引用,工作区明明有同 URL 的存活配置却丢了仓库)。
+        //
+        // 2) **同名、不同 URL**:名字相同但指向**不同远端**。既不能同时留两条
+        //    (仓库名全局唯一是建档侧硬约束:`addRepository` 直接拒 `duplicateRepoName`;
+        //    更重要的是工作区内仓库目录按 repoName 派生,两条同名记录会指向同一个磁盘目录),
+        //    也**绝不能**把引用重映射到另一条上——那会让工作区开始 pull/push 一个它从未
+        //    配置过的远端,而且完全静默,后果比丢一行严重得多。
+        //    处置:保留优先级高的一条、丢弃另一条,**不进 idRemapping**,
+        //    让引用走"未覆盖的 removedIDs 兜底摘除"路径(界面上表现为该仓库缺失,
+        //    用户重新添加正确的远端即可恢复),并单独留痕便于归因。
         var keptRepositories: [RepositoryConfig] = []
         var keptIndexByURL: [String: Int] = [:]
         var keptIndexByName: [String: Int] = [:]
         var idRemapping: [UUID: UUID] = [:]
+        var crossURLNameConflicts: [String] = []
 
         for repository in prioritySorted {
             let normalizedURL = normalizedGitURLForComparison(repository.gitURL)
-            let duplicateIndex = keptIndexByURL[normalizedURL] ?? keptIndexByName[repository.repoName]
-            if let index = duplicateIndex {
+            if let index = keptIndexByURL[normalizedURL] {
                 let merged = mergingDuplicate(kept: keptRepositories[index], dropped: repository)
                 keptRepositories[index] = merged
                 idRemapping[repository.id] = merged.id
+                continue
+            }
+            if let index = keptIndexByName[repository.repoName] {
+                crossURLNameConflicts.append(repository.repoName)
+                repositoryStoreLog.error(
+                    "event=dedup_rejected_cross_url_name_conflict repo_name=\(repository.repoName, privacy: .public) dropped_url=\(repository.gitURL, privacy: .public) kept_url=\(keptRepositories[index].gitURL, privacy: .public) reason=同名不同远端,重映射会把工作区指向未配置过的远端,改为摘除引用"
+                )
                 continue
             }
             keptIndexByURL[normalizedURL] = keptRepositories.count
@@ -384,7 +406,8 @@ final class RepositoryStore: ObservableObject {
         return RepositoryDeduplicationResult(
             repositories: deduplicatedRepositories,
             changed: deduplicatedRepositories.count != repositories.count,
-            idRemapping: idRemapping
+            idRemapping: idRemapping,
+            crossURLNameConflicts: crossURLNameConflicts
         )
     }
 

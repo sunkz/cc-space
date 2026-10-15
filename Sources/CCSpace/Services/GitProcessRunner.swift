@@ -29,16 +29,146 @@ struct GitProcessRunner {
 
     /// 每次 git 调用统一前置的全局配置覆盖(必须排在子命令之前)。
     ///
-    /// `core.fsmonitor=false`:仓库自带的 `.git/config` 可以把 fsmonitor 指到任意脚本,
-    /// 而 `git status`/`git diff` 这类**只读**命令会去执行它(实测 Apple Git 157 还会
-    /// fork 一个 `--detach` 的 daemon,`terminate()` 只杀直接子进程、杀不掉它)。
-    /// 这些配置随目录一起被拷进工作区并被自动纳管,而本 app 的状态刷新会周期性触发,
-    /// 等于"打开工作区看一眼"就运行了仓库带来的代码。
+    /// 每一项都属于同一威胁模型:**仓库自带的 `.git/config` 可以把某个配置键指到任意
+    /// 可执行程序**,而本 app 的周期性只读命令会去执行它——等于"打开工作区看一眼"就
+    /// 运行了仓库带来的代码。这些配置随目录一起被拷进工作区并被自动纳管。
     ///
-    /// 代价只有性能:禁用后 git 退化为全量扫描,结果仍然正确。
+    /// - `core.fsmonitor=false`:`git status`/`git diff` 会执行它指向的脚本
+    ///   (实测 Apple Git 157 还会 fork 一个 `--detach` 的 daemon,`terminate()`
+    ///   只杀直接子进程、杀不掉它)。
+    /// - `core.askPass=`:仓库自带的 `.git/config` 把 askpass 指到 `!<命令>` 时,
+    ///   git 在需要认证时会直接 exec 它(实测报 `cannot exec '!sh -c ...'`,即确实走到执行)。
+    ///   `GIT_TERMINAL_PROMPT=0` 只关终端打字提示,不关 askpass。
+    ///   实测空值被 git 当作"未配置",不会去 exec 空命令(与 `diff.external` 不同,见下)。
+    ///   环境里的 `GIT_ASKPASS`/`SSH_ASKPASS` 属用户信任域、保持原样透传,
+    ///   这里只压配置文件侧的取值。
+    ///
+    /// **刻意不放 `diff.external=`**:实测把该键覆盖成空值会让 git 认为外部 diff 已启用
+    /// 并去 exec 空命令名,`git diff` 直接 `fatal: external diff died`——为了堵一条路径
+    /// 把整个 diff 视图打死。外部 diff 与 textconv 一律靠命令行开关封堵
+    /// (`--no-ext-diff --no-textconv`,见 GitService 的补丁类命令):
+    /// 实测仓库自带 `.gitattributes` + `diff.<driver>.textconv` 在
+    /// `git diff --numstat -p` 下**确实会被执行**,加上这两个开关后被完全拦住。
+    ///
+    /// 凭据 helper 链单独由 `credentialGuardArguments(userHelpers:)` 处理:它需要
+    /// 保留用户自己的全局 helper,不能与上面这些"直接写死空值"的项混为一谈。
+    ///
+    /// `core.sshCommand` 不在此列:`childEnvironment` 恒写 `GIT_SSH_COMMAND`,
+    /// env 优先级高于仓库配置,已实际封死。
+    ///
+    /// 代价只有性能与少量能力:禁用 fsmonitor 后 git 退化为全量扫描,结果仍正确;
+    /// 仓库自带的 askpass/凭据 helper 失效,认证回落到用户全局配置。
     /// 钩子(`.git/hooks`、`core.hooksPath`)这里**不**禁:commit/stash 触发钩子与用户
     /// 在命令行里做同样操作是一致的,静默屏蔽反而制造"app 里提交没跑钩子"的隐性差异。
-    static let globalConfigurationArguments: [String] = ["-c", "core.fsmonitor=false"]
+    static let fixedGlobalConfigurationArguments: [String] = [
+        "-c", "core.fsmonitor=false",
+        "-c", "core.askPass=",
+    ]
+
+    /// 凭据 helper 链覆盖:先重置,再回填用户自己在全局/系统配置里声明的 helper。
+    ///
+    /// 仓库 `.git/config` 里的 `credential.helper = !<命令>` 在需要认证时会被执行,
+    /// 而 `GIT_TERMINAL_PROMPT=0` 只关终端提示、不关 helper 调用,所以这条必须在
+    /// `-c` 层面重置。**但不能一刀切**:空值会清掉整条链,连用户全局的
+    /// `osxkeychain` 一起抹掉,私有仓库当场拉不下来(认证失败)。攻击面只在
+    /// "仓库自带的那一条",因此把用户全局/系统声明的 helper 原样追加回来。
+    ///
+    /// 纯函数:发现结果由外部传入,便于单测钉死拼接形态。
+    static func credentialGuardArguments(userHelpers: [String]) -> [String] {
+        var arguments = ["-c", "credential.helper="]
+        for helper in userHelpers {
+            let trimmed = helper.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.isEmpty == false else { continue }
+            arguments.append(contentsOf: ["-c", "credential.helper=\(trimmed)"])
+        }
+        return arguments
+    }
+
+    /// 组装一次调用的前置参数(固定安全项 + 凭据链覆盖)。
+    static func globalConfigurationArguments(userHelpers: [String]) -> [String] {
+        fixedGlobalConfigurationArguments + credentialGuardArguments(userHelpers: userHelpers)
+    }
+
+    /// 用户全局/系统 credential helper,首次 git 调用时读一次并缓存。
+    /// 读取失败按空处理 = fail-closed:宁可不回填(认证明确失败可归因),
+    /// 也不能把仓库带来的 helper 留在链上悄悄执行。
+    private static let userHelpersCache = UserCredentialHelperCache()
+
+    /// 凭据 helper 发现结果的缓存载体。
+    ///
+    /// 用 actor 而不是 `NSLock`:Swift 6 SDK 起 `lock()/unlock()` 在 async 上下文
+    /// 直接不可用(`NS_SWIFT_UNAVAILABLE_FROM_ASYNC`),而发现本身要起子进程、
+    /// 必须跨调用复用同一结果。
+    private actor UserCredentialHelperCache {
+        private var cached: [String]?
+
+        func helpers() async -> [String] {
+            if let cached { return cached }
+            // 阻塞式 Process 读取必须离开 actor 的 executor(调用方可能是主线程)。
+            let loaded = await Task.detached(priority: .utility) {
+                GitProcessRunner.readUserCredentialHelpers()
+            }.value
+            cached = loaded
+            return loaded
+        }
+    }
+
+    static func resolvedGlobalConfigurationArguments() async -> [String] {
+        Self.globalConfigurationArguments(userHelpers: await Self.userHelpersCache.helpers())
+    }
+
+    /// 读用户自己的 credential.helper(system + global 合并值)。
+    ///
+    /// 直接用 Process,不走 `run()`:一是 `run()` 会把本函数的产出前置进 argv(自指),
+    /// 二是发现调用必须与目标仓库无关。
+    ///
+    /// **不带 `--global`/`--system` 作用域参数,而是在非仓库目录读合并值**:
+    /// 分作用域读会漏掉 XDG(`~/.config/git/config`)与 `[include]` 引进来的文件,
+    /// 而这两种恰恰是 macOS 上常见的 helper 声明位置;漏读等价于把用户的
+    /// osxkeychain 抹掉,私有仓库立刻拉不下来。cwd 取 `NSTemporaryDirectory()`
+    /// (非任何工作区仓库),合并结果即 system+global,不含仓库自带的 local 值。
+    /// 环境仍过 `childEnvironment`:继承来的 `GIT_DIR`/`GIT_CONFIG_*` 已被剔除,
+    /// 不会被外部指向到别的仓库或配置文件。
+    private nonisolated static func readUserCredentialHelpers() -> [String] {
+        guard let gitURL else { return [] }
+        let process = Process()
+        process.executableURL = gitURL
+        process.arguments = ["config", "--get-all", "credential.helper"]
+        process.currentDirectoryURL = URL(fileURLWithPath: NSTemporaryDirectory())
+        process.environment = Self.childEnvironment(inherited: ProcessInfo.processInfo.environment)
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+
+        var launched = false
+        var exception: NSException?
+        ObjCExceptionCatchTryRun({
+            do {
+                try process.run()
+                launched = true
+            } catch {
+                launched = false
+            }
+        }, &exception)
+        guard launched, exception == nil else {
+            // 读不到就 fail-closed:仍下发重置(见 credentialGuardArguments),
+            // 宁可不回填,也不能把仓库带来的 helper 留在链上悄悄执行。
+            return []
+        }
+        process.waitUntilExit()
+        // 退出码非 0 = 没有任何 helper 配置,按空处理。
+        guard process.terminationStatus == 0 else { return [] }
+        return Self.decodedConfigLines(outputPipe.fileHandleForReading.readDataToEndOfFile())
+    }
+
+    /// 按行拆分 git config 输出并去掉空行(纯函数,便于单测覆盖多行/尾换行形态)。
+    static func decodedConfigLines(_ data: Data) -> [String] {
+        guard let text = String(data: data, encoding: .utf8) else { return [] }
+        return text.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.isEmpty == false }
+    }
 
     private static let gitURL: URL? = {
         let candidates = ["/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git"]
@@ -67,12 +197,20 @@ struct GitProcessRunner {
         // GIT_CONFIG_PARAMETERS 是 `git -c` 的进程间续传形式,键值全由它说了算,留着
         // 就能从环境里把 `core.fsmonitor=<脚本>` 重新塞回来、绕过
         // `globalConfigurationArguments` 的前置覆盖(实测生效)。GIT_EXTERNAL_DIFF 与
-        // GIT_PROXY_COMMAND 同属"环境变量指向可执行程序",一并剥掉。
+        // GIT_PROXY_COMMAND 同属"环境变量指向可执行程序",一并剥掉
+        // (GIT_PATCH_COMMAND 是 GIT_EXTERNAL_DIFF 的配套程序名,跟着一起剥,单留它
+        // 不起作用)。
+        //
+        // 刻意**不**剥 GIT_ASKPASS/SSH_ASKPASS:这两个来自调用方环境(编辑器/用户脚本),
+        // 属用户信任域,仓库无法写入,剥掉不会缩小任何攻击面,却会让从 VS Code 集成
+        // 终端启动 app 的用户失去私有仓库认证能力。要封的是**仓库自带**的那一条,
+        // 走 `-c core.askPass=`(见 globalConfigurationArguments)。
         for key in [
             "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
             "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR",
             "GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT",
-            "GIT_CONFIG_PARAMETERS", "GIT_EXTERNAL_DIFF", "GIT_PROXY_COMMAND",
+            "GIT_CONFIG_PARAMETERS", "GIT_EXTERNAL_DIFF", "GIT_PATCH_COMMAND",
+            "GIT_PROXY_COMMAND",
         ] {
             environment.removeValue(forKey: key)
         }
@@ -134,7 +272,7 @@ struct GitProcessRunner {
 
         let process = Process()
         process.executableURL = gitURL
-        process.arguments = Self.globalConfigurationArguments + arguments
+        process.arguments = await Self.resolvedGlobalConfigurationArguments() + arguments
         process.currentDirectoryURL = URL(fileURLWithPath: NSTemporaryDirectory())
 
         process.environment = Self.childEnvironment(

@@ -87,7 +87,7 @@ private struct StubGitService: GitServicing {
     func defaultBranch(in directory: String) async -> String? { nil }
     func currentBranch(in directory: String) async -> String? { nil }
     func branchStatus(in directory: String) async -> GitBranchStatusSnapshot? { nil }
-    func branches(in directory: String) async -> [String] { [] }
+    func branches(in directory: String) async -> [String]? { [] }
     func checkoutBranch(_ branch: String, in directory: String) async throws {}
     func createLocalBranch(_ branch: String, in directory: String) async throws {}
     func remoteBranchExists(branch: String, remoteURL: String) async -> Bool { false }

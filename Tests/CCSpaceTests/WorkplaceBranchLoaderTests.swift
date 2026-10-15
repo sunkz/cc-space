@@ -45,7 +45,7 @@ private actor WorkplaceBranchLoaderGitServiceSpy: GitServicing {
         )
     }
 
-    func branches(in directory: String) async -> [String] {
+    func branches(in directory: String) async -> [String]? {
         activeOperationCount += 1
         maxActiveOperationCount = max(maxActiveOperationCount, activeOperationCount)
         defer { activeOperationCount -= 1 }

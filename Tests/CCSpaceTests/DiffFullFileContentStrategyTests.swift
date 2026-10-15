@@ -4,14 +4,14 @@ import XCTest
 final class DiffFullFileContentStrategyTests: XCTestCase {
     func test_workingDirectorySourceReadsWorkingTree() {
         XCTAssertEqual(
-            DiffFullFileContentStrategy.resolve(source: .workingDirectory, currentBranch: "main"),
+            DiffFullFileContentStrategy.resolve(diffSource: .workingDirectory, currentBranch: "main"),
             .workingTree
         )
     }
 
     func test_commitSourceReadsCommitBlob() {
         XCTAssertEqual(
-            DiffFullFileContentStrategy.resolve(source: .commit(hash: "abc123"), currentBranch: "main"),
+            DiffFullFileContentStrategy.resolve(diffSource: .commit(hash: "abc123"), currentBranch: "main"),
             .revision("abc123")
         )
     }
@@ -19,7 +19,7 @@ final class DiffFullFileContentStrategyTests: XCTestCase {
     func test_compareSourceReadsHeadBlobUnlessHeadIsCurrentBranch() {
         XCTAssertEqual(
             DiffFullFileContentStrategy.resolve(
-                source: .compare(base: "main", head: "feature"),
+                diffSource: .compare(base: "main", head: "feature"),
                 currentBranch: "main"
             ),
             .revision("feature")
@@ -28,7 +28,7 @@ final class DiffFullFileContentStrategyTests: XCTestCase {
         // 新侧必须读磁盘;取 blob 会漏掉未提交改动,展示的内容与 diff 对不上。
         XCTAssertEqual(
             DiffFullFileContentStrategy.resolve(
-                source: .compare(base: "main", head: "main"),
+                diffSource: .compare(base: "main", head: "main"),
                 currentBranch: "main"
             ),
             .workingTree
@@ -38,7 +38,7 @@ final class DiffFullFileContentStrategyTests: XCTestCase {
     func test_compareSourceWithoutHeadCannotExpand() {
         XCTAssertNil(
             DiffFullFileContentStrategy.resolve(
-                source: .compare(base: "main", head: nil),
+                diffSource: .compare(base: "main", head: nil),
                 currentBranch: "main"
             )
         )
@@ -121,7 +121,7 @@ private final class FullFileContentStubGitService: GitServicing, @unchecked Send
     func defaultBranch(in directory: String) async -> String? { nil }
     func currentBranch(in directory: String) async -> String? { nil }
     func branchStatus(in directory: String) async -> GitBranchStatusSnapshot? { nil }
-    func branches(in directory: String) async -> [String] { [] }
+    func branches(in directory: String) async -> [String]? { [] }
     func checkoutBranch(_ branch: String, in directory: String) async throws {}
     func createLocalBranch(_ branch: String, in directory: String) async throws {}
     func remoteBranchExists(branch: String, remoteURL: String) async -> Bool { false }

@@ -33,7 +33,7 @@ private actor WorkplaceCreateGitServiceSpy: GitServicing {
             hasUncommittedChanges: false
         )
     }
-    func branches(in directory: String) async -> [String] { ["main"] }
+    func branches(in directory: String) async -> [String]? { ["main"] }
     func remoteURL(in directory: String) async -> String? { "git@github.com:test/repo.git" }
 
     func checkoutBranch(_ branch: String, in directory: String) async throws {

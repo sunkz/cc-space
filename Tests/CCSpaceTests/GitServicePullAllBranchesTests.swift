@@ -40,7 +40,10 @@ final class GitServicePullAllBranchesTests: XCTestCase {
         _ = try shell(["git", "-C", env.clone.path, "fetch", "origin"])
 
         let service = makeIsolatedService()
-        let branches = await service.remoteTrackingBranches(in: env.clone.path)
+        let rawrawbranches = await service.remoteTrackingBranches(in: env.clone.path)
+        let rawbranches = try XCTUnwrap(rawrawbranches, "只读查询失败被折成 nil,测试不能按空集合断言")
+
+        let branches = try XCTUnwrap(rawbranches)
 
         XCTAssertEqual(branches, ["origin/feature", "origin/main"].sorted {
             $0.localizedStandardCompare($1) == .orderedAscending
@@ -55,7 +58,8 @@ final class GitServicePullAllBranchesTests: XCTestCase {
 
         // clone 默认带 refs/remotes/origin/HEAD 符号引用,short 名为 "origin"。
         let service = makeIsolatedService()
-        let branches = await service.remoteTrackingBranches(in: env.clone.path)
+        let rawbranches = await service.remoteTrackingBranches(in: env.clone.path)
+        let branches = try XCTUnwrap(rawbranches, "只读查询失败被折成 nil,测试不能按空集合断言")
 
         XCTAssertFalse(branches.contains("origin"))
         XCTAssertTrue(branches.allSatisfy { $0.contains("/") })

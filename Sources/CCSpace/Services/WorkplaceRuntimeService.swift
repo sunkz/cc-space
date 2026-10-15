@@ -447,9 +447,23 @@ struct WorkplaceRuntimeService {
         gitService: any GitServicing,
         directory: String
     ) async throws {
-        let entries = await gitService.stashList(in: directory)
+        // nil = 读取失败(超时/输出超限/进程起不来)。此时**不能**当作"栈里没有这条"
+        // 继续放行:位置仍在、内容可能已换,而对账正是为了拦住这一点。
+        guard let entries = await gitService.stashList(in: directory) else {
+            throw WorkplaceRuntimeServiceError.stashListChanged
+        }
         guard let current = entries.first(where: { $0.index == entry.index }) else {
             throw WorkplaceRuntimeServiceError.stashListChanged
+        }
+        // 首选按 stash 对象 ID 对账:位置(stash@{n})是易变身份,用户在 IDE/终端里
+        // 再 push/drop 一条,同一位置就指向另一个 stash,而消息与时间可能完全相同
+        // (同一次 `git stash push -m` 连点两次、秒级时间戳一致)。
+        // 消息+时间只作退化路径:列表来自不含 %H 的输出时(老格式/测试替身)才用。
+        if let expectedObjectID = entry.objectID, let currentObjectID = current.objectID {
+            guard expectedObjectID == currentObjectID else {
+                throw WorkplaceRuntimeServiceError.stashListChanged
+            }
+            return
         }
         guard current.message == entry.message, current.date == entry.date else {
             throw WorkplaceRuntimeServiceError.stashListChanged
@@ -714,6 +728,29 @@ struct WorkplaceRuntimeService {
         }
     }
 
+    /// 收集落在 `rootPath` 之下的路径(可选:再排除已持锁集合 `excludingLocked`)。
+    ///
+    /// 两个判定都要对路径逐级 lstat/stat 并解析符号链接,单次可达数百毫秒;
+    /// 对工作区全量同步状态行做整表遍历,在网盘/外置盘上足以冻结主线程数分钟。
+    /// 因此入参是**调用方在主线程取好的内存快照**,判定本身放后台执行
+    /// (口径同本文件对重试克隆/push 的处理)。
+    private static func treePaths(
+        snapshot: [String],
+        within rootPath: String,
+        excludingLocked heldKeys: Set<String>? = nil
+    ) async -> [String] {
+        await Task.detached(priority: .userInitiated) {
+            snapshot.compactMap { candidate -> String? in
+                guard LocalPathSafety.isWithinDirectory(candidate, rootPath: rootPath) else { return nil }
+                if let heldKeys,
+                   heldKeys.contains(LocalPathSafety.canonicalLockKey(for: candidate)) {
+                    return nil
+                }
+                return candidate
+            }
+        }.value
+    }
+
     func deleteWorkplace(_ workplace: Workplace, removeLocalDirectories: Bool) async throws {
         let originalStates = workplaceStore.syncStates.filter { $0.workplaceID == workplace.id }
 
@@ -750,11 +787,14 @@ struct WorkplaceRuntimeService {
                 // 编辑新增仓库时,其克隆锁不含被删工作区根),rmTree 就会与克隆写同一
                 // 目录。因此每次拿到锁后、动手删除前重取一次,漏了就放弃本轮、带并集重试。
                 for attempt in 1...Self.deletionLockRecheckAttempts {
-                    let containedStatePaths = workplaceStore.syncStates.compactMap { candidate -> String? in
-                        LocalPathSafety.isWithinDirectory(candidate.localPath, rootPath: workplacePath)
-                            ? candidate.localPath
-                            : nil
-                    }
+                    // 主线程只取内存快照,containment 判定(逐级 lstat/stat + 符号链接
+                    // 解析)放后台:整表遍历在网盘/外置盘上足以冻结 UI 数分钟,
+                    // 口径同本文件"单次 fileExists 也必须离开主线程"。
+                    let candidatePaths = workplaceStore.syncStates.map(\.localPath)
+                    let containedStatePaths = await Self.treePaths(
+                        snapshot: candidatePaths,
+                        within: workplacePath
+                    )
                     let lockedPaths = [workplacePath] + ownStatePaths + containedStatePaths
                     let missedPaths: [String] = try await RepositoryOperationLock.shared
                         .withLockPaths(lockedPaths) { () -> [String] in
@@ -768,16 +808,15 @@ struct WorkplaceRuntimeService {
                                 within: rootPath
                             )
                             let heldKeys = Set(lockedPaths.map { LocalPathSafety.canonicalLockKey(for: $0) })
-                            let lateArrivals = await MainActor.run { () -> [String] in
-                                workplaceStore.syncStates.compactMap { candidate -> String? in
-                                    guard LocalPathSafety.isWithinDirectory(
-                                        candidate.localPath,
-                                        rootPath: workplacePath
-                                    ), heldKeys.contains(LocalPathSafety.canonicalLockKey(for: candidate.localPath)) == false
-                                    else { return nil }
-                                    return candidate.localPath
-                                }
+                            // 同上:主线程只取快照,判定与 canonical 化在后台完成。
+                            let liveCandidatePaths = await MainActor.run {
+                                workplaceStore.syncStates.map(\.localPath)
                             }
+                            let lateArrivals = await Self.treePaths(
+                                snapshot: liveCandidatePaths,
+                                within: workplacePath,
+                                excludingLocked: heldKeys
+                            )
                             guard lateArrivals.isEmpty else { return lateArrivals }
                             // 整棵工作区目录树的递归删除可能耗时数分钟,移出主线程执行。
                             try await Self.removeItemOffMainThread(

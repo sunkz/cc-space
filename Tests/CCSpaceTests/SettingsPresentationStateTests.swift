@@ -13,13 +13,8 @@ final class SettingsPresentationStateTests: XCTestCase {
         XCTAssertEqual(presentationState.currentVersionDisplay, "v0.0.1")
         XCTAssertEqual(presentationState.latestVersionDisplay, "v0.2.0")
         XCTAssertTrue(presentationState.showsUpdateAvailable)
-        XCTAssertEqual(
-            presentationState.statusFeedback,
-            CCSpaceFeedback(
-                style: .warning,
-                message: "发现新版本 v0.2.0，可前往 Releases 下载。"
-            )
-        )
+        // 按钮文案已含"发现新版本",状态提示此处应为 nil,不重复第二遍。
+        XCTAssertNil(presentationState.statusHint)
     }
 
     func test_updateStateShowsSuccessWhenCurrentVersionIsLatest() {
@@ -31,13 +26,8 @@ final class SettingsPresentationStateTests: XCTestCase {
         )
 
         XCTAssertFalse(presentationState.showsUpdateAvailable)
-        XCTAssertEqual(
-            presentationState.statusFeedback,
-            CCSpaceFeedback(
-                style: .success,
-                message: "当前已是最新版本 v0.0.1。"
-            )
-        )
+        // 已是最新:按钮不高亮本身就是结论,不再叠一句文案。
+        XCTAssertNil(presentationState.statusHint)
     }
 
     func test_updateStatePrefersErrorFeedbackOverOtherStatus() {
@@ -48,13 +38,7 @@ final class SettingsPresentationStateTests: XCTestCase {
             lastErrorMessage: "检查更新失败：HTTP 403"
         )
 
-        XCTAssertEqual(
-            presentationState.statusFeedback,
-            CCSpaceFeedback(
-                style: .error,
-                message: "检查更新失败：HTTP 403"
-            )
-        )
+        XCTAssertEqual(presentationState.statusHint, "检查更新失败：HTTP 403")
     }
 }
 

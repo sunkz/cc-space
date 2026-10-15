@@ -197,17 +197,12 @@ struct BranchCompareWindowView: View {
     /// 不随调用方(DiffViewerView 展开流程)留在主线程执行。
     private var fullFileContentProvider: @Sendable (GitDiffEntry) async -> String? {
         let localPath = payload.localPath
-        let source = source
-        let service = gitService
+        let diffSource = source.diffSource
+        let context = _context.wrappedValue
+        // 当前分支探测、策略解析与 blob/磁盘读取全部在 Service 层完成
+        // (重 IO 由 context 内部包进 Task.detached)。
         return { entry in
-            let currentBranch = await service.currentBranch(in: localPath)
-            guard let strategy = DiffFullFileContentStrategy.resolve(
-                source: source,
-                currentBranch: currentBranch
-            ) else { return nil }
-            return await Task.detached(priority: .userInitiated) {
-                await strategy.fileContent(entry: entry, localPath: localPath, gitService: service)
-            }.value
+            await context.fullFileContent(entry: entry, directory: localPath, source: diffSource)
         }
     }
 
@@ -223,22 +218,27 @@ struct BranchCompareWindowView: View {
         ) { [self] snapshot in
             // payload 已更换(复用窗口换仓库)时旧仓库快照不得落笔。
             guard generation == payloadGeneration else { return }
-            localBranches = snapshot.branches
-            remoteTrackingBranches = snapshot.remoteTrackingBranches
+            // nil = 该项读取失败:保留上一轮的名单,不能折算成"这个仓库没有分支"。
+            if let branches = snapshot.branches { localBranches = branches }
+            if let remote = snapshot.remoteTrackingBranches { remoteTrackingBranches = remote }
+            let branchList = snapshot.branches ?? localBranches
             var didResolve = false
             if baseRef == nil {
-                baseRef = snapshot.defaultBranch ?? snapshot.currentBranch ?? snapshot.branches.first
+                baseRef = snapshot.defaultBranch ?? snapshot.currentBranch ?? branchList.first
                 didResolve = true
             }
             if headRef == nil {
-                headRef = snapshot.currentBranch ?? snapshot.branches.first
+                headRef = snapshot.currentBranch ?? branchList.first
                 didResolve = true
             }
             // 上下文已就绪仍解析不出比较侧:空仓库(无任何分支)。
             if baseRef == nil || headRef == nil {
                 entries = []
                 divergence = nil
-                errorMessage = "仓库暂无分支，无法比较"
+                // 区分两种"没有分支可选":名单读取失败 ≠ 仓库真的是空的。
+                errorMessage = snapshot.branches == nil
+                    ? "分支信息读取失败，请稍后重试"
+                    : "仓库暂无分支，无法比较"
                 isLoading = false
                 hasLoadedInitialData = true
                 return

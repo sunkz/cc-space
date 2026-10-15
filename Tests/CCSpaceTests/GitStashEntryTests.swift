@@ -50,4 +50,53 @@ final class GitStashEntryTests: XCTestCase {
     func test_parseListHandlesEmptyOutput() {
         XCTAssertTrue(GitStashEntry.parseList("").isEmpty)
     }
+
+    /// 新格式 `%gs\u{1F}%cI\u{1F}%H`:破坏性操作按对象 ID 对账的前提是解析侧拿到它。
+    func test_parseListReadsObjectIDFromThirdField() {
+        let objectID = String(repeating: "a", count: 40)
+        let output = """
+        WIP on main: 提交标题\u{1F}2026-08-20T10:30:00+08:00\u{1F}\(objectID)
+        """
+
+        let entries = GitStashEntry.parseList(output)
+
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertEqual(entries[0].message, "WIP on main: 提交标题")
+        XCTAssertEqual(entries[0].objectID, objectID)
+        XCTAssertNotEqual(entries[0].date, .distantPast)
+    }
+
+    /// 消息本身含分隔符时,尾部两个字段仍按「日期 + 对象 ID」取,消息段完整重建。
+    func test_parseListKeepsSeparatorBearingMessageAndReadsObjectID() {
+        let objectID = String(repeating: "b", count: 40)
+        let output = "第一段\u{1F}第二段\u{1F}2026-08-20T10:30:00+08:00\u{1F}\(objectID)"
+
+        let entries = GitStashEntry.parseList(output)
+
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertEqual(entries[0].message, "第一段\u{1F}第二段")
+        XCTAssertEqual(entries[0].objectID, objectID)
+        XCTAssertNotEqual(entries[0].date, .distantPast)
+    }
+
+    /// 老的两字段输出(不含 %H)必须解析成 objectID == nil,
+    /// 否则对账会把"没核验过"当成"核验通过"。
+    func test_parseListWithoutObjectIDFieldYieldsNil() {
+        let entries = GitStashEntry.parseList("WIP on main: x\u{1F}2026-08-20T10:30:00+08:00")
+
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertNil(entries[0].objectID)
+        XCTAssertNotEqual(entries[0].date, .distantPast)
+    }
+
+    /// 末段不是 40 位十六进制就不是对象 ID:防止把"消息含分隔符的老行"的最后一段
+    /// 误当成 SHA,把日期解析成 objectID。
+    func test_parseListRejectsNonHexThirdFieldAsObjectID() {
+        let entries = GitStashEntry.parseList("消息\u{1F}备注\u{1F}2026-08-20T10:30:00+08:00")
+
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertNil(entries[0].objectID)
+        XCTAssertEqual(entries[0].message, "消息\u{1F}备注")
+        XCTAssertNotEqual(entries[0].date, .distantPast)
+    }
 }

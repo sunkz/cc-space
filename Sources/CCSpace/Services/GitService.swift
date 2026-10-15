@@ -243,9 +243,13 @@ protocol GitServicing: Sendable {
     func defaultBranch(in directory: String) async -> String?
     func currentBranch(in directory: String) async -> String?
     func branchStatus(in directory: String) async -> GitBranchStatusSnapshot?
-    func branches(in directory: String) async -> [String]
+    /// 本地分支名单;`nil` 表示读取失败(超时/输出超限/进程起不来),
+    /// `[]` 是"仓库确实没有本地分支"。口径同 `remoteBranches`,展示方据此
+    /// stale-while-revalidate(保留上一次成功的名单),不得把失败渲染成空仓库。
+    func branches(in directory: String) async -> [String]?
     /// 本地已有的远端跟踪分支(如 origin/xxx,不含 */HEAD);仅读本地引用,不联网。
-    func remoteTrackingBranches(in directory: String) async -> [String]
+    /// `nil` = 读取失败,`[]` = 确无远端跟踪分支。
+    func remoteTrackingBranches(in directory: String) async -> [String]?
     func branchSnapshotInfo(in directory: String) async -> BranchSnapshotInfo?
     func remoteURL(in directory: String) async -> String?
     func checkoutBranch(_ branch: String, in directory: String) async throws
@@ -269,8 +273,8 @@ protocol GitServicing: Sendable {
     /// 远端分支名单;`nil` 表示探测失败(URL 非法/网络失败),空数组是"远端确无分支"。
     /// 调用方据此区分:stale-while-revalidate 的展示方在 nil 时保留旧缓存。
     func remoteBranches(for remoteURL: String) async -> [String]?
-    /// Stash 列表(stash@{0} 最新,在前)。
-    func stashList(in directory: String) async -> [GitStashEntry]
+    /// Stash 列表(stash@{0} 最新,在前);`nil` = 读取失败,`[]` = 栈为空。
+    func stashList(in directory: String) async -> [GitStashEntry]?
     /// 手动 Stash 当前改动(含 untracked)。
     func stashPush(in directory: String, message: String) async throws
     /// 恢复指定位置的 Stash 并从列表移除(pop);冲突时 Stash 会被保留。
@@ -290,7 +294,8 @@ protocol GitServicing: Sendable {
     /// 「展示所有行」用它取 commit/分支对比来源的新侧全文。
     func blobContent(revision: String, path: String, in directory: String) async -> String?
     /// 全部本地分支的元数据(最后提交时间 / 领先落后上游);一次 for-each-ref 扫描。
-    func branchMetadata(in directory: String) async -> [String: GitBranchMetadata]
+    /// `nil` = 读取失败,`[:]` = 没有本地分支。
+    func branchMetadata(in directory: String) async -> [String: GitBranchMetadata]?
     /// 单个提交的完整详情(标题+正文/邮箱等);hash 非法或提交不存在时返回 nil。
     func commitDetail(hash: String, in directory: String) async -> GitCommitDetail?
     /// 基于指定 ref(commit/分支名)创建并切换到新分支(`git switch -c <branch> <rev>`)。
@@ -310,13 +315,13 @@ protocol GitServicing: Sendable {
 
 extension GitServicing {
     // 协议默认实现:便于现有测试替身(stub/spy)无需实现这些方法即可编译通过。
-    func remoteTrackingBranches(in directory: String) async -> [String] { [] }
+    func remoteTrackingBranches(in directory: String) async -> [String]? { nil }
     func diffWorkingDirectory(in directory: String) async -> [GitDiffEntry] { [] }
     func diffCommit(hash: String, in directory: String) async -> [GitDiffEntry] { [] }
     func diffBranches(base: String, head: String, in directory: String) async -> [GitDiffEntry] { [] }
     func divergence(base: String, head: String, in directory: String) async -> GitRefDivergence? { nil }
     func blobContent(revision: String, path: String, in directory: String) async -> String? { nil }
-    func branchMetadata(in directory: String) async -> [String: GitBranchMetadata] { [:] }
+    func branchMetadata(in directory: String) async -> [String: GitBranchMetadata]? { nil }
     func commitDetail(hash: String, in directory: String) async -> GitCommitDetail? { nil }
     func createBranch(_ branch: String, fromRev rev: String, in directory: String) async throws {
         // 写操作的默认实现必须显式抛错(同下方 stash/删分支):空 `{}` 会让忘实现的
@@ -327,7 +332,7 @@ extension GitServicing {
         throw GitServiceError.operationFailed(message: "当前实现不支持基于远端分支创建")
     }
     func unpushedCommits(in directory: String, count: Int) async -> [GitCommitEntry] { [] }
-    func stashList(in directory: String) async -> [GitStashEntry] { [] }
+    func stashList(in directory: String) async -> [GitStashEntry]? { nil }
     /// 默认实现委托旧接口:测试替身无需感知结果令牌语义即可编译;
     /// 生产 GitService 覆写为可判别"是否真的创建了暂存"的 SHA 追踪版本。
     func trackedStashCreate(in directory: String) async throws -> GitTrackedStash {
@@ -400,7 +405,9 @@ extension GitServicing {
             currentBranch = await self.currentBranch(in: directory)
         }
         guard currentBranch != nil || status != nil else { return nil }
-        let branchList = await branches(in: directory)
+        // 分支名单读取失败 → 整份快照作废(nil),而不是带着一份"空分支仓库"落进
+        // 分支快照缓存:调用方的合并逻辑是 fresh ?? previous,作废才能保留上一轮结果。
+        guard let branchList = await branches(in: directory) else { return nil }
         return BranchSnapshotInfo(
             currentBranch: currentBranch,
             branches: branchList,
@@ -499,11 +506,21 @@ struct GitStashEntry: Identifiable, Equatable, Sendable {
     /// Stash 消息(`git stash push -m` 或自动生成的 WIP 消息)。
     let message: String
     let date: Date
+    /// 该位置指向的 stash 对象 ID(`%H`,40 位)。
+    ///
+    /// 位置是**易变身份**:`stash@{1}` 的含义取决于栈里有几条,用户在 IDE/终端里
+    /// 再 push 一条,同一位置立刻指向另一个 stash。破坏性操作(pop/drop)必须拿这个
+    /// ID 在动手前重新对账,只按位置放行会 drop 掉别人的条目且不可恢复。
+    ///
+    /// nil = 列表来自不含该字段的输出(老格式/测试替身),此时调用方只能退化到
+    /// 消息+时间比对,不得当作"已按对象 ID 核验过"。
+    /// 带默认值的 `var`:memberwise init 因此有默认实参,既有构造点无需全改。
+    var objectID: String? = nil
 
     var id: Int { index }
     var ref: String { "stash@{\(index)}" }
 
-    /// 解析 `git stash list --format=%gs\u{1F}%cI` 输出;行序即栈位置。
+    /// 解析 `git stash list --format=%gs\u{1F}%cI\u{1F}%H` 输出;行序即栈位置。
     static func parseList(_ output: String) -> [GitStashEntry] {
         let fieldSeparator = "\u{1F}"
         let dateFormatter = ISO8601DateFormatter()
@@ -516,12 +533,22 @@ struct GitStashEntry: Identifiable, Equatable, Sendable {
             // 消息本身可能含 \u{1F}(stash push -m 手工构造):此前 `count == 2` 硬性
             // 丢弃该行,行序即栈位置,丢一行会让其后所有条目的 index 前移——
             // popStash/dropStash 按 index 操作会命中错误的 stash(drop 不可恢复)。
-            // 改为 `count >= 2`:前 n-1 段重建完整消息,日期恒取末段,行永不丢。
+            // 改为按"尾部固定字段 + 头部可变消息"拆分,行永不丢。
             guard parts.count >= 2 else { return nil }
+            // 末段是 40 位十六进制 → 新格式(...\u{1F}date\u{1F}objectID);
+            // 否则是老的两字段输出(...\u{1F}date),objectID 缺失。
+            // 按内容判定而不是按段数:消息里带一个分隔符的老行同样有 3 段,
+            // 按段数会把它的日期当成 objectID。
+            let hasObjectID = parts.count >= 3
+                && parts[parts.count - 1].utf8.count == 40
+                && GitService.isCommitSHA(parts[parts.count - 1])
+            let dateField = hasObjectID ? parts[parts.count - 2] : parts[parts.count - 1]
+            let messageEnd = hasObjectID ? 2 : 1
             return GitStashEntry(
                 index: lineIndex,
-                message: parts.dropLast().joined(separator: fieldSeparator),
-                date: dateFormatter.date(from: parts[parts.count - 1]) ?? .distantPast
+                message: parts.dropLast(messageEnd).joined(separator: fieldSeparator),
+                date: dateFormatter.date(from: dateField) ?? .distantPast,
+                objectID: hasObjectID ? parts[parts.count - 1] : nil
             )
         }
     }
@@ -1536,15 +1563,19 @@ struct GitService: GitServicing {
         ])
     }
 
-    func stashList(in directory: String) async -> [GitStashEntry] {
+    func stashList(in directory: String) async -> [GitStashEntry]? {
         let fieldSeparator = "\u{1F}"
-        // 读取失败与"无 stash"都返回 []:列表页只读展示,空态已由 UI 区分,
-        // 不为只读路径引入 throwing 接口。
+        // nil = 读取失败(超时/输出超限/进程起不来),[] = 栈里确实没有条目。
+        // 这个区分是 pop/drop 对账的前提:把读取失败当"栈空",对账会以
+        // "找不到该位置"拒操作(尚可),但列表侧会显示"没有 stash",
+        // 用户据此手工 `git stash drop` 反而更危险;展示侧要能分开两种状态。
         guard let output = await readGitOutput(operation: "stash-list", arguments: [
             "-C", directory,
-            "stash", "list", "--format=%gs\(fieldSeparator)%cI",
+            // %H 带上对象 ID:位置是易变身份,pop/drop 前必须按 ID 重新对账
+            // (见 GitStashEntry.objectID)。
+            "stash", "list", "--format=%gs\(fieldSeparator)%cI\(fieldSeparator)%H",
         ]) else {
-            return []
+            return nil
         }
         return GitStashEntry.parseList(output)
     }
@@ -1662,15 +1693,17 @@ struct GitService: GitServicing {
         return GitBranchStatusSnapshot.parsePorcelainV2(output)
     }
 
-    func branches(in directory: String) async -> [String] {
-        // 读取失败与"无本地分支"都返回 []:分支面板空态已可区分,与 stashList 同款取舍。
+    func branches(in directory: String) async -> [String]? {
+        // nil = 读取失败,[] = 仓库确实没有本地分支(口径见协议声明)。
+        // 折算成 [] 会让分支面板把一次超时渲染成"这个仓库一个分支都没有",
+        // 并把空名单写进缓存的分支快照。
         guard let output = await readGitOutput(operation: "branches", arguments: [
             "-C", directory,
             "for-each-ref",
             "--format=%(refname:short)",
             "refs/heads",
         ]) else {
-            return []
+            return nil
         }
 
         let branches = output
@@ -1709,23 +1742,23 @@ struct GitService: GitServicing {
         }
         var status = GitBranchStatusSnapshot.parsePorcelainV2(statusOutput)
 
-        let branchesOutput: String?
+        let branchesOutput: String
         do {
             branchesOutput = try await branchesTask
         } catch {
             logSnapshotReadFailure(error, command: "for-each-ref refs/heads", directory: directory)
-            branchesOutput = nil
+            // 分支名单读取失败 → **整份快照作废**,不能退化成"branches 为空":
+            // 这份快照会被写进详情页的分支缓存(合并口径是 fresh ?? previous),
+            // 带着空名单落笔等于把一次 git 超时固化成"这个仓库一个分支都没有",
+            // 分支弹窗、切分支兜底、比较侧默认值全都读到错数据。
+            // 作废则保留上一轮结果;空仓库(确实没有分支)走的是成功+空输出,不受影响。
+            return nil
         }
 
-        let branchList: [String]
-        if let branchesOutput {
-            branchList = branchesOutput
-                .components(separatedBy: .newlines)
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { $0.isEmpty == false && $0 != "HEAD" }
-        } else {
-            branchList = []
-        }
+        let branchList = branchesOutput
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.isEmpty == false && $0 != "HEAD" }
 
         let sortedBranches = Array(Set(branchList)).sorted {
             $0.localizedStandardCompare($1) == .orderedAscending
@@ -1845,14 +1878,14 @@ struct GitService: GitServicing {
         return operation
     }
 
-    func branchMetadata(in directory: String) async -> [String: GitBranchMetadata] {
+    func branchMetadata(in directory: String) async -> [String: GitBranchMetadata]? {
         guard let output = await readGitOutput(operation: "branch-metadata", arguments: [
             "-C", directory,
             "for-each-ref",
             "--format=%(refname:short)%01%(committerdate:unix)%01%(upstream:track)%01%(upstream)",
             "refs/heads",
         ]) else {
-            return [:]
+            return nil
         }
         return GitBranchMetadata.parseForEachRef(output)
     }
@@ -2163,6 +2196,11 @@ struct GitService: GitServicing {
             let output = try await runGitOutput(arguments: [
                 "-c", "core.quotepath=false",
                 "-C", directory, "diff", "HEAD", "--numstat", "-p", "--no-color",
+                // 封堵"仓库带来的可执行程序":实测 `.gitattributes` + 本地
+                // `diff.<driver>.textconv` 在 `git diff --numstat -p` 下会被执行,
+                // 加这两个开关后完全拦住。不能用 `-c diff.external=` 覆盖:空值会让
+                // git 认为外部 diff 已启用并去 exec 空命令名,diff 直接 fatal。
+                "--no-ext-diff", "--no-textconv",
             ])
             entries = GitDiffParser.parse(output: output)
         } catch {
@@ -2174,6 +2212,7 @@ struct GitService: GitServicing {
             let rawOutput = try await runGitOutput(arguments: [
                 "-c", "core.quotepath=false",
                 "-C", directory, "diff", "--numstat", "-p", "--no-color",
+                "--no-ext-diff", "--no-textconv",
             ])
             entries = GitDiffParser.parse(output: rawOutput)
         }
@@ -2209,6 +2248,7 @@ struct GitService: GitServicing {
                             arguments: [
                                 "-c", "core.quotepath=false",
                                 "-C", directory, "diff", "--no-index", "--numstat", "-p", "--no-color",
+                                "--no-ext-diff", "--no-textconv",
                                 "--", "/dev/null", item.file,
                             ],
                             allowedExitCodes: [0, 1]
@@ -2273,6 +2313,7 @@ struct GitService: GitServicing {
             arguments: [
                 "-c", "core.quotepath=false",
                 "-C", directory, "show", "--first-parent", "--numstat", "-p", "--no-color",
+                "--no-ext-diff", "--no-textconv",
                 "--format=", "--end-of-options", hash,
             ],
             allowedExitCodes: [0, 1]
@@ -2329,6 +2370,7 @@ struct GitService: GitServicing {
             arguments: [
                 "-c", "core.quotepath=false",
                 "-C", directory, "diff", "--numstat", "-p", "--no-color", range,
+                "--no-ext-diff", "--no-textconv",
             ],
             allowedExitCodes: [0, 1]
         )
@@ -2400,15 +2442,15 @@ struct GitService: GitServicing {
 
     /// 列出本地已有的远端跟踪分支(`git for-each-ref refs/remotes`,如 origin/main);
     /// 只读本地引用,不联网。排除 origin/HEAD 这类符号引用。
-    /// 读取失败与"无远端"都返回 []:与 branches/stashList 同款取舍,不为只读路径引入 throwing 接口。
-    func remoteTrackingBranches(in directory: String) async -> [String] {
+    /// `nil` = 读取失败,`[]` = 确无远端跟踪分支(口径见协议声明)。
+    func remoteTrackingBranches(in directory: String) async -> [String]? {
         guard let output = await readGitOutput(operation: "remote-tracking-branches", arguments: [
             "-C", directory,
             "for-each-ref",
             "--format=%(refname:short)",
             "refs/remotes",
         ]) else {
-            return []
+            return nil
         }
         // 符号引用 refs/remotes/origin/HEAD 的 refname:short 是 "origin"(不带 /HEAD),
         // 统一按"必须含 /"过滤掉远端名裸条目。

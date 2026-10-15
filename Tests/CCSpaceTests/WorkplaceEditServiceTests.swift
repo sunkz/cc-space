@@ -46,7 +46,7 @@ private actor WorkplaceEditGitServiceSpy: GitServicing {
             hasUncommittedChanges: false
         )
     }
-    func branches(in directory: String) async -> [String] { ["main"] }
+    func branches(in directory: String) async -> [String]? { ["main"] }
     func remoteURL(in directory: String) async -> String? { "git@github.com:test/repo.git" }
 
     func checkoutBranch(_ branch: String, in directory: String) async throws {
@@ -900,5 +900,160 @@ final class WorkplaceEditServiceTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? LocalPathSafetyError, .unsafeManagedPath)
         }
+    }
+
+    /// 编辑窗口(克隆/切分支可达数分钟)内的并发写入不能被入口快照覆盖回去:
+    /// ① 用户从侧栏置顶工作区、给某行勾选仓库置顶(都是整条写盘);
+    /// ② 后台 pull 收口写的 lastSyncedAt/status。
+    /// 编辑落库若按入口快照整条/整表回写,这些操作被静默抹掉,
+    /// 用户只会"发现某次置顶过又没了",完全无从归因。
+    func test_saveWorkplaceEditPreservesConcurrentWritesDuringEditWindow() async throws {
+        let stores = try makeServiceStores()
+        let repositoryStore = stores.repositoryStore
+        let workplaceStore = stores.workplaceStore
+        let workspaceRoot = stores.workspaceRoot
+
+        try repositoryStore.addRepository(gitURL: "git@github.com:org/api.git")
+        try repositoryStore.addRepository(gitURL: "git@github.com:org/web.git")
+        let apiRepository = try XCTUnwrap(repositoryStore.repositories.first { $0.repoName == "api" })
+        let webRepository = try XCTUnwrap(repositoryStore.repositories.first { $0.repoName == "web" })
+        let workplace = try workplaceStore.createWorkplace(
+            name: "ios-dev",
+            rootPath: workspaceRoot.path,
+            selectedRepositories: [apiRepository]
+        )
+        try FileManager.default.createDirectory(atPath: workplace.path, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            atPath: URL(fileURLWithPath: workplace.path).appendingPathComponent("api").path,
+            withIntermediateDirectories: true
+        )
+        var apiState = try XCTUnwrap(
+            workplaceStore.syncStates.first {
+                $0.workplaceID == workplace.id && $0.repositoryID == apiRepository.id
+            }
+        )
+        apiState.status = .success
+        apiState.hasLocalDirectory = true
+        workplaceStore.updateSyncState(apiState)
+
+        let gitService = WorkplaceEditGitServiceSpy()
+        let service = WorkplaceEditService(
+            workplaceStore: workplaceStore,
+            repositoryStore: repositoryStore,
+            syncCoordinator: SyncCoordinator(gitService: gitService),
+            gitService: gitService
+        )
+
+        let concurrentSyncedAt = Date(timeIntervalSince1970: 1_900_000_000)
+        var injectionFailures: [String] = []
+        var didInject = false
+
+        try await service.saveWorkplaceEdit(
+            workplaceID: workplace.id,
+            name: "ios-dev",
+            selectedRepositoryIDs: [apiRepository.id, webRepository.id],
+            branch: "release",
+            progressHandler: { _ in
+                guard didInject == false else { return }
+                didInject = true
+                do {
+                    try workplaceStore.setPinned(true, for: workplace.id)
+                    try workplaceStore.setRepositoryPinned(
+                        true,
+                        repositoryID: apiRepository.id,
+                        in: workplace.id
+                    )
+                } catch {
+                    injectionFailures.append("置顶写入失败: \(error.localizedDescription)")
+                }
+                if var row = workplaceStore.syncStates.first(where: {
+                    $0.workplaceID == workplace.id && $0.repositoryID == apiRepository.id
+                }) {
+                    row.lastSyncedAt = concurrentSyncedAt
+                    row.status = .success
+                    workplaceStore.updateSyncStates([row])
+                } else {
+                    injectionFailures.append("注入时找不到 api 行")
+                }
+            }
+        )
+
+        XCTAssertTrue(injectionFailures.isEmpty, injectionFailures.joined(separator: "; "))
+
+        let updatedWorkplace = try XCTUnwrap(workplaceStore.workplaces.first { $0.id == workplace.id })
+        XCTAssertTrue(updatedWorkplace.isPinned, "编辑期间的置顶被入口快照覆盖回去")
+        XCTAssertEqual(
+            updatedWorkplace.pinnedRepositoryIDs,
+            [apiRepository.id],
+            "编辑期间的仓库置顶被入口快照覆盖回去"
+        )
+
+        let persistedAPIRow = try XCTUnwrap(
+            workplaceStore.syncStates.first {
+                $0.workplaceID == workplace.id && $0.repositoryID == apiRepository.id
+            }
+        )
+        XCTAssertEqual(
+            persistedAPIRow.lastSyncedAt,
+            concurrentSyncedAt,
+            "编辑期间后台 pull 写的 lastSyncedAt 被整行覆盖回旧值(lost update)"
+        )
+        // 本轮编辑自己的成果同时必须成立,不能为了保并发写入把编辑结果丢掉。
+        XCTAssertEqual(updatedWorkplace.selectedRepositoryIDs.count, 2)
+        XCTAssertTrue(
+            workplaceStore.syncStates.contains {
+                $0.workplaceID == workplace.id && $0.repositoryID == webRepository.id
+            },
+            "新增仓库的克隆结果必须照常落库"
+        )
+    }
+
+    /// 编辑期间仓库被从池里删除,写回不得复活那条已不存在的引用
+    /// (悬空引用没有任何 UI 入口能清掉,行会一直显示"仓库缺失")。
+    func test_saveWorkplaceEditDropsReferencesRemovedFromPool() async throws {
+        let stores = try makeServiceStores()
+        let repositoryStore = stores.repositoryStore
+        let workplaceStore = stores.workplaceStore
+        let workspaceRoot = stores.workspaceRoot
+
+        try repositoryStore.addRepository(gitURL: "git@github.com:org/api.git")
+        try repositoryStore.addRepository(gitURL: "git@github.com:org/web.git")
+        let apiRepository = try XCTUnwrap(repositoryStore.repositories.first { $0.repoName == "api" })
+        let webRepository = try XCTUnwrap(repositoryStore.repositories.first { $0.repoName == "web" })
+        let workplace = try workplaceStore.createWorkplace(
+            name: "ios-dev",
+            rootPath: workspaceRoot.path,
+            selectedRepositories: [apiRepository, webRepository]
+        )
+        try FileManager.default.createDirectory(atPath: workplace.path, withIntermediateDirectories: true)
+
+        // 对话框仍按打开时的清单提交,但 web 已不在池里(removeRepository 摘过引用)。
+        try repositoryStore.removeRepository(id: webRepository.id, workplaceStore: workplaceStore)
+
+        let gitService = WorkplaceEditGitServiceSpy()
+        let service = WorkplaceEditService(
+            workplaceStore: workplaceStore,
+            repositoryStore: repositoryStore,
+            syncCoordinator: SyncCoordinator(gitService: gitService),
+            gitService: gitService
+        )
+
+        try await service.saveWorkplaceEdit(
+            workplaceID: workplace.id,
+            name: "ios-dev",
+            selectedRepositoryIDs: [apiRepository.id, webRepository.id],
+            branch: nil
+        )
+
+        let updatedWorkplace = try XCTUnwrap(workplaceStore.workplaces.first { $0.id == workplace.id })
+        XCTAssertEqual(
+            updatedWorkplace.selectedRepositoryIDs,
+            [apiRepository.id],
+            "已被删除的仓库被写回成悬空引用"
+        )
+        XCTAssertFalse(
+            workplaceStore.syncStates.contains { $0.repositoryID == webRepository.id },
+            "不得为已删除的仓库重新生成 sync state 行"
+        )
     }
 }

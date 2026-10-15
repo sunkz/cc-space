@@ -76,7 +76,10 @@ final class GitWorktreeCancellationRestoreTests: XCTestCase {
             encoding: .utf8
         )
         XCTAssertEqual(restored, "dirty change\n", "取消后本地改动必须回到工作区")
-        let stashEntries = await service.stashList(in: env.repository.path)
+        let rawrawstashEntries = await service.stashList(in: env.repository.path)
+        let rawstashEntries = try XCTUnwrap(rawrawstashEntries, "只读查询失败被折成 nil,测试不能按空集合断言")
+
+        let stashEntries = try XCTUnwrap(rawstashEntries)
         XCTAssertTrue(stashEntries.isEmpty, "自动暂存必须已弹出,不得滞留 stash 栈")
 
         // ② 错误准确:原样上抛取消错误,而不是恢复失败的包装/误导文案。
@@ -145,7 +148,9 @@ final class GitWorktreeCancellationRestoreTests: XCTestCase {
             encoding: .utf8
         )
         XCTAssertEqual(restored, "dirty change\n", "body 抛错后本地改动必须回到工作区")
-        let stashEntries = await service.stashList(in: env.repository.path)
+        let rawrawStashEntries = await service.stashList(in: env.repository.path)
+        let rawStashEntries = try XCTUnwrap(rawrawStashEntries, "只读查询失败被折成 nil,测试不能按空集合断言")
+        let stashEntries = try XCTUnwrap(rawStashEntries, "stash 列表读取失败,不能按「无 stash」断言")
         XCTAssertTrue(stashEntries.isEmpty, "自动暂存必须已弹出,不得滞留 stash 栈")
         XCTAssertTrue(error is CancellationError, "应原样上抛 CancellationError,实际:\(error)")
         XCTAssertEqual(UserFacingError.message(for: error), "操作已取消")

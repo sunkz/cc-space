@@ -27,8 +27,9 @@ final class ConcurrencyUtilitiesTests: XCTestCase {
         try await lock.acquire(path: "/tmp/repo-b")
 
         let waiter = Task { try await lock.acquire(path: "/tmp/repo-b") }
-        // 让等待任务先注册进 waiters。
-        try await Task.sleep(for: .milliseconds(50))
+        // 确定性等到 waiter 真的注册进 waiters,而不是睡 50ms 碰运气:
+        // 没注册就 cancel,取消打在"尚未等待"的路径上,断言会以另一种原因通过(假绿)。
+        try await waitUntilInFlight(lock: lock, path: "/tmp/repo-b")
         waiter.cancel()
 
         do {
@@ -52,6 +53,9 @@ final class ConcurrencyUtilitiesTests: XCTestCase {
                 try? await lock.acquire(path: child)
                 await waiterFinished.mark()
             }
+            // 先确认 waiter 已进等待队列:否则下面的"窗口内未完成"是空转结论,
+            // waiter 根本没起跳也会让断言变绿。
+            try await waitUntilInFlight(lock: lock, path: child)
             // 非阻塞轮询一小段:期间 waiter 绝不能完成(完成=死锁/漏互斥)。
             for _ in 0..<10 {
                 try? await Task.sleep(for: .milliseconds(20))
@@ -201,7 +205,7 @@ final class ConcurrencyUtilitiesTests: XCTestCase {
         )
     }
 
-    func test_inFlightPathKeysIncludesActiveAndWaitingNormalizedKeys() async throws {
+        func test_inFlightPathKeysIncludesActiveAndWaitingNormalizedKeys() async throws {
         let lock = RepositoryOperationLock()
         let plain = "/tmp/ccspace-inflight/alpha"
         let variant = "/tmp/ccspace-inflight/alpha/"
@@ -354,4 +358,24 @@ private actor WaitFlag {
     func mark() { set = true }
 
     func isSet() -> Bool { set }
+}
+
+/// 轮询直到 `path` 的 canonical key 出现在锁的在飞集合里(含正在等的人)。
+///
+/// 用公开状态代替固定 sleep:把"睡 20/50ms 后大概已经注册上了"变成确定前提,
+/// 超时显式失败——否则后面的"窗口内没完成"这类负断言会在 waiter 从未入队时空转假绿。
+/// 文件级函数:调用点有 @Sendable 闭包,实例方法会捕获非 Sendable 的 self。
+private func waitUntilInFlight(
+    lock: RepositoryOperationLock,
+    path: String,
+    timeout: TimeInterval = 2
+) async throws {
+    let key = LocalPathSafety.canonicalLockKey(for: path)
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        let keys = await lock.inFlightPathKeys()
+        if keys.contains(key) { return }
+        try? await Task.sleep(for: .milliseconds(5))
+    }
+    XCTFail("等待锁的调用在 \(timeout)s 内未进入在飞集合,后续断言的前提不成立:\(path)")
 }

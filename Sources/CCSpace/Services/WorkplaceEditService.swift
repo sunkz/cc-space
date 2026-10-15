@@ -66,6 +66,12 @@ struct WorkplaceEditService {
         guard let originalWorkplace = workplaceStore.workplaces.first(where: { $0.id == workplaceID }) else {
             throw WorkplaceStoreError.workplaceNotFound
         }
+        // 勾选清单按**当前仓库池**过滤后再参与差异计算:对话框打开期间池里可能删掉了
+        // 某个仓库(removeRepository 会摘引用),把对话框里的旧 id 原样写回等于
+        // 亲手复活一个悬空引用——之后没有任何 UI 入口能清掉它,行也会一直显示"仓库缺失"。
+        // 过滤放在差异计算之前,保证 removed/added 集合与最终写入的清单是同一口径。
+        let liveRepositoryIDs = Set(repositoryStore.repositories.map(\.id))
+        let selectedRepositoryIDs = selectedRepositoryIDs.filter { liveRepositoryIDs.contains($0) }
         guard selectedRepositoryIDs.isEmpty == false else { throw WorkplaceStoreError.noRepositoriesSelected }
         let validatedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedBranch = branch?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -332,7 +338,31 @@ struct WorkplaceEditService {
                 }
             }
 
-            try workplaceStore.applyWorkplaceEdit(updatedWorkplace, syncStates: retainedStates)
+            // 落库前把本轮结果与 Store 的**最新行**做字段增量合并(复用后台收口同一
+            // 口径 `RepositorySyncState.merging`)。retainedStates 全部派生自入口快照
+            // originalStates,而克隆/切分支要跑数分钟,期间磁盘刷新校正的
+            // hasLocalDirectory、后台 pull 落库的 lastSyncedAt/status/lastError
+            // 都会被"整工作区行集合整体替换"覆盖回操作前的旧值(lost update)。
+            // localPath 是例外:改名/移动由本操作拥有,merging 的增量字段不含它,
+            // 必须在本轮结果路径上落笔,否则改名后行仍指向旧目录。
+            let liveStates = workplaceStore.syncStates.filter { $0.workplaceID == workplaceID }
+            let mergedStates: [RepositorySyncState] = retainedStates.map { updated in
+                guard let original = originalStates.first(where: { $0.repositoryID == updated.repositoryID }),
+                      let latest = liveStates.first(where: { $0.repositoryID == updated.repositoryID }) else {
+                    // 本轮新增的行(克隆产出)在 Store 里还没有对照,原样写入。
+                    return updated
+                }
+                var merged = RepositorySyncState.merging(
+                    updated: updated,
+                    onto: original,
+                    in: latest,
+                    premarkedTransient: nil
+                ) ?? latest
+                merged.localPath = updated.localPath
+                return merged
+            }
+
+            try workplaceStore.applyWorkplaceEdit(updatedWorkplace, syncStates: mergedStates)
             // 暂存根目录里可能装着多棵被移出的仓库树,递归删除移出主线程。
             await Self.removeItemOffMainThread(
                 syncCoordinator.fileSystemService,

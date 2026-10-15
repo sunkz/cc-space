@@ -1363,7 +1363,103 @@ final class WorkplaceStoreTests: XCTestCase {
         XCTAssertTrue(result.changed)
     }
 
-    /// 解码失败时原文件必须被改名保全,否则下次保存会用空数据覆写导致原内容不可恢复。
+    /// 全缺普查必须在"在飞豁免剔除"**之前**做。
+    ///
+    /// 事故形态:NAS/外置盘弹出这一轮,所有工作区目录同时不可达。只要恰好有
+    /// 1 个工作区在飞(克隆/pull 进行中),旧顺序会先把它剔出候选、再拿剩下的
+    /// 数量去比总数 → 判定"不是全缺" → 其余记录被当成用户主动删除而**整库清掉**
+    /// (连 sync states 一起),磁盘上其实什么都没删。豁免本是给误删兜底的,
+    /// 不能反过来击穿兜底。
+    func test_diskRefreshResultKeepsWholeLibraryWhenAllMissingWithOneInFlight() throws {
+        let rootURL = tempRoot()
+        try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+
+        // 两个工作区的目录都不在盘上(整卷不可达)。
+        let inFlightID = UUID()
+        let otherID = UUID()
+        let repositoryID = UUID()
+        let workplaces = [
+            Workplace(
+                id: inFlightID,
+                name: "pulling",
+                path: rootURL.appendingPathComponent("pulling").path,
+                selectedRepositoryIDs: [repositoryID],
+                createdAt: .now,
+                updatedAt: .now
+            ),
+            Workplace(
+                id: otherID,
+                name: "quiet",
+                path: rootURL.appendingPathComponent("quiet").path,
+                selectedRepositoryIDs: [],
+                createdAt: .now,
+                updatedAt: .now
+            )
+        ]
+        let syncStates = [RepositorySyncState(
+            workplaceID: inFlightID,
+            repositoryID: repositoryID,
+            status: .pulling,
+            localPath: rootURL.appendingPathComponent("pulling/api").path
+        )]
+
+        let result = WorkplaceStore.diskRefreshResult(
+            workplaces: workplaces,
+            syncStates: syncStates,
+            rootPath: rootURL.path
+        )
+
+        XCTAssertEqual(
+            result.workplaces.count, 2,
+            "有 1 个在飞时也必须识别出「整卷不可达」,不得整库清记录"
+        )
+        XCTAssertEqual(result.syncStates.count, 1)
+        XCTAssertFalse(result.changed)
+    }
+
+    /// 反向边界:并非全缺(还有一个工作区在盘上)时,单个缺失的工作区照旧清理,
+    /// 而它的 sync states 一并移除——保证上一条的保护没有把正常删除也一并挡掉。
+    func test_diskRefreshResultStillCleansOneMissingWhenAnotherExists() throws {
+        let rootURL = tempRoot()
+        let keptURL = rootURL.appendingPathComponent("kept")
+        try FileManager.default.createDirectory(at: keptURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+
+        let keptID = UUID()
+        let goneID = UUID()
+        let repositoryID = UUID()
+        let workplaces = [
+            Workplace(
+                id: keptID, name: "kept", path: keptURL.path,
+                selectedRepositoryIDs: [], createdAt: .now, updatedAt: .now
+            ),
+            Workplace(
+                id: goneID, name: "gone",
+                path: rootURL.appendingPathComponent("gone").path,
+                selectedRepositoryIDs: [repositoryID],
+                createdAt: .now, updatedAt: .now
+            )
+        ]
+        let syncStates = [RepositorySyncState(
+            workplaceID: goneID,
+            repositoryID: repositoryID,
+            status: .idle,
+            localPath: rootURL.appendingPathComponent("gone/api").path
+        )]
+
+        let result = WorkplaceStore.diskRefreshResult(
+            workplaces: workplaces,
+            syncStates: syncStates,
+            rootPath: rootURL.path
+        )
+
+        XCTAssertEqual(result.workplaces.map(\.id), [keptID])
+        XCTAssertTrue(result.syncStates.isEmpty, "被删工作区的行必须一并清掉")
+        XCTAssertTrue(result.changed)
+    }
+
+        /// 解码失败时原文件必须被改名保全,否则下次保存会用空数据覆写导致原内容不可恢复。
     func test_corruptWorkplacesFileIsPreservedAsideAndResetInMemory() throws {
         let root = tempRoot()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

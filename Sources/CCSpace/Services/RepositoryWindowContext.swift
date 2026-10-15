@@ -45,12 +45,17 @@ final class RepositoryWindowContext: ObservableObject {
     // MARK: - 分支上下文
 
     /// 一次分支上下文取数的快照,由窗口在完成回调里消费。
+    ///
+    /// `branches`/`remoteTrackingBranches`/`metadata` 为 nil 表示**这一项读取失败**
+    /// (超时/输出超限/进程起不来),空值是"仓库确实没有"。消费方必须按此区分:
+    /// 失败时保留上一轮结果,不能把一次超时渲染成"这个仓库一个分支都没有"。
     struct BranchContextSnapshot {
-        let branches: [String]
-        let remoteTrackingBranches: [String]
+        let branches: [String]?
+        let remoteTrackingBranches: [String]?
         let currentBranch: String?
         let defaultBranch: String?
         /// 全部本地分支元数据;仅提交记录窗口需要,不需要时为 nil(省一次 for-each-ref 扫描)。
+        /// 需要但未取到(读取失败)同样是 nil——消费方保留上一轮元数据即可。
         let metadata: [String: GitBranchMetadata]?
     }
 
@@ -94,6 +99,69 @@ final class RepositoryWindowContext: ObservableObject {
     }
 
     // MARK: - 分支比较 diff
+
+    /// diff 来源:与 Diff 窗口 payload 的 `Source` 同形,但由 Service 层自己定义
+    /// (payload 类型留在 Views,由 View 侧做映射,避免本层反向依赖 Views)。
+    ///
+    /// View 把自己的 payload source 映射成这里即可,`RepositoryWindowContext`
+    /// 反过来依赖 Views 的类型会构成层倒置。
+    enum DiffSource: Sendable {
+        case workingDirectory
+        case commit(hash: String)
+        /// base → head;head 为 nil 表示仓库未检出分支(detached HEAD)。
+        case compare(base: String, head: String?)
+    }
+
+    /// 按来源加载文件级 diff:工作区 / 单提交 / 分支对比。
+    /// 三个 git 调用点此前散在 DiffWindowView 的 body 里,View 直接持有 GitServicing,
+    /// 违反 AGENTS.md 的依赖方向(View 不直接调 git);收进本类型后与
+    /// `loadCompareDiff`/提交列表共用同一入口、同一取消与代际约定。
+    func loadDiff(directory: String, source: DiffSource) async throws -> [GitDiffEntry] {
+        switch source {
+        case .workingDirectory:
+            return try await gitService.diffWorkingDirectory(in: directory)
+        case .commit(let hash):
+            return try await gitService.diffCommit(hash: hash, in: directory)
+        case .compare(let base, let head):
+            return try await gitService.diffBranches(base: base, head: head ?? "", in: directory)
+        }
+    }
+
+    /// 当前分支(供 View 决定比较侧与「展示所有行」的新侧来源)。
+    func currentBranch(directory: String) async -> String? {
+        await gitService.currentBranch(in: directory)
+    }
+
+    /// 单个提交的完整详情(提交记录窗口展开单行/全部展开共用)。
+    func commitDetail(hash: String, directory: String) async -> GitCommitDetail? {
+        await gitService.commitDetail(hash: hash, in: directory)
+    }
+
+    /// 最近提交主题(AI 生成提交信息的语言/风格参考)。
+    func recentCommitSubjects(directory: String, count: Int) async -> [String] {
+        await gitService.recentCommits(in: directory, count: count).map(\.subject)
+    }
+
+    /// 「展示所有行」的新侧全文:来源策略解析(head 是否等于当前分支 → 读磁盘还是 blob)、
+    /// currentBranch 探测与重 IO 全部收在 Service 层,View 只提供 entry 与来源。
+    func fullFileContent(
+        entry: GitDiffEntry,
+        directory: String,
+        source: DiffSource
+    ) async -> String? {
+        var currentBranch: String?
+        if case .compare = source {
+            currentBranch = await gitService.currentBranch(in: directory)
+        }
+        guard let strategy = DiffFullFileContentStrategy.resolve(
+            diffSource: source,
+            currentBranch: currentBranch
+        ) else { return nil }
+        let service = gitService
+        return await Task.detached(priority: .userInitiated) {
+            await strategy.fileContent(entry: entry, localPath: directory, gitService: service)
+        }.value
+    }
 
     /// 分支比较 diff 的加载结果:成功携带 entries 与分歧统计;失败带用户文案;
     /// 取消(窗口关闭/payload 更换)不算失败,completion 根本不被调用,静默忽略。

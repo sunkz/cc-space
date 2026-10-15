@@ -42,6 +42,10 @@ struct DiffViewerView: View {
     private static let listPadding = EdgeInsets(top: 1, leading: 12, bottom: 12, trailing: 12)
 
     /// 与 `diffs` 一一对应的稳定展开键(见 `DiffExpansionKeys`)。
+    ///
+    /// O(n) 且要建计数字典:上千文件的 diff 上,一次 body 求值里若被重复计算
+    /// (工具栏的图标/提示/动作三处 + 列表 + 批量切换)就是 5n 次字符串散列。
+    /// 因此 body 只求一次,再把这个 `let` 往下传,不要让各计算属性各自算。
     private var expansionKeys: [String] {
         DiffExpansionKeys.make(for: diffs)
     }
@@ -56,12 +60,16 @@ struct DiffViewerView: View {
         return showAllLines ? "隐藏未更改的行" : "展示所有行"
     }
 
-    private var allExpanded: Bool {
-        expansionKeys.allSatisfy { isExpanded(key: $0) }
+    private func allExpanded(keys: [String]) -> Bool {
+        keys.allSatisfy { isExpanded(key: $0) }
     }
 
     var body: some View {
         ScrollViewReader { proxy in
+            // 一次 body 求值只算一份稳定展开键,工具栏与列表共用。
+            // 放在这里而不是各自走 `expansionKeys`:O(n) 的字典构建在上千文件的
+            // diff 上按调用次数线性叠加。
+            let keys = expansionKeys
             Group {
                 if isLoading {
                     loadingView
@@ -70,7 +78,7 @@ struct DiffViewerView: View {
                 } else if diffs.isEmpty {
                     emptyView
                 } else {
-                    diffList
+                    diffList(keys: keys)
                 }
             }
             .frame(
@@ -86,13 +94,13 @@ struct DiffViewerView: View {
             .navigationTitle(repositoryName)
             .navigationSubtitle(title)
             .toolbar {
-                toolbarContent(proxy: proxy)
+                toolbarContent(proxy: proxy, keys: keys)
             }
         }
     }
 
     @ToolbarContentBuilder
-    private func toolbarContent(proxy: ScrollViewProxy) -> some ToolbarContent {
+    private func toolbarContent(proxy: ScrollViewProxy, keys: [String]) -> some ToolbarContent {
         if toolbarLeadingSeparator {
             // macOS 26 玻璃容器会把连续的普通按钮并进同一颗胶囊;ToolbarSpacer
             // 是官方间隔,让 diff 控件组与前方的分支 chip 组分成两颗胶囊。
@@ -127,12 +135,15 @@ struct DiffViewerView: View {
                 .disabled(diffs.isEmpty || fullFileContent == nil)
                 .ccspaceQuickHelp(fullFileToggleHelp, providesLabel: true)
                 Button {
-                    toggleAll(!allExpanded, proxy: proxy)
+                    toggleAll(!allExpanded(keys: keys), keys: keys, proxy: proxy)
                 } label: {
-                    Image(systemName: allExpanded ? "rectangle.compress.vertical" : "rectangle.expand.vertical")
+                    Image(systemName: allExpanded(keys: keys) ? "rectangle.compress.vertical" : "rectangle.expand.vertical")
                 }
                 .disabled(diffs.isEmpty)
-                .ccspaceQuickHelp(allExpanded ? "全部折叠" : "全部展开", providesLabel: true)
+                .ccspaceQuickHelp(
+                    allExpanded(keys: keys) ? "全部折叠" : "全部展开",
+                    providesLabel: true
+                )
             }
         }
     }
@@ -185,9 +196,8 @@ struct DiffViewerView: View {
         .padding(.horizontal, 12)
     }
 
-    private var diffList: some View {
-        let keys = expansionKeys
-        return ScrollView {
+    private func diffList(keys: [String]) -> some View {
+        ScrollView {
             LazyVStack(alignment: .leading, spacing: 10) {
                 Color.clear
                     .frame(height: 0)
@@ -217,9 +227,9 @@ struct DiffViewerView: View {
     ///
     /// 批量切换会让内容总高度剧变,LazyVStack 收缩期间滚动位置会悬空、留下大片空白,
     /// 因此切换后主动动画回到顶部。
-    private func toggleAll(_ expanded: Bool, proxy: ScrollViewProxy) {
+    private func toggleAll(_ expanded: Bool, keys: [String], proxy: ScrollViewProxy) {
         withAnimation(.snappy(duration: 0.25)) {
-            for key in expansionKeys {
+            for key in keys {
                 expandedStates[key] = expanded
             }
             proxy.scrollTo(Self.listTopAnchorID, anchor: .top)
@@ -503,6 +513,9 @@ private struct DiffFileCard: View {
     }
 
     /// 根据 showAllLines 过滤后的行:开 = 全文件,关 = 仅改动行。
+    ///
+    /// 每次 body 求值只算一次(`patchContent` 内单一访问点),且上游 `parsedPatch`
+    /// 已由 `PatchParseMemo` 缓存,不重复解析补丁文本。
     /// 全文取到之前先按 patch 行展示,内容到达后自动补全(hunk 间行是在容器里追加的)。
     private var filteredLines: [DiffPatchLine] {
         if showAllLines {

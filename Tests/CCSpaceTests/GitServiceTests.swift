@@ -855,7 +855,10 @@ final class GitServiceTests: XCTestCase {
         _ = try shell(["git", "-C", repository.path, "commit", "-m", "init"])
 
         let service = makeIsolatedService()
-        let emptyList = await service.stashList(in: repository.path)
+        let rawrawemptyList = await service.stashList(in: repository.path)
+        let rawemptyList = try XCTUnwrap(rawrawemptyList, "只读查询失败被折成 nil,测试不能按空集合断言")
+
+        let emptyList = try XCTUnwrap(rawemptyList)
         XCTAssertTrue(emptyList.isEmpty)
 
         // 第一条 Stash:修改 README。
@@ -870,7 +873,10 @@ final class GitServiceTests: XCTestCase {
         try await service.stashPush(in: repository.path, message: "CCSpace manual stash second")
 
         // git 会为 stash subject 加 "On <branch>: " 前缀。
-        let entries = await service.stashList(in: repository.path)
+        let rawrawentries = await service.stashList(in: repository.path)
+        let rawentries = try XCTUnwrap(rawrawentries, "只读查询失败被折成 nil,测试不能按空集合断言")
+
+        let entries = try XCTUnwrap(rawentries)
         XCTAssertEqual(entries.count, 2)
         // stash@{0} 是最新的一条。
         XCTAssertEqual(entries[0].index, 0)
@@ -882,13 +888,19 @@ final class GitServiceTests: XCTestCase {
         try await service.popStash(at: 1, in: repository.path)
         let restoredStatus = try shell(["git", "-C", repository.path, "status", "--porcelain"])
         XCTAssertTrue(restoredStatus.contains("M README.md"))
-        let afterPop = await service.stashList(in: repository.path)
+        let rawrawafterPop = await service.stashList(in: repository.path)
+        let rawafterPop = try XCTUnwrap(rawrawafterPop, "只读查询失败被折成 nil,测试不能按空集合断言")
+
+        let afterPop = try XCTUnwrap(rawafterPop)
         XCTAssertEqual(afterPop.count, 1)
         XCTAssertEqual(afterPop[0].message, "On main: CCSpace manual stash second")
 
         // drop stash@{0}:列表清空。
         try await service.dropStash(at: 0, in: repository.path)
-        let afterDrop = await service.stashList(in: repository.path)
+        let rawrawafterDrop = await service.stashList(in: repository.path)
+        let rawafterDrop = try XCTUnwrap(rawrawafterDrop, "只读查询失败被折成 nil,测试不能按空集合断言")
+
+        let afterDrop = try XCTUnwrap(rawafterDrop)
         XCTAssertTrue(afterDrop.isEmpty)
     }
 
@@ -1509,7 +1521,10 @@ final class GitServiceTests: XCTestCase {
         _ = try shell(["git", "-C", source.path, "checkout", "-b", "feature/no-upstream"])
 
         let service = makeIsolatedService()
-        let metadata = await service.branchMetadata(in: source.path)
+        let rawrawmetadata = await service.branchMetadata(in: source.path)
+        let rawmetadata = try XCTUnwrap(rawrawmetadata, "只读查询失败被折成 nil,测试不能按空集合断言")
+
+        let metadata = try XCTUnwrap(rawmetadata)
 
         XCTAssertEqual(metadata["main"]?.aheadCount, 1)
         XCTAssertEqual(metadata["main"]?.behindCount, 1)
@@ -1670,14 +1685,20 @@ final class GitServiceTests: XCTestCase {
             return
         }
         XCTAssertNotNil(stashedSHA, "新建了暂存就应记录到栈顶 SHA")
-        let listBefore = await service.stashList(in: repository.path)
+        let rawrawlistBefore = await service.stashList(in: repository.path)
+        let rawlistBefore = try XCTUnwrap(rawrawlistBefore, "只读查询失败被折成 nil,测试不能按空集合断言")
+
+        let listBefore = try XCTUnwrap(rawlistBefore)
         XCTAssertEqual(listBefore.count, 1)
 
         try await service.trackedStashRestore(sha: token, in: repository.path)
 
         let content = try String(contentsOf: repository.appendingPathComponent("README.md"), encoding: .utf8)
         XCTAssertEqual(content, "temp change")
-        let listAfter = await service.stashList(in: repository.path)
+        let rawrawlistAfter = await service.stashList(in: repository.path)
+        let rawlistAfter = try XCTUnwrap(rawrawlistAfter, "只读查询失败被折成 nil,测试不能按空集合断言")
+
+        let listAfter = try XCTUnwrap(rawlistAfter)
         XCTAssertTrue(listAfter.isEmpty, "栈顶仍是本次暂存时应 pop(不留冗余条目)")
     }
 
@@ -1701,7 +1722,8 @@ final class GitServiceTests: XCTestCase {
             "git", "-C", repository.path,
             "stash", "push", "--include-untracked", "--message", "user stash",
         ])
-        let listMid = await service.stashList(in: repository.path)
+        let rawlistMid = await service.stashList(in: repository.path)
+        let listMid = try XCTUnwrap(rawlistMid, "只读查询失败被折成 nil,测试不能按空集合断言")
         XCTAssertEqual(listMid.count, 2)
 
         try await service.trackedStashRestore(sha: token, in: repository.path)
@@ -1709,7 +1731,8 @@ final class GitServiceTests: XCTestCase {
         // 我们的改动回来了,但不是以"弹掉栈顶"的方式:
         let content = try String(contentsOf: repository.appendingPathComponent("README.md"), encoding: .utf8)
         XCTAssertEqual(content, "temp change")
-        let listAfter = await service.stashList(in: repository.path)
+        let rawlistAfter = await service.stashList(in: repository.path)
+        let listAfter = try XCTUnwrap(rawlistAfter, "只读查询失败被折成 nil,测试不能按空集合断言")
         XCTAssertEqual(listAfter.count, 2, "错位时只 apply 不 drop:弹错/删错别人的 stash 比留一条冗余严重")
         XCTAssertTrue(listAfter[0].message.contains("user stash"), "用户的栈顶条目必须原样在位")
         // 且工作树里没有混入 user stash 的内容:
@@ -1734,7 +1757,8 @@ final class GitServiceTests: XCTestCase {
 
         let content = try String(contentsOf: repository.appendingPathComponent("README.md"), encoding: .utf8)
         XCTAssertEqual(content, "auto stashed change", "自动暂存必须按 SHA 找回,而不是弹走用户的栈顶")
-        let entries = await service.stashList(in: repository.path)
+        let rawentries = await service.stashList(in: repository.path)
+        let entries = try XCTUnwrap(rawentries, "只读查询失败被折成 nil,测试不能按空集合断言")
         XCTAssertEqual(entries.count, 2)
         XCTAssertTrue(entries[0].message.contains("user stash"))
     }

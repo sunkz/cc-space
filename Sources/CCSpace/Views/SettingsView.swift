@@ -27,6 +27,14 @@ struct SettingsView: View {
     @State private var searchText = ""
     /// 根目录是否真实存在:目录可能在 App 外被移动/删除,进入设置页要能看出来。
     @State private var rootDirectoryExists: Bool
+    /// 首轮存在性探测是否已经完成。
+    ///
+    /// 探测改成后台之后,`rootDirectoryExists` 的初值 false 不再等于"目录不存在",
+    /// 而是"还不知道"。没有这一位的话,每次进入设置页首帧都会把健康的根目录
+    /// 渲染成橙色"目录不存在"告警,探测返回后闪回正常——比原来的主线程 stat 更糟。
+    @State private var rootDirectoryProbeSettled = false
+    /// 存在性探测的代际号:换根/回到前台与进入页面并发时,旧探测结果必须被拦下。
+    @State private var rootDirectoryProbeRequestID = 0
     /// 换根成功后的搬目录辅助;随 saveFeedback 一同收起。
     @State private var rebaseAssist: RebaseAssist?
 
@@ -48,22 +56,34 @@ struct SettingsView: View {
         self._showOnboarding = showOnboarding
         self._hasUnsavedAIChanges = hasUnsavedAIChanges
         self._selectedTab = selectedTab
-        // 首帧即带真实存在性,避免先渲染"正常"再闪成"目录不存在"。
-        _rootDirectoryExists = State(
-            initialValue: Self.directoryExists(settingsStore.settings.workplaceRootPath)
-        )
+        // 初值恒为 false:存在性一律由 `.task(id: savedPath)` 后台探测回写。
+        // 这里原本写 `State(initialValue: Self.directoryExists(...))`,而 SwiftUI 在
+        // 设置页存续期间会反复重建本 View(父级刷新、切页签),每次构造都跑一次
+        // 主线程 `fileExists`——初值除首帧外被丢弃,stat 却照付。根目录可能在
+        // 网盘/外置盘上,单次 stat 就能卡数秒到数分钟(口径同 WorkplaceDetailView
+        // 的后台探测,那边已改成 task(id:) )。
+        // 代价:首帧可能短暂显示"正常",下一轮探测才纠正——比冻结整个 UI 划算。
+        _rootDirectoryExists = State(initialValue: false)
     }
 
     private var savedPath: String {
         settingsStore.settings.workplaceRootPath
     }
 
-    private static func directoryExists(_ path: String) -> Bool {
-        path.isEmpty == false && FileManager.default.fileExists(atPath: path)
+    /// 后台探测目录存在性并写回 @State。
+    /// 代际号拦下过期结果:换根与进入页面两次探测并发时,旧结果不得盖上新路径的结论。
+    private func probeRootDirectoryExists(path: String, requestID: Int) async {
+        let exists = await Task.detached(priority: .utility) {
+            path.isEmpty == false && FileManager.default.fileExists(atPath: path)
+        }.value
+        guard requestID == rootDirectoryProbeRequestID else { return }
+        rootDirectoryExists = exists
+        rootDirectoryProbeSettled = true
     }
 
+    /// "目录不存在"是结论,不是初值:探测未落定前一律按"没有告警"渲染。
     private var rootDirectoryMissing: Bool {
-        savedPath.isEmpty == false && rootDirectoryExists == false
+        savedPath.isEmpty == false && rootDirectoryProbeSettled && rootDirectoryExists == false
     }
 
     var body: some View {
@@ -84,6 +104,10 @@ struct SettingsView: View {
         }
         .ccspaceScreenBackground()
         .navigationTitle("设置")
+        // 进入页面与换根后各探一次存在性;探测走后台线程,body/init 路径零磁盘 IO。
+        .task(id: savedPath) {
+            refreshRootDirectoryExists()
+        }
     }
 
     // MARK: - 通用设置页签
@@ -208,7 +232,10 @@ struct SettingsView: View {
     }
 
     private func refreshRootDirectoryExists() {
-        rootDirectoryExists = Self.directoryExists(savedPath)
+        rootDirectoryProbeRequestID += 1
+        let requestID = rootDirectoryProbeRequestID
+        let path = savedPath
+        Task { await probeRootDirectoryExists(path: path, requestID: requestID) }
     }
 
     // MARK: - 区块
@@ -300,10 +327,6 @@ struct SettingsView: View {
             padding: 12,
             borderOpacity: 0.03
         )
-        .onChange(of: savedPath) { _, _ in
-            // 选择目录(换根)后按新路径重新校验存在性。
-            refreshRootDirectoryExists()
-        }
         .onChange(of: saveFeedback) { _, newFeedback in
             // 提示关闭(手动/自动)后搬目录辅助一并收起。
             if newFeedback == nil { rebaseAssist = nil }

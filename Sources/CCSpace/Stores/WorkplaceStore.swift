@@ -666,7 +666,18 @@ final class WorkplaceStore: ObservableObject {
         }
 
         var updatedWorkplaces = workplaces
+        // **字段所有权**:编辑流程只拥有 name/path/selectedRepositoryIDs/branch。
+        // 其余字段一律取 Store 里的当前值,而不是调用方入口快照带回来的旧值——
+        // 改名+克隆要等数分钟,期间用户在侧栏置顶/归档、行上勾选仓库置顶都会整条写盘,
+        // 这里若整条覆盖回入口快照,那些操作被静默抹掉且没有任何痕迹可查。
+        let current = workplaces[index]
         var sanitizedWorkplace = workplace
+        sanitizedWorkplace.isPinned = current.isPinned
+        sanitizedWorkplace.isArchived = current.isArchived
+        sanitizedWorkplace.pinnedRepositoryIDs = current.pinnedRepositoryIDs
+        sanitizedWorkplace.createdAt = current.createdAt
+        // 置顶清单按**本轮最终勾选**重新收敛:编辑可能摘除了某个仓库,
+        // 保留项里指向已取消勾选仓库的 id 必须跟着摘掉。
         sanitizedWorkplace.pinnedRepositoryIDs = Self.sanitizedPinnedIDs(
             sanitizedWorkplace.pinnedRepositoryIDs,
             against: sanitizedWorkplace.selectedRepositoryIDs

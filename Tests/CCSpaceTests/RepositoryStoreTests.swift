@@ -416,7 +416,7 @@ final class RepositoryStoreTests: XCTestCase {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let kept = RepositoryConfig(
             id: UUID(),
-            gitURL: "git@github.com:org/api.git",
+            gitURL: "https://github.com/org/api",
             repoName: "api",
             mrTargetBranches: ["main"],
             createdAt: now,
@@ -424,7 +424,9 @@ final class RepositoryStoreTests: XCTestCase {
         )
         let dropped = RepositoryConfig(
             id: UUID(),
-            gitURL: "https://github.com/org/api",
+            // 同一远端的另一种写法(尾随 `/` + `.git`):归一化后与上面相等,
+            // 这才是"重复登记",允许字段并入 + 引用重映射。
+            gitURL: "https://github.com/org/api.git/",
             repoName: "api",
             defaultBranch: "master",
             mrTargetBranches: ["main", "dev"],
@@ -438,6 +440,42 @@ final class RepositoryStoreTests: XCTestCase {
         XCTAssertEqual(survivor.defaultBranch, "master", "缺省才回填")
         XCTAssertEqual(survivor.mrTargetBranches, ["main", "dev"], "保序并集")
         XCTAssertEqual(result.idRemapping[dropped.id], kept.id)
+        XCTAssertTrue(result.crossURLNameConflicts.isEmpty, "同 URL 重复不是冲突")
+    }
+
+    /// 同名但**不同远端**:只丢弃多余记录、绝不重映射引用。
+    ///
+    /// 把引用换到另一条上,等于让工作区开始 pull/push 一个它从未配置过的远端,
+    /// 而且完全静默(名字一样,界面上看不出区别)。宁可摘除引用让"该仓库缺失"
+    /// 显式暴露,由用户重新添加正确的远端。
+    func test_deduplicationDoesNotRemapReferencesAcrossDifferentURLsWithSameName() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let kept = RepositoryConfig(
+            id: UUID(),
+            gitURL: "git@github.com:org/api.git",
+            repoName: "api",
+            createdAt: now,
+            updatedAt: now
+        )
+        let dropped = RepositoryConfig(
+            id: UUID(),
+            gitURL: "https://gitlab.com/other/api",
+            repoName: "api",
+            defaultBranch: "master",
+            createdAt: now.addingTimeInterval(100),
+            updatedAt: now.addingTimeInterval(100)
+        )
+        let result = RepositoryStore.deduplicationResult(
+            for: [kept, dropped],
+            protectedRepositoryIDs: [kept.id]
+        )
+
+        XCTAssertEqual(result.repositories.count, 1, "同名不同远端也只能留一条(名字全局唯一 + 目录按名派生)")
+        XCTAssertEqual(result.repositories.first?.id, kept.id)
+        XCTAssertNil(result.idRemapping[dropped.id], "不同远端之间禁止引用重映射")
+        XCTAssertEqual(result.crossURLNameConflicts, ["api"], "冲突必须被记录,便于归因")
+        // 字段并入也不许跨远端发生:另一条的 defaultBranch 不得渗进保留项。
+        XCTAssertNil(result.repositories.first?.defaultBranch)
     }
 
     /// 引用重映射:工作区对被删项的选中/置顶换成保留项并按首现去重;
@@ -755,7 +793,9 @@ final class RepositoryStoreTests: XCTestCase {
         )
         workplaceStore.flushSyncStates()
 
-        let mtimeBefore = (try? FileManager.default.attributesOfItem(atPath: root.appendingPathComponent("repositories.json").path)[.modificationDate] as? Date) ?? .distantPast
+        let mtimeBefore = try fileModificationDate(
+            of: root.appendingPathComponent("repositories.json").path
+        )
         let snapshot = WorkplaceStore.snapshot(
             workplaces: workplaceStore.workplaces,
             syncStates: workplaceStore.syncStates
@@ -777,8 +817,20 @@ final class RepositoryStoreTests: XCTestCase {
         )
 
         XCTAssertEqual(repositoryStore.deduplicationCleanupSequence, 0)
-        let mtimeAfter = (try? FileManager.default.attributesOfItem(atPath: root.appendingPathComponent("repositories.json").path)[.modificationDate] as? Date) ?? .distantPast
+        let mtimeAfter = try fileModificationDate(
+            of: root.appendingPathComponent("repositories.json").path
+        )
         XCTAssertEqual(mtimeAfter, mtimeBefore, "无任何变化时不得触发落盘写")
     }
 
+    /// 读取文件的修改时间。**不能用 `try?` + `?? .distantPast`**:attributes 读取
+    /// 失败(文件被误删、权限问题)时前后两次都会变成 `.distantPast`,
+    /// "mtime 未变化"的断言于是空转通过——恰恰在"文件根本没了"时最该红。
+    private func fileModificationDate(of path: String) throws -> Date {
+        let attributes = try FileManager.default.attributesOfItem(atPath: path)
+        return try XCTUnwrap(
+            attributes[.modificationDate] as? Date,
+            "读不到 mtime:\(path)"
+        )
+    }
 }

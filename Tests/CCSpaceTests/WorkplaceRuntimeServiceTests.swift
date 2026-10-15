@@ -79,12 +79,22 @@ private actor WorkplaceRuntimeGitServiceSpy: GitServicing {
             throw error
         }
     }
-    var stashListsByDirectory: [String: [GitStashEntry]] = [:]
-    func stashList(in directory: String) async -> [GitStashEntry] {
-        stashListsByDirectory[directory] ?? []
+    /// 值语义与真实接口一致:nil = 读取失败(超时/超限/进程起不来),
+    /// 空数组 = 栈里确实没有条目。缺键按空栈处理。
+    var stashListsByDirectory: [String: [GitStashEntry]?] = [:]
+    func stashList(in directory: String) async -> [GitStashEntry]? {
+        // 双层可选要分开看:键存在但值为 nil = 读取失败;键不存在 = 没配置,按空栈。
+        switch stashListsByDirectory[directory] {
+        case .some(.some(let entries)): return entries
+        case .some(.none): return nil
+        case .none: return []
+        }
     }
     func setStashList(_ entries: [GitStashEntry], for directory: String) {
         stashListsByDirectory[directory] = entries
+    }
+    func setStashListReadFailure(for directory: String) {
+        stashListsByDirectory[directory] = nil
     }
     func popStash(at index: Int, in directory: String) async throws {
         popStashCalls.append((index: index, directory: directory))
@@ -120,7 +130,7 @@ private actor WorkplaceRuntimeGitServiceSpy: GitServicing {
             hasUncommittedChanges: false
         )
     }
-    func branches(in directory: String) async -> [String] { ["main", "release"] }
+    func branches(in directory: String) async -> [String]? { ["main", "release"] }
     func remoteURL(in directory: String) async -> String? {
         remoteURLCalls.append(directory)
         return remoteURLResult
@@ -405,7 +415,7 @@ private final class ConcurrentPushGitServiceSpy: GitServicing, @unchecked Sendab
         makeBranchStatus(hasUnpushedCommits: true)
     }
 
-    func branches(in directory: String) async -> [String] { ["main"] }
+    func branches(in directory: String) async -> [String]? { ["main"] }
 
     func remoteURL(in directory: String) async -> String? { "git@github.com:test/repo.git" }
 
@@ -2446,6 +2456,89 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         let droppedStashes = await gitService.droppedStashes()
         XCTAssertTrue(droppedStashes.isEmpty, "对账失败时绝不能把 drop 打到另一条 stash 上")
+    }
+
+    /// 消息与时间**完全相同**、只有对象 ID 不同的两条 stash:这是消息+时间对账
+    /// 唯一挡不住的形态(用户连点两次 `git stash push -m` 同一消息,秒级时间戳一致,
+    /// 或外部 push 了一条同消息同秒的 stash)。必须按 `%H` 拒操作。
+    func test_dropStashRefusesWhenSameMessageAndDateButDifferentObjectID() async throws {
+        let (_, workplace, state, gitService, service) = try await makeRuntimeFixture()
+        let displayed = GitStashEntry(
+            index: 0,
+            message: "WIP on main: blog",
+            date: Date(timeIntervalSince1970: 1_700_000_000),
+            objectID: String(repeating: "a", count: 40)
+        )
+        let nowOnStack = GitStashEntry(
+            index: 0,
+            message: "WIP on main: blog",
+            date: Date(timeIntervalSince1970: 1_700_000_000),
+            objectID: String(repeating: "b", count: 40)
+        )
+        await gitService.setStashList([nowOnStack], for: state.localPath)
+
+        do {
+            try await service.dropStash(entry: displayed, for: state, in: workplace)
+            XCTFail("同消息同时间但对象 ID 不同,必须按 stash 对象 ID 拒操作")
+        } catch {
+            XCTAssertEqual(
+                error.localizedDescription,
+                WorkplaceRuntimeServiceError.stashListChanged.localizedDescription
+            )
+        }
+
+        let droppedStashes = await gitService.droppedStashes()
+        XCTAssertTrue(droppedStashes.isEmpty, "对象 ID 不一致仍执行了 drop,不可恢复")
+    }
+
+    /// 对象 ID 一致时正常放行(即使消息/时间字段被别的实现留空)。
+    func test_dropStashProceedsWhenObjectIDMatches() async throws {
+        let (_, workplace, state, gitService, service) = try await makeRuntimeFixture()
+        let objectID = String(repeating: "c", count: 40)
+        let displayed = GitStashEntry(
+            index: 1,
+            message: "WIP on main: blog",
+            date: Date(timeIntervalSince1970: 1_700_000_000),
+            objectID: objectID
+        )
+        let nowOnStack = GitStashEntry(
+            index: 1,
+            message: "WIP on main: blog",
+            date: Date(timeIntervalSince1970: 1_700_000_000),
+            objectID: objectID
+        )
+        await gitService.setStashList([nowOnStack], for: state.localPath)
+
+        try await service.dropStash(entry: displayed, for: state, in: workplace)
+
+        let droppedStashes = await gitService.droppedStashes()
+        XCTAssertEqual(droppedStashes.count, 1, "对象 ID 一致时应放行 drop")
+        XCTAssertEqual(droppedStashes.first?.index, 1)
+    }
+
+    /// stash 列表读取失败(nil)不得被当成"栈里没有这条"继续放行,也不得放行。
+    func test_dropStashRefusesWhenStashListReadFails() async throws {
+        let (_, workplace, state, gitService, service) = try await makeRuntimeFixture()
+        let displayed = GitStashEntry(
+            index: 0,
+            message: "WIP on main: blog",
+            date: Date(timeIntervalSince1970: 1_700_000_000),
+            objectID: String(repeating: "a", count: 40)
+        )
+        await gitService.setStashListReadFailure(for: state.localPath)
+
+        do {
+            try await service.dropStash(entry: displayed, for: state, in: workplace)
+            XCTFail("读取失败时不得放行破坏性操作")
+        } catch {
+            XCTAssertEqual(
+                error.localizedDescription,
+                WorkplaceRuntimeServiceError.stashListChanged.localizedDescription
+            )
+        }
+
+        let droppedStashes = await gitService.droppedStashes()
+        XCTAssertTrue(droppedStashes.isEmpty, "读取失败仍执行了 drop")
     }
 
     func test_popStashRestoresEntryAndPersistsState() async throws {

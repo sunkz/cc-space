@@ -4,6 +4,20 @@ import SwiftUI
 ///
 /// 作为 `WindowGroup(for:)` 的 value:相等 payload 复用已打开的窗口(聚焦时刷新),
 /// 不同 payload 各开一个窗口,可与主窗口并行操作。
+extension DiffWindowPayload.Source {
+    /// View 侧 payload 来源 → Service 层来源。
+    ///
+    /// 映射放在 Views 一侧:`RepositoryWindowContext` 反过来依赖 `DiffWindowPayload`
+    /// 就是层倒置(Service 不该知道窗口的路由载荷类型)。
+    var diffSource: RepositoryWindowContext.DiffSource {
+        switch self {
+        case .workingDirectory: return .workingDirectory
+        case .commit(let hash): return .commit(hash: hash)
+        case .compare(let base, let head): return .compare(base: base, head: head)
+        }
+    }
+}
+
 struct DiffWindowPayload: Codable, Hashable {
     /// diff 来源:工作区改动、指定 commit 或与某分支对比。
     enum Source: Codable, Hashable {
@@ -25,12 +39,31 @@ struct DiffWindowPayload: Codable, Hashable {
 /// 与触发它的仓库行视图生命周期解耦。
 struct DiffWindowView: View {
     let payload: DiffWindowPayload
-    let gitService: GitServicing
+    /// git 取数一律经 Service 层的上下文:View 不再直接持有 `GitServicing`。
+    /// 此前 diff 三来源、detached HEAD 探测、最近提交主题都在本视图里直接调 git,
+    /// 违反 AGENTS.md 的依赖方向(View 不直接调 git,必须经 Store/Coordinator)。
+    @StateObject private var context: RepositoryWindowContext
     /// 破坏性写(丢弃/提交)的唯一入口:协调器内部持 per-path 锁与后台 pull/push 互斥。
     let syncCoordinator: SyncCoordinator
     let aiCommitService: AICommitMessageServicing
     /// 目录存在性探测:View 不直接碰 FileManager,统一走 FileSystemService(含 isDirectory 校验)。
     let fileSystemService: FileSystemServicing
+
+    init(
+        payload: DiffWindowPayload,
+        gitService: GitServicing,
+        syncCoordinator: SyncCoordinator,
+        aiCommitService: AICommitMessageServicing,
+        fileSystemService: FileSystemServicing
+    ) {
+        self.payload = payload
+        self._context = StateObject(wrappedValue: RepositoryWindowContext(gitService: gitService))
+        self.syncCoordinator = syncCoordinator
+        self.aiCommitService = aiCommitService
+        self.fileSystemService = fileSystemService
+    }
+
+    private var diffSource: RepositoryWindowContext.DiffSource { payload.source.diffSource }
 
     @State private var entries: [GitDiffEntry] = []
     @State private var isLoading = true
@@ -84,21 +117,12 @@ struct DiffWindowView: View {
     /// 包进 `Task.detached`(与展开纯函数同一约定)。
     private var fullFileContentProvider: @Sendable (GitDiffEntry) async -> String? {
         let localPath = payload.localPath
-        let source = payload.source
-        let service = gitService
+        let diffSource = self.diffSource
+        let context = _context.wrappedValue
+        // 当前分支探测、策略解析与 blob/磁盘读取全部在 Service 层完成
+        // (重 IO 仍在 context 内部包进 Task.detached)。
         return { entry in
-            // 只有分支对比需要当前分支判断新侧在磁盘还是 blob;其余来源无需查询。
-            var currentBranch: String?
-            if case .compare = source {
-                currentBranch = await service.currentBranch(in: localPath)
-            }
-            guard let strategy = DiffFullFileContentStrategy.resolve(
-                source: source,
-                currentBranch: currentBranch
-            ) else { return nil }
-            return await Task.detached(priority: .userInitiated) {
-                await strategy.fileContent(entry: entry, localPath: localPath, gitService: service)
-            }.value
+            await context.fullFileContent(entry: entry, directory: localPath, source: diffSource)
         }
     }
 
@@ -246,8 +270,9 @@ struct DiffWindowView: View {
             isLoading = true
         }
         let localPath = payload.localPath
-        let service = gitService
+        let context = _context.wrappedValue
         let source = payload.source
+        let diffSource = self.diffSource
         let fileSystem = fileSystemService
         let generation = payloadGeneration
         loadTask = Task { @MainActor in
@@ -264,7 +289,8 @@ struct DiffWindowView: View {
                 return
             }
             // 分支对比来源未检出分支(detached HEAD)是硬失败:给专属文案而非通用报错。
-            let resolvedCompareHead: String?
+            // 只校验、不再把 head 往下传:三种来源的 git 调用差异已由
+            // RepositoryWindowContext.loadDiff 收敛,payload 里的 head 直接参与。
             if case .compare(_, let head) = source {
                 guard let head, head.isEmpty == false else {
                     guard !Task.isCancelled, generation == payloadGeneration else { return }
@@ -275,21 +301,14 @@ struct DiffWindowView: View {
                     }
                     return
                 }
-                resolvedCompareHead = head
-            } else {
-                resolvedCompareHead = nil
             }
             let loaded: [GitDiffEntry]
             do {
-                switch source {
-                case .workingDirectory:
-                    loaded = try await service.diffWorkingDirectory(in: localPath)
-                case .commit(let hash):
-                    loaded = try await service.diffCommit(hash: hash, in: localPath)
-                case .compare(let base, _):
-                    // resolvedCompareHead 已在上方解包;?? 仅满足类型检查,不会为空。
-                    loaded = try await service.diffBranches(base: base, head: resolvedCompareHead ?? "", in: localPath)
-                }
+                // 三种来源的 git 调用差异由 Service 层收敛,View 侧不再 switch 调 git。
+                loaded = try await context.loadDiff(
+                    directory: localPath,
+                    source: diffSource
+                )
             } catch is CancellationError {
                 // 取消不当作失败:payload 更换/窗口关闭时静默停止,不污染新仓库的错误态。
                 return
@@ -371,7 +390,7 @@ struct DiffWindowView: View {
         isGeneratingMessage = true
         generateMessageErrorMessage = nil
         let service = aiCommitService
-        let gitService = gitService
+        let context = _context.wrappedValue
         let directory = payload.localPath
         let diffs = entries
         let generation = payloadGeneration
@@ -380,9 +399,10 @@ struct DiffWindowView: View {
             // 取消路径(onDisappear 已 cancel 任务)会把 isGeneratingMessage 永久留在 true。
             defer { isGeneratingMessage = false }
             // 先取最近提交主题作为语言与风格参考,失败时静默降级为空列表。
-            let recentSubjects = await gitService
-                .recentCommits(in: directory, count: AICommitPromptBuilder.recentCommitSubjectCount)
-                .map(\.subject)
+            let recentSubjects = await context.recentCommitSubjects(
+                directory: directory,
+                count: AICommitPromptBuilder.recentCommitSubjectCount
+            )
             do {
                 let message = try await service.generateCommitMessage(
                     diffs: diffs,

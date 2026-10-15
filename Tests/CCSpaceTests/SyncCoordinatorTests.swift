@@ -75,7 +75,7 @@ struct CloneConcurrencyGitServiceSpy: GitServicing {
     func defaultBranch(in directory: String) async -> String? { "main" }
     func currentBranch(in directory: String) async -> String? { "main" }
     func branchStatus(in directory: String) async -> GitBranchStatusSnapshot? { nil }
-    func branches(in directory: String) async -> [String] { [] }
+    func branches(in directory: String) async -> [String]? { [] }
     func remoteURL(in directory: String) async -> String? { nil }
     func checkoutBranch(_ branch: String, in directory: String) async throws {}
     func createLocalBranch(_ branch: String, in directory: String) async throws {}
@@ -119,7 +119,7 @@ struct PullConcurrencyGitServiceSpy: GitServicing {
             hasUncommittedChanges: false
         )
     }
-    func branches(in directory: String) async -> [String] { [] }
+    func branches(in directory: String) async -> [String]? { [] }
     func remoteURL(in directory: String) async -> String? { nil }
     func checkoutBranch(_ branch: String, in directory: String) async throws {}
     func createLocalBranch(_ branch: String, in directory: String) async throws {}
@@ -185,7 +185,7 @@ struct GitServiceStub: GitServicing {
     func branchStatus(in directory: String) async -> GitBranchStatusSnapshot? {
         branchStatusResult
     }
-    func branches(in directory: String) async -> [String] { ["main"] }
+    func branches(in directory: String) async -> [String]? { ["main"] }
     func remoteURL(in directory: String) async -> String? { remoteURLResult }
     func checkoutBranch(_ branch: String, in directory: String) async throws {
         switch behavior {
@@ -478,8 +478,9 @@ final class SyncCoordinatorTests: XCTestCase {
             store.updateSyncState(state)
         }
 
+        let cancelSpy = PullConcurrencyGitServiceSpy()
         let coordinator = SyncCoordinator(
-            gitService: PullConcurrencyGitServiceSpy(),
+            gitService: cancelSpy,
             fileSystemService: FileSystemServiceSpy()
         )
         let task = Task {
@@ -488,8 +489,18 @@ final class SyncCoordinatorTests: XCTestCase {
                 workplaceStore: store
             )
         }
-        // 让前几仓进入拉取后取消:其余仓库此时仍是预标的 .pulling,必须被收敛为终态。
-        try? await Task.sleep(nanoseconds: 80_000_000)
+        // 确定性地等到确有仓库进入拉取(而不是睡 80ms 碰运气):
+        // 没进入就取消,所有行都停在预标 .pulling 之外,后面的"取消后无滞留"
+        // 断言会因为"什么都没发生过"而通过——恰是这条测试最该拦的形态。
+        var startedObserved = false
+        for _ in 0..<200 {
+            if await cancelSpy.recorder.maxActiveCount >= 1 {
+                startedObserved = true
+                break
+            }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(startedObserved, "取消前提不成立:批量拉取从未真正开始")
         task.cancel()
         _ = await task.value
 
@@ -1004,7 +1015,7 @@ struct PullAllBranchesGitServiceStub: GitServicing {
             hasUncommittedChanges: false
         )
     }
-    func branches(in directory: String) async -> [String] { [] }
+    func branches(in directory: String) async -> [String]? { [] }
     func remoteURL(in directory: String) async -> String? { nil }
     func checkoutBranch(_ branch: String, in directory: String) async throws {}
     func createLocalBranch(_ branch: String, in directory: String) async throws {}

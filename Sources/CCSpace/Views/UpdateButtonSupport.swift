@@ -12,13 +12,21 @@ struct UpdateButtonPresentationState: Equatable {
     let usesAccentTint: Bool
 
     init(updatePresentationState: SettingsUpdatePresentationState) {
+        let base: String
         if updatePresentationState.showsUpdateAvailable,
            let latestVersionDisplay = updatePresentationState.latestVersionDisplay {
-            title = "获取更新：发现新版本 \(latestVersionDisplay)，点击前往 GitHub Releases 下载"
+            base = "获取更新：发现新版本 \(latestVersionDisplay)，点击前往 GitHub Releases 下载"
             usesAccentTint = true
         } else {
-            title = "获取更新：前往 GitHub Releases 查看最新版本"
+            base = "获取更新：前往 GitHub Releases 查看最新版本"
             usesAccentTint = false
+        }
+        // 状态提示挂在同一处悬浮文案/无障碍名称上:检查失败与"正在检查"需要能归因,
+        // 但不值得单独占一个醒目位置(后台每小时重试,失败是常态)。
+        if let hint = updatePresentationState.statusHint, hint.isEmpty == false {
+            title = "\(base)（\(hint)）"
+        } else {
+            title = base
         }
     }
 }

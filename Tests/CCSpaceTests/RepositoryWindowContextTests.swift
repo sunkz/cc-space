@@ -6,6 +6,28 @@ import XCTest
 /// 都能拦下旧一代结果的落笔。
 @MainActor
 final class RepositoryWindowContextTests: XCTestCase {
+    /// 分支名单读取失败必须原样带 nil 给消费方:折算成空数组会把一次 git 超时
+    /// 渲染成"这个仓库一个分支都没有",并把空名单固化进窗口状态。
+    func test_loadBranchContext_propagatesNilWhenBranchListReadFails() async throws {
+        let stub = WindowContextGitStub()
+        await stub.setBranchesReadFailure(for: "/repo")
+        await stub.setRemoteTrackingBranches(["origin/main"], for: "/repo")
+        let context = RepositoryWindowContext(gitService: stub)
+        let box = WindowContextCompletionBox()
+
+        let loaded = expectation(description: "分支上下文加载完成")
+        context.loadBranchContext(directory: "/repo", includeMetadata: false) { snapshot in
+            box.branchSnapshots.append(snapshot)
+            loaded.fulfill()
+        }
+        await fulfillment(of: [loaded], timeout: 5.0)
+
+        let snapshot = try XCTUnwrap(box.branchSnapshots.first)
+        XCTAssertNil(snapshot.branches, "读取失败被折成了空名单")
+        // 同批其它通道不受牵连:一项失败不该把整份快照一起丢掉。
+        XCTAssertEqual(snapshot.remoteTrackingBranches, ["origin/main"])
+    }
+
     func test_loadBranchContext_snapshotCarriesFieldsAndMetadataSwitch() async throws {
         let stub = WindowContextGitStub()
         let date = Date(timeIntervalSince1970: 1_700_000_000)
@@ -274,6 +296,7 @@ private actor WindowContextGitStub: GitServicing {
 
     private var callDelayNanoseconds: UInt64 = 0
     private var branchesByDirectory: [String: [String]] = [:]
+    private var branchesFailureDirectories: Set<String> = []
     private var remoteTrackingBranchesByDirectory: [String: [String]] = [:]
     private var currentBranchByDirectory: [String: String] = [:]
     private var defaultBranchByDirectory: [String: String] = [:]
@@ -300,12 +323,14 @@ private actor WindowContextGitStub: GitServicing {
     func remoteBranches(for remoteURL: String) async -> [String]? { [] }
 
     // RepositoryWindowContext 实际使用的通道
-    func branches(in directory: String) async -> [String] {
+    func branches(in directory: String) async -> [String]? {
         await sleepIfDelayed()
+        // nil = 读取失败(真实实现里对应超时/输出超限/进程起不来)。
+        if branchesFailureDirectories.contains(directory) { return nil }
         return branchesByDirectory[directory] ?? ["main"]
     }
 
-    func remoteTrackingBranches(in directory: String) async -> [String] {
+    func remoteTrackingBranches(in directory: String) async -> [String]? {
         remoteTrackingBranchesByDirectory[directory] ?? []
     }
 
@@ -317,7 +342,7 @@ private actor WindowContextGitStub: GitServicing {
         defaultBranchByDirectory[directory] ?? "main"
     }
 
-    func branchMetadata(in directory: String) async -> [String: GitBranchMetadata] {
+    func branchMetadata(in directory: String) async -> [String: GitBranchMetadata]? {
         branchMetadataByDirectory[directory] ?? [:]
     }
 
@@ -346,6 +371,10 @@ private actor WindowContextGitStub: GitServicing {
 
     func setBranches(_ branches: [String], for directory: String) {
         branchesByDirectory[directory] = branches
+    }
+
+    func setBranchesReadFailure(for directory: String) {
+        branchesFailureDirectories.insert(directory)
     }
 
     func setRemoteTrackingBranches(_ branches: [String], for directory: String) {

@@ -43,6 +43,9 @@ struct RootSplitView: View {
     private let launchConfiguration: CCSpaceLaunchConfiguration
     private let syncCoordinator: SyncCoordinator
     private let gitService: GitService
+    /// 仓库只读信息查询(实际 origin 等):RootSplitView 作为顶层持有并注入,
+    /// 视图侧不再出现 `gitService.remoteURL(...)` 这类直接 git 调用。
+    private let repositoryInfoService: RepositoryInfoService
     private let aiService: AIServiceInfoServicing
 
     private var selectedWorkplace: Workplace? {
@@ -126,6 +129,7 @@ struct RootSplitView: View {
         _repositoryStore = StateObject(wrappedValue: RepositoryStore(fileStore: fileStore))
         _workplaceStore = StateObject(wrappedValue: WorkplaceStore(fileStore: fileStore))
         self.gitService = gitService
+        self.repositoryInfoService = RepositoryInfoService(gitService: gitService)
         self.aiService = aiService
         syncCoordinator = SyncCoordinator(gitService: gitService)
 
@@ -729,7 +733,9 @@ struct RootSplitView: View {
                     // 改过远端(如迁 fork)时两个入口不再指向不同仓库;
                     // 读不到(未克隆/无 origin)回退配置的 gitURL。
                     resolveRepositoryURL: {
-                        let remote = await gitService.remoteURL(in: syncState.localPath) ?? ""
+                        let remote = await repositoryInfoService.remoteURL(
+                            localPath: syncState.localPath
+                        ) ?? ""
                         let source = remote.isEmpty ? repository.gitURL : remote
                         return try GitURLParser.repositoryWebURL(from: source)
                     },

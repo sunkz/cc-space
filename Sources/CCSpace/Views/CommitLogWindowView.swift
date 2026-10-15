@@ -15,7 +15,6 @@ struct CommitLogWindowPayload: Codable, Hashable {
 /// 浏览器打开提交页、打开该提交的 Diff 窗口。加载与操作状态由本窗口自持,与主窗口解耦。
 struct CommitLogWindowView: View {
     let payload: CommitLogWindowPayload
-    let gitService: GitServicing
     /// 写操作(基于提交建分支)的唯一入口:协调器内部持 per-path 锁与后台 pull/push 互斥。
     let syncCoordinator: SyncCoordinator
     /// 分支上下文与提交列表的共享加载器(含代际防过期写回),视图只消费加载结果。
@@ -27,7 +26,6 @@ struct CommitLogWindowView: View {
         syncCoordinator: SyncCoordinator
     ) {
         self.payload = payload
-        self.gitService = gitService
         self.syncCoordinator = syncCoordinator
         _context = StateObject(wrappedValue: RepositoryWindowContext(gitService: gitService))
     }
@@ -39,6 +37,13 @@ struct CommitLogWindowView: View {
     @State private var branchMetadata: [String: GitBranchMetadata] = [:]
     @State private var showingBranchPicker = false
     @State private var commits: [GitCommitEntry] = []
+    /// git 侧已消耗的偏移量(`--skip` 的真实游标)。
+    ///
+    /// 与 `commits.count` **不是一回事**:追加下一页时按哈希去过重,期间若有新提交
+    /// 落到分支顶端,去重会吞掉 k 条,展示数就比 git 实际返回的行数少 k。
+    /// 用展示数当游标,下一页的 `--skip` 会少让 k 条,那 k 条历史提交既不在已展示页里、
+    /// 也永远翻不到(静默丢数据)。游标一律按 git 返回的行数推进。
+    @State private var fetchedRowCount = 0
     @State private var isLoading = true
     @State private var isLoadingMore = false
     @State private var errorMessage: String?
@@ -487,9 +492,12 @@ struct CommitLogWindowView: View {
         ) { [self] snapshot in
             // payload 已更换(复用窗口换仓库)时旧仓库快照不得落笔。
             guard generation == payloadGeneration else { return }
-            branchNames = snapshot.branches
-            remoteTrackingBranches = snapshot.remoteTrackingBranches
-            branchMetadata = snapshot.metadata ?? [:]
+            // nil = 该项读取失败(超时/输出超限/进程起不来):保留上一轮结果。
+            // 直接落 nil/[] 会把一次 git 超时渲染成"这个仓库没有分支",
+            // 用户看到的是空列表而不是"读取失败",且无从归因。
+            if let branches = snapshot.branches { branchNames = branches }
+            if let remote = snapshot.remoteTrackingBranches { remoteTrackingBranches = remote }
+            if let metadata = snapshot.metadata { branchMetadata = metadata }
             currentBranch = snapshot.currentBranch
         }
     }
@@ -522,7 +530,8 @@ struct CommitLogWindowView: View {
             skip = 0
         case .nextPage:
             pageSize = Self.pageSize
-            skip = loadedCount
+            // 用 git 侧游标,不用去重后的展示条数(见 fetchedRowCount 注释)。
+            skip = fetchedRowCount
         }
 
         switch kind {
@@ -555,6 +564,12 @@ struct CommitLogWindowView: View {
                 hasLoadedInitialData = true
             case .success(let pageCommits, let more):
                 hasMore = more
+                // 游标按 git 实际返回的行数推进/重置,与去重后的展示条数解耦。
+                if kind == .nextPage {
+                    fetchedRowCount += pageCommits.count
+                } else {
+                    fetchedRowCount = pageCommits.count
+                }
                 if kind == .nextPage {
                     // 游标是"已加载条数"的偏移,期间若有新提交落到分支顶端,
                     // 下一页会重复带上已展示的头部提交:按哈希去重后再追加。
@@ -653,7 +668,7 @@ struct CommitLogWindowView: View {
             supersededDetailIDs.remove(commit.id)
         }
         let path = payload.localPath
-        let gitService = gitService
+        let context = _context.wrappedValue
         expandAllBatchIDs = Set(pending.map(\.id))
         let batchIDs = expandAllBatchIDs
         let batchToken = expandAllBatchToken
@@ -664,7 +679,7 @@ struct CommitLogWindowView: View {
                 maxConcurrentTasks: Self.maxConcurrentDetailLoads
             ) { commit in
                 guard !Task.isCancelled else { return }
-                let detail = await gitService.commitDetail(hash: commit.hash, in: path)
+                let detail = await context.commitDetail(hash: commit.hash, directory: path)
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
                     // 取代判定只看令牌:旧批次(令牌过期)的回写必被拦下。
@@ -723,8 +738,7 @@ struct CommitLogWindowView: View {
         let id = commit.id
         let path = payload.localPath
         let hash = commit.hash
-        let gitService = gitService
-        let detail = await gitService.commitDetail(hash: hash, in: path)
+        let detail = await _context.wrappedValue.commitDetail(hash: hash, directory: path)
         // 取消同样要收口加载标记:ensureDetail 已把 id 置入 detailLoadingIDs,
         // 直接 return 会让该提交永久滞留,再次点开展开被守卫跳过、UI 卡"加载中"死态。
         guard !Task.isCancelled else {

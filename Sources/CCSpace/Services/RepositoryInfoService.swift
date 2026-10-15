@@ -49,6 +49,16 @@ struct RepositoryInfoService: FileSystemServicing {
         await gitService.defaultBranch(for: remoteURL)
     }
 
+    /// 仓库的实际 origin 地址;目录不存在或无 origin 时返回 nil。
+    ///
+    /// 供"打开仓库网页/创建 MR"这类入口决定用真实远端还是配置地址:克隆后改过
+    /// 远端(如迁 fork)时两个入口不能指向不同仓库。放在本服务里,View 侧
+    /// 不再直接 `gitService.remoteURL(...)`(AGENTS.md:View 不直接调 git)。
+    func remoteURL(localPath: String) async -> String? {
+        guard directoryExists(at: localPath) else { return nil }
+        return await gitService.remoteURL(in: localPath)
+    }
+
     /// 远端分支列表;`nil` 表示探测失败(调用方保留旧缓存),`[]` 是远端确无分支。
     func remoteBranches(for remoteURL: String) async -> [String]? {
         await gitService.remoteBranches(for: remoteURL)

@@ -731,7 +731,31 @@ struct WorkplaceRuntimeService {
                     failureReason: UserFacingError.message(for: error)
                 )
                 // 回滚走防抖写盘不会失败;若不落库,状态会长期停在 .removing(UI 一直"进行中")。
-                workplaceStore.replaceSyncStates(restoredStates, for: workplace.id)
+                // 探测发生在放锁之后,期间并发回写可能已改这些行:按"删除前快照 → 探测结果"做
+                // 字段级增量合并落到最新行上(口径同批量操作收口),整区覆盖会把别人的最新写入抹掉。
+                let originalByRepositoryID = Dictionary(
+                    originalStates.map { ($0.repositoryID, $0) },
+                    uniquingKeysWith: { first, _ in first }
+                )
+                let latestByRepositoryID = Dictionary(
+                    workplaceStore.syncStates
+                        .filter { $0.workplaceID == workplace.id }
+                        .map { ($0.repositoryID, $0) },
+                    uniquingKeysWith: { first, _ in first }
+                )
+                var rolledBackStates: [RepositorySyncState] = []
+                for restored in restoredStates {
+                    guard let original = originalByRepositoryID[restored.repositoryID],
+                          let latest = latestByRepositoryID[restored.repositoryID],
+                          let merged = RepositorySyncState.merging(
+                              updated: restored,
+                              onto: original,
+                              in: latest,
+                              premarkedTransient: .removing
+                          ) else { continue }
+                    rolledBackStates.append(merged)
+                }
+                workplaceStore.updateSyncStates(rolledBackStates)
                 let deleteError = WorkplaceDeletionError.fromRemovalError(
                     error,
                     path: workplace.path

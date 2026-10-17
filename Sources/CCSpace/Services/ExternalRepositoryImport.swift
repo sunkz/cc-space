@@ -1,4 +1,10 @@
 import Foundation
+import os
+
+private let externalRepositoryImportLog = Logger(
+    subsystem: "com.ccspace.app",
+    category: "ExternalRepositoryImport"
+)
 
 /// 磁盘上发现、但列表里还没有对应记录的 Git 目录。
 struct GitDirectoryCandidate: Sendable, Equatable {
@@ -66,7 +72,16 @@ enum ExternalRepositoryImport {
                     .filter { $0.workplaceID == workplace.id }
                     .map { LocalPathSafety.normalizedPath($0.localPath) }
             )
-            let childNames = (try? fileManager.contentsOfDirectory(atPath: workplacePath)) ?? []
+            // "读不了目录"与"确实没有子项"必须可区分,否则"拷了仓库却没被发现"无从排查。
+            let childNames: [String]
+            do {
+                childNames = try fileManager.contentsOfDirectory(atPath: workplacePath)
+            } catch {
+                externalRepositoryImportLog.error(
+                    "event=enumerate_failed workplace_path=\(workplacePath) reason=\(error.localizedDescription, privacy: .public)"
+                )
+                continue
+            }
             var workplaceCandidateCount = 0
 
             for name in childNames.sorted() {

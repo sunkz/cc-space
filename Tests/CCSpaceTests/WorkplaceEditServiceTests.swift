@@ -59,7 +59,6 @@ private actor WorkplaceEditGitServiceSpy: GitServicing {
         currentBranchByDirectory[directory] = branch
     }
 
-    func remoteBranchExists(branch: String, remoteURL: String) async -> Bool { false }
 
     func mergeDefaultBranchIntoCurrent(in directory: String) async throws -> GitMergeDefaultBranchOutcome {
         .merged
@@ -132,7 +131,7 @@ final class WorkplaceEditServiceTests: XCTestCase {
         existingState.status = .success
         existingState.hasLocalDirectory = true
         existingState.lastSyncedAt = .now
-        workplaceStore.updateSyncState(existingState)
+        workplaceStore.updateSyncStates([existingState])
 
         let gitService = WorkplaceEditGitServiceSpy()
         let service = WorkplaceEditService(
@@ -215,7 +214,7 @@ final class WorkplaceEditServiceTests: XCTestCase {
         existingState.status = .success
         existingState.hasLocalDirectory = true
         existingState.lastSyncedAt = .now
-        workplaceStore.updateSyncState(existingState)
+        workplaceStore.updateSyncStates([existingState])
 
         let gitService = WorkplaceEditGitServiceSpy()
         let service = WorkplaceEditService(
@@ -285,7 +284,7 @@ final class WorkplaceEditServiceTests: XCTestCase {
         apiState.status = .success
         apiState.hasLocalDirectory = true
         apiState.localPath = apiPath
-        workplaceStore.updateSyncState(apiState)
+        workplaceStore.updateSyncStates([apiState])
 
         let gitService = WorkplaceEditGitServiceSpy()
         let service = WorkplaceEditService(
@@ -505,7 +504,7 @@ final class WorkplaceEditServiceTests: XCTestCase {
         existingState.status = .success
         existingState.hasLocalDirectory = true
         existingState.localPath = apiPath
-        workplaceStore.updateSyncState(existingState)
+        workplaceStore.updateSyncStates([existingState])
 
         let gitService = WorkplaceEditGitServiceSpy()
         await gitService.setCurrentBranch("release", for: apiPath)
@@ -560,7 +559,7 @@ final class WorkplaceEditServiceTests: XCTestCase {
         existingState.hasLocalDirectory = true
         existingState.localPath = apiPath
         existingState.lastError = "stale error"
-        workplaceStore.updateSyncState(existingState)
+        workplaceStore.updateSyncStates([existingState])
 
         let gitService = WorkplaceEditGitServiceSpy()
         await gitService.setCurrentBranch("main", for: apiPath)
@@ -623,7 +622,7 @@ final class WorkplaceEditServiceTests: XCTestCase {
         existingState.status = .success
         existingState.hasLocalDirectory = true
         existingState.localPath = apiPath
-        workplaceStore.updateSyncState(existingState)
+        workplaceStore.updateSyncStates([existingState])
 
         let gitService = WorkplaceEditGitServiceSpy()
         await gitService.setCurrentBranch("main", for: apiPath)
@@ -751,7 +750,7 @@ final class WorkplaceEditServiceTests: XCTestCase {
         existingState.status = .success
         existingState.hasLocalDirectory = true
         existingState.localPath = apiPath
-        workplaceStore.updateSyncState(existingState)
+        workplaceStore.updateSyncStates([existingState])
 
         let gitService = WorkplaceEditGitServiceSpy()
         await gitService.setCurrentBranch("main", for: apiPath)
@@ -944,7 +943,7 @@ final class WorkplaceEditServiceTests: XCTestCase {
         state.status = .success
         state.hasLocalDirectory = true
         state.localPath = outsidePath
-        workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncStates([state])
 
         let gitService = WorkplaceEditGitServiceSpy()
         let service = WorkplaceEditService(
@@ -999,7 +998,7 @@ final class WorkplaceEditServiceTests: XCTestCase {
         )
         apiState.status = .success
         apiState.hasLocalDirectory = true
-        workplaceStore.updateSyncState(apiState)
+        workplaceStore.updateSyncStates([apiState])
 
         let gitService = WorkplaceEditGitServiceSpy()
         let service = WorkplaceEditService(

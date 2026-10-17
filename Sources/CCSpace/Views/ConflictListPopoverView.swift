@@ -1,7 +1,6 @@
 import SwiftUI
 
-/// 冲突文件列表 popover:展示未合并(冲突)文件与中止入口的纯展示组件。
-/// 数据来自状态快照的 unmergedPaths,无需异步加载;
+/// 冲突文件列表 popover:纯展示,数据来自状态快照的 unmergedPaths,无需异步加载;
 /// 中止操作有破坏性(丢弃合并结果),二次确认由宿主负责。
 struct ConflictListPopoverView: View {
     let repositoryName: String
@@ -50,8 +49,6 @@ struct ConflictListPopoverView: View {
     private var conflictList: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                // 分隔线判断改用下标:此前每行取一次 unmergedPaths.last,整列表 O(N²)
-                // (CommitLogWindowView 同款修法)。
                 ForEach(Array(unmergedPaths.enumerated()), id: \.element) { index, path in
                     ConflictFileRowView(filePath: path)
                     if index < unmergedPaths.count - 1 {
@@ -107,7 +104,6 @@ private struct ConflictFileRowView: View {
                 .font(.callout)
                 .lineLimit(1)
                 .truncationMode(.middle)
-            // 目录前缀用次要色弱化展示,长路径下仍能看清是哪个目录下的同名文件。
             if let directory = filePath.split(separator: "/").dropLast().joined(separator: "/") as String?,
                directory.isEmpty == false {
                 Text(directory)

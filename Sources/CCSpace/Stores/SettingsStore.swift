@@ -23,16 +23,13 @@ final class SettingsStore: ObservableObject {
     private let fileStore: JSONFileStore
     private var debouncedSettingsWriteTask: Task<Void, Never>?
     /// 写盘失败的重试次数:成功或用户下一次变更归零,封顶见 `maxFlushRetryCount`。
-    /// private(set) 仅为测试可读(断言重试有界)。
     private(set) var flushRetryCount = 0
     /// 重试上限:超过即放弃,避免"固定间隔同步写 + 一条 error 日志"永不收敛。
     static let maxFlushRetryCount = 5
-    /// 重试基础间隔(秒),退避按 base×次数 线性增长(5s→10s→15s…);默认 5,
-    /// 仅测试注入更小值以缩短等待。
     private let flushRetryBaseSeconds: Int
 
     /// 本次启动 settings.json 是否损坏并被重置为默认值。
-    /// 上游 View 可据此提示用户配置已重置(而不是让用户以为自己没设置过)。
+    /// 上游 View 据此提示用户配置已重置;任一 Store 处于恢复态时调用方须跳过破坏性对账。
     private(set) var didRecoverFromCorruptFile = false
 
     init(
@@ -55,38 +52,29 @@ final class SettingsStore: ObservableObject {
         }
     }
 
-    /// 内存先行、同步写盘:写盘成功才改内存,失败抛给调用方回滚。
-    /// 已知代价:每次写都是一次同步磁盘 I/O,数据目录在外置盘/网盘上时可能阻塞
-    /// 主线程数秒。刻意保持同步语义——换根的跨文件原子提交与防抖重试都依赖
-    /// "写盘与状态更新在同一主线程上顺序发生",改成后台队列会牵动失败回滚时序。
+    /// 内存先行、同步写盘:写盘成功才改内存,失败抛给调用方回滚。刻意保持同步语义——换根的跨文件
+    /// 原子提交与防抖重试都依赖"写盘与状态更新在同一主线程顺序发生",改到后台队列会牵动失败回滚时序。
     private func persistSettings(_ newSettings: AppSettings) throws {
-        // 取消防抖任务放在 save 成功之后(与 updateRootPath 同口径):写盘失败时
-        // pending 的防抖写照常到点执行并重试兜底,取消后不补排会造成内存与文件
-        // 背离直到下一次成功写盘。本函数 save 与赋值之间无 await,任务不会中途跑掉。
+        // 取消防抖任务放在 save 成功之后:写盘失败时 pending 的防抖写照常到点执行并重试兜底,
+        // 取消后不补排会造成内存与文件背离。本函数 save 与赋值之间无 await,任务不会中途跑掉。
         try fileStore.save(newSettings, as: "settings.json")
         cancelDebouncedSettingsWrite()
         settings = newSettings
         flushRetryCount = 0
     }
 
-    /// 防抖持久化:内存立即生效,写盘延后合并。
-    ///
-    /// 侧栏快速切换工作区 / 路由会连续触发 `lastSelected*` 写入,每次都同步走一遍
-    /// "建暂存目录 + remove + move"会造成主线程 I/O 尖峰与 SSD 写放大。这类纯
-    /// "记忆上次位置"的字段丢一次无所谓,适合防抖;换根目录等强一致操作仍走立即写盘。
+    /// 防抖持久化:内存立即生效,写盘延后合并。侧栏快速切换会连续触发 `lastSelected*` 写入,
+    /// 每次同步"建暂存目录 + remove + move"会造成主线程 I/O 尖峰;这类纯"记忆上次位置"的字段丢一次无所谓。
     private func persistSettingsDebounced(_ newSettings: AppSettings) {
         settings = newSettings
-        // 用户变更:失败重试的退避从头计起。
         flushRetryCount = 0
         debouncedSettingsWriteTask?.cancel()
         debouncedSettingsWriteTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(500))
             guard let self else { return }
-            // 任务可能已被后续写入/立即写盘取代(cancel 与 sleep 恢复存在竞态窗口):
+            // 竞态窗口:cancel 与 sleep 恢复之间任务可能已被后续写入/立即写盘取代。
             // 取消后不得再落盘,否则会用捕获的旧快照覆写更新的 settings.json。
             guard Task.isCancelled == false else { return }
-            // 交给 flushSettings 写当前最新快照:即使本任务仍是 pending,内存里的
-            // `settings` 只会更新不会回退,写最新值更安全;写盘失败还有 5s 重试兜底。
             self.flushSettings()
         }
     }
@@ -96,11 +84,8 @@ final class SettingsStore: ObservableObject {
         debouncedSettingsWriteTask = nil
     }
 
-    /// 无条件把当前内存快照落盘(防抖窗口到点 / 退出 / 场景切换时调用)。
-    ///
-    /// 注意不能以"是否存在 pending 任务"为前置:重试任务到点时会先清空
-    /// `debouncedSettingsWriteTask` 再进来,若此处提前 return,重试就成了空转,
-    /// 内存与文件会无限期背离。
+    /// 无条件把当前内存快照落盘(防抖到点 / 退出 / 场景切换时调用)。
+    /// 不能以"是否存在 pending 任务"为前置:重试任务到点会先清空句柄再进来,提前 return 会让重试空转。
     func flushSettings() {
         debouncedSettingsWriteTask?.cancel()
         debouncedSettingsWriteTask = nil
@@ -114,12 +99,8 @@ final class SettingsStore: ObservableObject {
         }
     }
 
-    /// 写盘失败后按 base×次数 退避重试(5s→10s→15s…),最多 `maxFlushRetryCount` 次,
-    /// 超限放弃,避免内存与文件无限期背离(磁盘满/瞬时权限)。
-    /// 此前注释写"重试一次",实现却是重试任务醒来先清句柄再 flush、失败后本方法的
-    /// guard 恒为真 → 每 5s 一次同步写加一条 error 日志,永不收敛;现以计数封顶。
-    /// 重试成功或下一次变更/直接写盘成功(persistSettings/Debounced、换根)会把计数
-    /// 归零重新开始。
+    /// 写盘失败后按 base×次数 退避重试(5s→10s→15s…),最多 `maxFlushRetryCount` 次:不重试则内存与
+    /// 文件无限期背离,无限重试则每 5s 一次同步写加一条 error 日志永不收敛。变更/写成功会把计数归零。
     private func scheduleFlushRetry() {
         guard debouncedSettingsWriteTask == nil else { return }
         guard flushRetryCount < Self.maxFlushRetryCount else {
@@ -136,22 +117,11 @@ final class SettingsStore: ObservableObject {
         }
     }
 
-    /// 换根目录,并把已有工作区路径迁移到新根下——两者**一次原子提交**。
-    ///
-    /// 这是**唯一**允许生产调用的换根入口:此前还存在一个不做迁移的单参数重载,
-    /// 二者同名极易走错;走错那个的后果(见下)是工作区被磁盘刷新误删,因此已删除。
-    ///
-    /// 此前的两步写盘(先 rebase 工作区、再写 settings.json)不原子:第二步失败时
-    /// 工作区记录已指向新根而 settings 仍是旧根,下次磁盘刷新会把不在旧根下的
-    /// 工作区判为 missing 永久删除。这里利用 JSONFileStore.save(documents) 把
-    /// settings.json 与 workplaces/sync-states 合并落盘,任一失败整体回滚。
-    /// 注意:要求两个 Store 共用同一数据目录(生产环境由 RootSplitView 注入同一 fileStore)。
-    ///
-    /// 返回实际改写路径的工作区条数,供 UI 提示"几个工作区需要手动搬目录"。
+    /// 换根并把已有工作区路径迁移到新根下——两者**一次原子提交**,任一失败整体回滚;分开写时第二步失败
+    /// 会留下"记录指新根、设置仍是旧根",下次磁盘刷新把不在旧根下的工作区判为 missing 永久删除。
     @discardableResult
     func updateRootPath(_ path: String, rebasingWorkplaceStore workplaceStore: WorkplaceStore) throws -> Int {
-        // 跨 Store 原子提交的前提是共用同一数据目录,运行时校验防注入分叉导致
-        // 内存与磁盘静默背离(同 RepositoryStore.removeRepository)。
+        // 跨 Store 原子提交的前提是共用同一数据目录:注入分叉会让内存与磁盘静默背离,故提交前拦截。
         guard fileStore.rootDirectory.standardizedFileURL
             == workplaceStore.rootDirectoryForCrossStoreCheck.standardizedFileURL else {
             throw SettingsStoreError.crossStoreRootMismatch
@@ -173,15 +143,12 @@ final class SettingsStore: ObservableObject {
         }
         try fileStore.save(documents)
 
-        // 落盘成功后才取消 pending 的防抖写(原先在 save 之前):旧快照的写此刻已无
-        // 意义,而挪到成功之后可让**失败路径**保留 pending 任务——换根失败时内存仍是
-        // 旧值,防抖写照常落地,不会"取消后不补排"造成内存与 settings.json 短期背离。
-        // 本函数到此没有任何 await,任务不会在中途跑掉,成功路径语义与原先完全等价。
+        // 落盘成功后才取消 pending 防抖写:失败路径保留该任务(内存仍是旧值,防抖照落地),避免
+        // "取消后不补排"造成内存与 settings.json 背离。本函数到此无 await,任务不会中途跑掉。
         cancelDebouncedSettingsWrite()
 
         settings = updatedSettings
-        // 换根直接写盘成功:归零重试预算。此前只在 persistSettings/flushSettings 归零,
-        // 若此前已封顶(=5),换根成功后下一次 flush 失败会立刻放弃、零重试。
+        // 换根写盘成功同样要归零重试预算:否则此前已封顶时,换根后首次 flush 失败会立刻放弃、零重试。
         flushRetryCount = 0
         if let plan {
             workplaceStore.applyPersistedState(
@@ -192,7 +159,6 @@ final class SettingsStore: ObservableObject {
         return plan?.rebasedCount ?? 0
     }
 
-    /// `saveRootPathAndReturnErrorMessage` 的换根迁移版:与工作区路径迁移原子提交。
     func saveRootPathAndReturnErrorMessage(
         _ path: String,
         rebasingWorkplaceStore workplaceStore: WorkplaceStore
@@ -201,8 +167,7 @@ final class SettingsStore: ObservableObject {
             try updateRootPath(path, rebasingWorkplaceStore: workplaceStore)
             return nil
         } catch {
-            // 经 UserFacingError 收口:换根路径失败会抛 JSONFileStore/POSIX 错误,
-            // 裸 localizedDescription 会把系统英文原文打进引导页的设置横幅。
+            // 必须经 UserFacingError 收口:裸 localizedDescription 会把系统英文原文打进设置横幅。
             return "保存失败：\(UserFacingError.message(for: error))"
         }
     }

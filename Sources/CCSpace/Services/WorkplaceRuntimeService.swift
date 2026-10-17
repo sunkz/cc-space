@@ -50,14 +50,13 @@ struct WorkplaceRuntimeService {
             repositoryName: repository.repoName
         )
 
-        // 与 push/切分支/拉取共用 per-path 锁:从删除半成品目录到 clone 完成,
-        // 整段都不允许同路径其他写操作进入(clone 自身不加锁,必须在这里罩住;
-        // 否则锁一释放,pull/push 就能插进克隆到一半的目录)。
+        // 与 push/切分支/拉取共用 per-path 锁,从删目录到 clone 完成整段互斥:
+        // clone 自身不加锁,锁一释放 pull/push 就能插进半成品目录。
         let fileSystemService = syncCoordinator.fileSystemService
         let lock = RepositoryOperationLock.shared
         try await lock.acquire(path: localPath)
-        // 持锁后立即把该行标为 .cloning 瞬态:删目录→克隆要数分钟,没有瞬态的话,
-        // 磁盘刷新会把这行归为"本地仓库缺失"的假失败(现在瞬态行被刷新豁免)。
+        // 持锁后立即把该行标为 .cloning 瞬态:删目录→克隆要数分钟,没有瞬态的话磁盘刷新会把
+        // 这行归为"本地仓库缺失"的假失败(瞬态行被刷新豁免)。
         workplaceStore.setSyncStatus(.cloning, for: workplace.id, repositoryIDs: [repository.id])
         let retriedStates: [RepositorySyncState]
         do {
@@ -68,15 +67,14 @@ struct WorkplaceRuntimeService {
             )
         } catch {
             await lock.release(path: localPath)
-            // 瞬态必须归位成本轮失败:本进程内没有任何驱动器会把 .cloning 改回终态
-            // (重启归位在解码路径,帮不了还活着的这次会话)。
+            // 瞬态必须归位成本轮失败:本进程内没有驱动器会把 .cloning 改回终态
+            // (重启归位在解码路径,帮不了这次会话)。
             if var row = workplaceStore.syncStates.first(where: {
                 $0.workplaceID == workplace.id && $0.repositoryID == repository.id
             }) {
                 row.status = .failed
                 row.lastError = UserFacingError.message(for: error)
-                // 存在性探测可能落在网盘/外置盘上,单次 fileExists 就能阻塞主线程
-                // 数秒到数分钟(口径同 WorkplaceStore.clearFailedStatusesWhereDirectoryExists)。
+                // 探测可能落在网盘/外置盘上,单次 fileExists 就能阻塞主线程数秒。
                 let localPathForProbe = localPath
                 let directoryExists = await Task.detached(priority: .userInitiated) {
                     FileManager.default.fileExists(atPath: localPathForProbe)
@@ -88,13 +86,12 @@ struct WorkplaceRuntimeService {
         }
         await lock.release(path: localPath)
 
-        // 按 key 增量更新,而不是拿 await 之后的快照整体替换:
-        // clone 可能耗时数分钟,期间定时磁盘刷新 / 单仓库 push 写入的状态
-        // 会被这份快照整体覆盖(lost update)。
+        // 按 key 增量更新,不用 await 之后的快照整体替换:clone 耗时数分钟,
+        // 期间磁盘刷新/单仓 push 写入的状态会被这份快照覆盖(lost update)。
         workplaceStore.updateSyncStates(retriedStates)
     }
 
-    func pushRepositories(in workplace: Workplace) async throws -> RepositoryPushResult {
+    func pushRepositories(in workplace: Workplace) async throws -> WorkplaceBatchOperationResult {
         try ensureManagedWorkplace(workplace)
         let states = switchableStates(in: workplace)
         guard states.isEmpty == false else {
@@ -105,9 +102,8 @@ struct WorkplaceRuntimeService {
         let results: [BatchPushOperationResult] = await runConcurrentStateOperations(
             states,
             onLockCancelled: { state in
-                // 取消不是失败(对齐 pull 路径"取消不落假失败"):行保持原状态,
-                // 持久化侧按字段增量合并自然跳过落库;汇总单列 cancelled,
-                // 与业务跳过区分,反馈文案如实说"已取消"。
+                // 取消不是失败:行保持原状态,持久化侧按字段增量合并自然跳过落库;
+                // 汇总单列 cancelled,与业务跳过区分,反馈文案如实说"已取消"。
                 .cancelled(state)
             },
             onUnexpectedLockError: { state, error in
@@ -122,9 +118,7 @@ struct WorkplaceRuntimeService {
                 try await gitService.push(in: state.localPath)
                 return .pushed(Self.succeededState(from: state, touchLastSyncedAt: true))
             } catch is CancellationError {
-                // git 进程执行到一半被取消不是业务失败:落 .failed("操作已取消")
-                // 会把一次正常的用户取消持久化成红色错误(口径同 onLockCancelled
-                // 与 pull 路径的"取消不落假失败")。
+                // git 进程做到一半被取消同样不是业务失败:不落 .failed,以免把正常取消持久化成红色错误。
                 return .cancelled(state)
             } catch {
                 return .failed(
@@ -137,11 +131,11 @@ struct WorkplaceRuntimeService {
         }
 
         // 持久化走防抖写盘,不会失败。按"操作前快照 vs 结果"的字段增量合并回写,
-        // 不用操作前整行快照覆盖(lost update,口径同 retryClone)。
+        // 不用操作前整行快照覆盖(lost update)。
         persistBatchChanges(states: states, results: results)
 
         let summary = results.summarize()
-        return RepositoryPushResult(
+        return WorkplaceBatchOperationResult(
             successCount: summary.successCount,
             failedCount: summary.failedCount,
             skippedCount: summary.skippedCount,
@@ -166,7 +160,7 @@ struct WorkplaceRuntimeService {
                 return true
             }
             guard pushed else {
-                // 跳过也按成功口径回写,清掉陈旧的失败标记(静态归一化 + 尽力落库)。
+                // 跳过也按成功口径回写,清掉陈旧的失败标记。
                 persistStateChange(from: state, to: Self.normalizedSkippedPushState(from: state))
                 return .skipped
             }
@@ -177,9 +171,7 @@ struct WorkplaceRuntimeService {
             persistStateChange(from: state, to: updatedState)
             return .pushed
         } catch let error as CancellationError {
-            // 等锁/执行中被取消不是失败(口径同 pull"取消不落假失败",错误类型与
-            // 锁取消同源):这些操作未预标瞬态、行从未被改动,不落 .failed("操作已取消"),
-            // 原样上抛。
+            // 取消不是失败:本方法未预标瞬态、行从未被改动,不落 .failed("操作已取消"),原样上抛。
             throw error
         } catch {
             var updatedState = state
@@ -204,8 +196,7 @@ struct WorkplaceRuntimeService {
         let gitService = syncCoordinator.gitService
 
         // "切换中"立即落库:远端分支切换可能带一次单 ref fetch(网络,数秒),
-        // 行上必须马上出现转轮——否则只有详情页工具栏角落一个不显眼的指示器。
-        // 成功/失败路径末尾会回写终态;进程被杀则由解码兜底归位 .idle。
+        // 行上必须马上出现转轮;进程被杀则由解码兜底归位 .idle。
         workplaceStore.setSyncStatus(.switching, for: state.workplaceID, repositoryIDs: [state.repositoryID])
 
         do {
@@ -227,8 +218,7 @@ struct WorkplaceRuntimeService {
             updatedState.lastError = nil
             persistStateChange(from: state, to: updatedState, premarkedTransient: .switching)
         } catch let error as CancellationError {
-            // 等锁/执行中被取消不是失败(口径同 pull"取消不落假失败"):
-            // 把预标的 .switching 归位回操作前终态,不落 .failed("操作已取消")。
+            // 取消时把本操作预标的 .switching 归位回操作前终态,不落 .failed("操作已取消")。
             persistStateChange(from: state, to: state, premarkedTransient: .switching)
             throw error
         } catch {
@@ -270,7 +260,7 @@ struct WorkplaceRuntimeService {
     }
 
     /// 创建分支并切换(脏工作区的改动会原样带到新分支,无需 Stash);
-    /// base 为 nil 时基于仓库当前 HEAD(等价 `git checkout -b`),否则基于该分支。
+    /// `base` 为 .currentHead 时基于仓库当前 HEAD(等价 `git checkout -b`),否则基于该分支。
     func createBranch(
         for state: RepositorySyncState,
         in workplace: Workplace,
@@ -292,7 +282,6 @@ struct WorkplaceRuntimeService {
                 case .localBranch(let baseBranch):
                     let trimmedBase = baseBranch.trimmingCharacters(in: .whitespacesAndNewlines)
                     if trimmedBase.isEmpty {
-                        // 基线空白视为未指定:与旧行为一致,从 HEAD 创建。
                         try await gitService.createLocalBranch(trimmedBranch, in: state.localPath)
                     } else {
                         try await gitService.createBranch(trimmedBranch, fromRev: trimmedBase, in: state.localPath)
@@ -315,9 +304,6 @@ struct WorkplaceRuntimeService {
             updatedState.lastError = nil
             persistStateChange(from: state, to: updatedState)
         } catch let error as CancellationError {
-            // 等锁/执行中被取消不是失败(口径同 pull"取消不落假失败",错误类型与
-            // 锁取消同源):这些操作未预标瞬态、行从未被改动,不落 .failed("操作已取消"),
-            // 原样上抛。
             throw error
         } catch {
             var updatedState = state
@@ -353,9 +339,6 @@ struct WorkplaceRuntimeService {
             updatedState.lastError = nil
             persistStateChange(from: state, to: updatedState)
         } catch let error as CancellationError {
-            // 等锁/执行中被取消不是失败(口径同 pull"取消不落假失败",错误类型与
-            // 锁取消同源):这些操作未预标瞬态、行从未被改动,不落 .failed("操作已取消"),
-            // 原样上抛。
             throw error
         } catch {
             var updatedState = state
@@ -388,9 +371,6 @@ struct WorkplaceRuntimeService {
             updatedState.lastError = nil
             persistStateChange(from: state, to: updatedState)
         } catch let error as CancellationError {
-            // 等锁/执行中被取消不是失败(口径同 pull"取消不落假失败",错误类型与
-            // 锁取消同源):这些操作未预标瞬态、行从未被改动,不落 .failed("操作已取消"),
-            // 原样上抛。
             throw error
         } catch {
             var updatedState = state
@@ -426,9 +406,6 @@ struct WorkplaceRuntimeService {
             updatedState.lastError = nil
             persistStateChange(from: state, to: updatedState)
         } catch let error as CancellationError {
-            // 等锁/执行中被取消不是失败(口径同 pull"取消不落假失败",错误类型与
-            // 锁取消同源):这些操作未预标瞬态、行从未被改动,不落 .failed("操作已取消"),
-            // 原样上抛。
             throw error
         } catch {
             var updatedState = state
@@ -439,26 +416,22 @@ struct WorkplaceRuntimeService {
         }
     }
 
-    /// 按位置操作 stash 前的对账:弹窗里的 index 来自**打开那一刻**的列表快照,期间用户
-    /// 在 IDE/终端执行 `git stash push/drop` 会让同一位置指向另一条 stash——drop 命中
-    /// 错条不可恢复。已持有仓库锁,重读列表并比对消息与时间,任一不符即拒操作、要用户刷新。
+    /// 按位置操作 stash 前的对账:弹窗里的 index 来自**打开那一刻**的列表快照,期间外部
+    /// `git stash push/drop` 会让同一位置指向另一条(drop 错条不可恢复);已持仓库锁,重读列表校验。
     nonisolated private static func ensureStashEntryMatches(
         _ entry: GitStashEntry,
         gitService: any GitServicing,
         directory: String
     ) async throws {
-        // nil = 读取失败(超时/输出超限/进程起不来)。此时**不能**当作"栈里没有这条"
-        // 继续放行:位置仍在、内容可能已换,而对账正是为了拦住这一点。
+        // nil = 读取失败:此时**不能**当作"栈里没有这条"放行,对账正是为了拦住这一点。
         guard let entries = await gitService.stashList(in: directory) else {
             throw WorkplaceRuntimeServiceError.stashListChanged
         }
         guard let current = entries.first(where: { $0.index == entry.index }) else {
             throw WorkplaceRuntimeServiceError.stashListChanged
         }
-        // 首选按 stash 对象 ID 对账:位置(stash@{n})是易变身份,用户在 IDE/终端里
-        // 再 push/drop 一条,同一位置就指向另一个 stash,而消息与时间可能完全相同
-        // (同一次 `git stash push -m` 连点两次、秒级时间戳一致)。
-        // 消息+时间只作退化路径:列表来自不含 %H 的输出时(老格式/测试替身)才用。
+        // 首选按 stash 对象 ID 对账:位置(stash@{n})是易变身份,消息+时间可能完全相同
+        // (同一次 `git stash push -m` 连点两次);列表不含 %H 时才退化为消息+时间比对。
         if let expectedObjectID = entry.objectID, let currentObjectID = current.objectID {
             guard expectedObjectID == currentObjectID else {
                 throw WorkplaceRuntimeServiceError.stashListChanged
@@ -493,9 +466,6 @@ struct WorkplaceRuntimeService {
             updatedState.lastError = nil
             persistStateChange(from: state, to: updatedState)
         } catch let error as CancellationError {
-            // 等锁/执行中被取消不是失败(口径同 pull"取消不落假失败",错误类型与
-            // 锁取消同源):这些操作未预标瞬态、行从未被改动,不落 .failed("操作已取消"),
-            // 原样上抛。
             throw error
         } catch {
             var updatedState = state
@@ -529,9 +499,6 @@ struct WorkplaceRuntimeService {
             updatedState.lastError = nil
             persistStateChange(from: state, to: updatedState)
         } catch let error as CancellationError {
-            // 等锁/执行中被取消不是失败(口径同 pull"取消不落假失败",错误类型与
-            // 锁取消同源):这些操作未预标瞬态、行从未被改动,不落 .failed("操作已取消"),
-            // 原样上抛。
             throw error
         } catch {
             var updatedState = state
@@ -560,9 +527,6 @@ struct WorkplaceRuntimeService {
             persistStateChange(from: state, to: updatedState)
             return operation
         } catch let error as CancellationError {
-            // 等锁/执行中被取消不是失败(口径同 pull"取消不落假失败",错误类型与
-            // 锁取消同源):这些操作未预标瞬态、行从未被改动,不落 .failed("操作已取消"),
-            // 原样上抛。
             throw error
         } catch {
             var updatedState = state
@@ -575,7 +539,7 @@ struct WorkplaceRuntimeService {
 
     func switchRepositoriesToWorkBranch(
         in workplace: Workplace
-    ) async throws -> WorkplaceBulkBranchSwitchResult {
+    ) async throws -> WorkplaceBatchOperationResult {
         try ensureManagedWorkplace(workplace)
         let trimmedBranch = workplace.branch?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard trimmedBranch.isEmpty == false else {
@@ -590,7 +554,7 @@ struct WorkplaceRuntimeService {
     func switchRepositoriesToBranch(
         _ branch: String,
         in workplace: Workplace
-    ) async throws -> WorkplaceBulkBranchSwitchResult {
+    ) async throws -> WorkplaceBatchOperationResult {
         try ensureManagedWorkplace(workplace)
         let trimmedBranch = branch.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmedBranch.isEmpty == false else {
@@ -609,7 +573,7 @@ struct WorkplaceRuntimeService {
 
     func switchRepositoriesToDefaultBranch(
         in workplace: Workplace
-    ) async throws -> WorkplaceBulkBranchSwitchResult {
+    ) async throws -> WorkplaceBatchOperationResult {
         try ensureManagedWorkplace(workplace)
         let states = switchableStates(in: workplace)
         guard states.isEmpty == false else {
@@ -623,67 +587,6 @@ struct WorkplaceRuntimeService {
             }
             return .success(branch)
         }
-    }
-
-    func mergeDefaultBranchIntoCurrent(
-        in workplace: Workplace
-    ) async throws -> WorkplaceBulkBranchSwitchResult {
-        try ensureManagedWorkplace(workplace)
-        let states = switchableStates(in: workplace)
-        guard states.isEmpty == false else {
-            throw WorkplaceRuntimeServiceError.noLocalRepositories
-        }
-
-        let gitService = syncCoordinator.gitService
-        let results: [BatchMergeOperationResult] = await runConcurrentStateOperations(
-            states,
-            onLockCancelled: { state in
-                // 取消不是失败(对齐 pull 路径"取消不落假失败"):行保持原状态,不落库;
-                // 汇总单列 cancelled,与业务跳过区分。
-                .cancelled(state)
-            },
-            onUnexpectedLockError: { state, error in
-                .failed(Self.failedState(from: state, errorMessage: UserFacingError.message(for: error)))
-            }
-        ) { state in
-            do {
-                if await Self.shouldSkipMergeDefaultBranch(for: state, gitService: gitService) {
-                    return .skipped(Self.succeededState(from: state))
-                }
-
-                try await GitWorktreeSafety.withCleanWorkingTree(
-                    in: state.localPath,
-                    gitService: gitService,
-                    blockedOperation: .mergeDefaultBranchIntoCurrent
-                ) {
-                    _ = try await gitService.mergeDefaultBranchIntoCurrent(in: state.localPath)
-                }
-                return .merged(Self.succeededState(from: state))
-            } catch is CancellationError {
-                // 取消不是失败(口径同 onLockCancelled):不能把用户取消持久化成红色错误。
-                return .cancelled(state)
-            } catch {
-                return .failed(
-                    Self.failedState(
-                        from: state,
-                        errorMessage: UserFacingError.message(for: error)
-                    )
-                )
-            }
-        }
-
-        // 持久化走防抖写盘,不会失败。按"操作前快照 vs 结果"的字段增量合并回写,
-        // 不用操作前整行快照覆盖(lost update,口径同 retryClone)。
-        persistBatchChanges(states: states, results: results)
-
-        let summary = results.summarize()
-        return WorkplaceBulkBranchSwitchResult(
-            successCount: summary.successCount,
-            failedCount: summary.failedCount,
-            skippedCount: summary.skippedCount,
-            cancelledCount: summary.cancelledCount,
-            failedNames: summary.failedNames
-        )
     }
 
     func mergeDefaultBranchIntoCurrent(
@@ -715,9 +618,6 @@ struct WorkplaceRuntimeService {
             persistStateChange(from: state, to: updatedState)
             return outcome
         } catch let error as CancellationError {
-            // 等锁/执行中被取消不是失败(口径同 pull"取消不落假失败",错误类型与
-            // 锁取消同源):这些操作未预标瞬态、行从未被改动,不落 .failed("操作已取消"),
-            // 原样上抛。
             throw error
         } catch {
             var updatedState = state
@@ -728,12 +628,10 @@ struct WorkplaceRuntimeService {
         }
     }
 
-    /// 收集落在 `rootPath` 之下的路径(可选:再排除已持锁集合 `excludingLocked`)。
-    ///
-    /// 两个判定都要对路径逐级 lstat/stat 并解析符号链接,单次可达数百毫秒;
-    /// 对工作区全量同步状态行做整表遍历,在网盘/外置盘上足以冻结主线程数分钟。
-    /// 因此入参是**调用方在主线程取好的内存快照**,判定本身放后台执行
-    /// (口径同本文件对重试克隆/push 的处理)。
+    /// 收集落在 `rootPath` 之下的路径(可选再排除已持锁集合 `excludingLocked`)。
+    /// containment 要逐级 lstat/stat + 解析符号链接,单次可达数百毫秒;对工作区全量状态行做
+    /// 整表遍历,在网盘/外置盘上足以冻结主线程数分钟。因此入参必须是**主线程取好的内存快照**,
+    /// 判定本身放后台执行。
     private static func treePaths(
         snapshot: [String],
         within rootPath: String,
@@ -771,25 +669,17 @@ struct WorkplaceRuntimeService {
             workplaceStore.setSyncStatus(.removing, for: workplace.id, repositoryIDs: repoIDs)
 
             do {
-                // 删除整棵工作区目录必须与 pull/push/切分支等写路径互斥:否则并发
-                // 操作会打进正在被删除的目录(读到一半消失的 .git、写进已删目录)。
-                // 锁 key 是精确匹配,只锁工作区根路径罩不住仓库级写操作,
-                // 必须把目录自身与树内每条仓库 localPath 一起加锁。
+                // 删除整棵工作区目录必须与 pull/push/切分支等写路径互斥,否则并发操作会打进
+                // 正在被删的目录;锁 key 精确匹配,只锁工作区根罩不住仓库级写操作,
+                // 须把目录自身与树内每条仓库 localPath 一起加锁。
                 let fileSystemService = syncCoordinator.fileSystemService
                 let workplacePath = workplace.path
                 let ownStatePaths = originalStates.map(\.localPath)
                 let rootPath = workplaceRootPath
-                // 树内锁路径取"所有 localPath 落在被删目录之下"的同步状态行,
-                // 而不是只取本工作区的行:项目显式支持嵌套工作区(A 内可有 A/B),
-                // 递归删除同样会打进子工作区仓库的 pull/push,这些行也必须罩住。
-                //
-                // 快照不能只取一次:等锁可达数分钟,期间会有新行落进树内(嵌套工作区
-                // 编辑新增仓库时,其克隆锁不含被删工作区根),rmTree 就会与克隆写同一
-                // 目录。因此每次拿到锁后、动手删除前重取一次,漏了就放弃本轮、带并集重试。
+                // 树内锁路径取所有 localPath 落在被删目录之下的状态行,不只本工作区的行:
+                // 递归删除同样会打进嵌套子工作区(A 内可有 A/B)仓库的 pull/push。
+                // 等锁可达数分钟、期间会有新行落进树内:每次拿到锁后重取,漏了就带并集重试。
                 for attempt in 1...Self.deletionLockRecheckAttempts {
-                    // 主线程只取内存快照,containment 判定(逐级 lstat/stat + 符号链接
-                    // 解析)放后台:整表遍历在网盘/外置盘上足以冻结 UI 数分钟,
-                    // 口径同本文件"单次 fileExists 也必须离开主线程"。
                     let candidatePaths = workplaceStore.syncStates.map(\.localPath)
                     let containedStatePaths = await Self.treePaths(
                         snapshot: candidatePaths,
@@ -798,17 +688,14 @@ struct WorkplaceRuntimeService {
                     let lockedPaths = [workplacePath] + ownStatePaths + containedStatePaths
                     let missedPaths: [String] = try await RepositoryOperationLock.shared
                         .withLockPaths(lockedPaths) { () -> [String] in
-                            // 等锁期间路径可能被替换(symlink 换向、根目录变更):
-                            // :681 的 containment 校验发生在等锁之前,按 LocalPathSafety 的
-                            // TOCTOU 契约,破坏性删除必须在锁内、紧邻执行前复检。
-                            // 破坏性递归删除:必须用**严格**包含判定,不把"等于根"算作受管
-                            // (记录路径被篡改成恰好等于受管根时会删掉整棵根)。
+                            // 等锁期间路径可能被替换(symlink 换向、根目录变更),锁前的 containment
+                            // 结论已失效:破坏性删除必须在锁内、紧邻执行前用**严格**包含判定复检
+                            // ——记录路径被篡改成恰好等于受管根时,不把"等于根"算作受管才不会删掉整棵根。
                             try LocalPathSafety.validateStrictlyContainedPath(
                                 workplacePath,
                                 within: rootPath
                             )
                             let heldKeys = Set(lockedPaths.map { LocalPathSafety.canonicalLockKey(for: $0) })
-                            // 同上:主线程只取快照,判定与 canonical 化在后台完成。
                             let liveCandidatePaths = await MainActor.run {
                                 workplaceStore.syncStates.map(\.localPath)
                             }
@@ -837,14 +724,13 @@ struct WorkplaceRuntimeService {
                     break
                 }
             } catch {
-                // 磁盘可能是**半删**状态(递归删除中途 EACCES 等):原样恢复"目录健在"的
-                // 旧行会让 UI 呈假健康,要等下一轮逐仓库探测才纠偏。先按实探测再回滚。
+                // 磁盘可能是**半删**状态(递归删除中途 EACCES):原样恢复"目录健在"的旧行
+                // 会让 UI 呈假健康,要先按实探测再回滚。
                 let restoredStates = await Self.probeStatesForRollback(
                     originalStates,
                     failureReason: UserFacingError.message(for: error)
                 )
-                // 状态回滚走防抖写盘,不会失败;若未来引入可失败路径,此处必须留痕,
-                // 否则状态会长期停在 .removing,UI 上表现为"一直进行中"。
+                // 回滚走防抖写盘不会失败;若不落库,状态会长期停在 .removing(UI 一直"进行中")。
                 workplaceStore.replaceSyncStates(restoredStates, for: workplace.id)
                 let deleteError = WorkplaceDeletionError.fromRemovalError(
                     error,
@@ -924,15 +810,10 @@ struct WorkplaceRuntimeService {
         return branchStatus.hasUnpushedCommits || branchStatus.hasRemoteTrackingBranch == false
     }
 
-    /// git 操作终态回写(成功与失败同一口径),尽力而为:持久化走防抖写盘不会失败,
-    /// 直接落库,不改变抛给用户的错误。回写是按键增量合并——`updated` 由操作开始前的
-    /// 行快照 `original` 派生,操作期间(等锁 + git 可达数分钟)磁盘刷新/后台 pull
-    /// 可能已更新该行,拿整行快照覆盖会造成 lost update;这里只把本操作真正改动的
-    /// 字段应用到最新行,其余字段保留最新值(口径同 retryClone)。
+    /// 终态回写(成功/失败同口径、尽力而为)按 key **增量合并**:`updated` 派生自操作前的行快照,
+    /// 期间磁盘刷新/后台 pull 可能已更新该行,整行覆盖会造成 lost update;只应用本操作改动的字段。
     ///
-    /// `premarkedTransient`:本操作自己预标过的瞬态(如单仓/批量切分支的 .switching)。
-    /// 瞬态收口只允许归位这一种瞬态——行上若挂着**其它在途操作**的瞬态(后台 pull 的
-    /// .pulling 等),强改回本操作的终态会把别人的转轮掐掉。
+    /// `premarkedTransient`:只归位本操作自己预标过的瞬态,不得强改其它在途操作的瞬态。
     private func persistStateChange(
         from original: RepositorySyncState,
         to updated: RepositorySyncState,
@@ -941,8 +822,8 @@ struct WorkplaceRuntimeService {
         persistStateChanges([(original: original, updated: updated)], premarkedTransient: premarkedTransient)
     }
 
-    /// 批量操作结果的增量回写。runLimitedTasks 按输入序号回填槽位、返回顺序与输入
-    /// 严格对齐,states 与 results 可放心 zip 配对(同一工作区的行 key 唯一)。
+    /// 批量操作结果的增量回写。`ConcurrencyUtilities.runLimitedTasks` 按输入序号回填槽位、
+    /// 返回顺序与输入严格对齐,states 与 results 可放心 zip 配对(同一工作区的行 key 唯一)。
     private func persistBatchChanges<Result: BatchOperationResult>(
         states: [RepositorySyncState],
         results: [Result],
@@ -963,8 +844,7 @@ struct WorkplaceRuntimeService {
         var updates: [RepositorySyncState] = []
         updates.reserveCapacity(changes.count)
         for change in changes {
-            // 行在 await 窗口内被去重/prune:维持 updateSyncStates 的补录语义,
-            // 有自身改动的行原样回写(与改动前的整体覆盖行为一致),无变化则不落库。
+            // 行在 await 窗口内被去重/prune:有自身改动的行原样补录,无变化则不落库。
             guard let current = workplaceStore.syncStates.first(where: {
                 $0.workplaceID == change.updated.workplaceID && $0.repositoryID == change.updated.repositoryID
             }) else {
@@ -973,8 +853,6 @@ struct WorkplaceRuntimeService {
                 }
                 continue
             }
-            // 字段级增量合并(见 RepositorySyncState.merging):只回写本操作改动的
-            // 展示字段,其余字段以最新行为准,避免覆盖 await 窗口内的其他写入。
             if let merged = RepositorySyncState.merging(
                 updated: change.updated,
                 onto: change.original,
@@ -991,10 +869,9 @@ struct WorkplaceRuntimeService {
     /// 轮次必须有上限,否则磁盘持续变化时删除会无限期挂住。
     static let deletionLockRecheckAttempts = 3
 
-    /// 删除失败回滚时按磁盘实况刷新状态行:目录已不存在的行标失败并带上中断原因,
-    /// 其余行只更新 hasLocalDirectory。探测放后台——路径可能在网盘/外置盘上,
-    /// 单次 stat 也能阻塞主线程数秒。
-    /// 局限:目录"存在但内容被删了一半"无法靠一次 stat 分辨,这类行只更新存在标志。
+    /// 删除失败回滚时按磁盘实况刷新状态行:目录已不存在的行标失败并带上中断原因,其余只更新
+    /// hasLocalDirectory。探测放后台——路径可能在网盘/外置盘上,单次 stat 也能阻塞主线程数秒。
+    /// 局限:目录"存在但内容被删了一半"无法靠一次 stat 分辨。
     private static func probeStatesForRollback(
         _ states: [RepositorySyncState],
         failureReason: String
@@ -1029,13 +906,11 @@ struct WorkplaceRuntimeService {
     private func switchRepositories(
         _ states: [RepositorySyncState],
         resolveBranch: @escaping @Sendable (RepositorySyncState) async -> BatchBranchResolutionResult
-    ) async -> WorkplaceBulkBranchSwitchResult {
+    ) async -> WorkplaceBatchOperationResult {
         let gitService = syncCoordinator.gitService
         let results: [BatchBranchSwitchOperationResult] = await runConcurrentStateOperations(
             states,
             onLockCancelled: { state in
-                // 取消不是失败(对齐 pull 路径"取消不落假失败"):行保持原状态,不落库;
-                // 汇总单列 cancelled,与业务跳过区分,取消批量切分支后 UI 如实反馈"已取消"。
                 .cancelled(state)
             },
             onUnexpectedLockError: { state, error in
@@ -1049,8 +924,7 @@ struct WorkplaceRuntimeService {
                         return .skipped(Self.succeededState(from: state))
                     }
 
-                    // 单仓库粒度的"切换中"转轮,与单仓切换一致;最终结果在闭包外统一回写。
-                    // 闭包非 MainActor,Store 在主线程,经 MainActor.run 中转。
+                    // 单仓粒度的"切换中"转轮;闭包非 MainActor、Store 在主线程,须经 MainActor.run 中转。
                     let workplaceID = state.workplaceID
                     let repositoryID = state.repositoryID
                     await MainActor.run {
@@ -1070,8 +944,6 @@ struct WorkplaceRuntimeService {
                     }
                     return .success(Self.succeededState(from: state))
                 } catch is CancellationError {
-                    // 取消不是失败(口径同 onLockCancelled):checkout 做到一半被取消
-                    // 不能把行持久化成红色"操作已取消"。
                     return .cancelled(state)
                 } catch {
                     return .failed(
@@ -1091,14 +963,12 @@ struct WorkplaceRuntimeService {
             }
         }
 
-        // 持久化走防抖写盘,不会失败。按"操作前快照 vs 结果"的字段增量合并回写,
-        // 不用操作前整行快照覆盖(lost update,口径同 retryClone)。
-        // 本批量操作只预标过 .switching 瞬态:收口仅归位自己预标的行,
-        // 不得强改其它在途操作(如后台 pull)标注的瞬态。
+        // 增量合并回写,不用操作前整行快照覆盖(lost update)。
+        // 本批量操作只预标过 .switching:收口仅归位自己预标的行,不动其它在途操作的瞬态。
         persistBatchChanges(states: states, results: results, premarkedTransient: .switching)
 
         let summary = results.summarize()
-        return WorkplaceBulkBranchSwitchResult(
+        return WorkplaceBatchOperationResult(
             successCount: summary.successCount,
             failedCount: summary.failedCount,
             skippedCount: summary.skippedCount,

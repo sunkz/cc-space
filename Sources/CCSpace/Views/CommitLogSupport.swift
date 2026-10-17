@@ -1,11 +1,7 @@
 import Foundation
 
-/// 提交记录窗口的展示状态:计数与空态文案。
-///
-/// 关键词过滤不在这里做——已下推到 `git log`(见 `GitService.commitLogPage`),
-/// 在内存里再筛一遍会把 git 命中的**提交正文**判掉(本类型只持有 subject/author/hash),
-/// 反而重新造成"搜不到更早/更深命中"。
-/// "仅看未推送"切换数据源(全量 / @{u}..HEAD),搜索始终作用于当前数据源。
+/// 提交记录窗口的展示状态:计数与空态文案,不做关键词过滤(已下推到 `git log`;
+/// 本类型只持 subject/author/hash,再在内存筛会把 git 命中的正文判掉)。
 struct CommitLogPresentationState: Equatable {
     enum Scope: Equatable {
         case all
@@ -49,8 +45,7 @@ struct CommitLogPresentationState: Equatable {
         }
 
         canFilterUnpushed = hasUpstream
-        // 浏览 origin/x 这类远端跟踪引用时,"未推送"筛选本就不适用,
-        // 不能误归因为"当前分支未关联远端"。
+        // 浏览远端跟踪引用时"未推送"筛选本就不适用,不能误归因为"当前分支未关联远端"。
         if hasUpstream {
             unpushedToggleHelp = "只看当前分支尚未推送到上游的提交"
         } else if isRemoteTrackingRef {

@@ -524,7 +524,6 @@ final class RepositoryStoreTests: XCTestCase {
         XCTAssertEqual(survivor.defaultBranch, "master", "缺省才回填")
         XCTAssertEqual(survivor.mrTargetBranches, ["main", "dev"], "保序并集")
         XCTAssertEqual(result.idRemapping[dropped.id], kept.id)
-        XCTAssertTrue(result.crossURLNameConflicts.isEmpty, "同 URL 重复不是冲突")
     }
 
     /// 同名但**不同远端**:只丢弃多余记录、绝不重映射引用。
@@ -557,7 +556,6 @@ final class RepositoryStoreTests: XCTestCase {
         XCTAssertEqual(result.repositories.count, 1, "同名不同远端也只能留一条(名字全局唯一 + 目录按名派生)")
         XCTAssertEqual(result.repositories.first?.id, kept.id)
         XCTAssertNil(result.idRemapping[dropped.id], "不同远端之间禁止引用重映射")
-        XCTAssertEqual(result.crossURLNameConflicts, ["api"], "冲突必须被记录,便于归因")
         // 字段并入也不许跨远端发生:另一条的 defaultBranch 不得渗进保留项。
         XCTAssertNil(result.repositories.first?.defaultBranch)
     }
@@ -597,7 +595,6 @@ final class RepositoryStoreTests: XCTestCase {
         XCTAssertEqual(Set(result.repositories.map(\.id)), [keptByName.id, sameURLDifferentName.id])
         XCTAssertEqual(result.idRemapping[droppedCrossURL.id], sameURLDifferentName.id, "同远端的引用应改挂存活项")
         XCTAssertNil(result.idRemapping[keptByName.id])
-        XCTAssertEqual(result.crossURLNameConflicts, ["api"], "同名不同远端的冲突记录不受影响")
     }
 
     /// 引用重映射:工作区对被删项的选中/置顶换成保留项并按首现去重;

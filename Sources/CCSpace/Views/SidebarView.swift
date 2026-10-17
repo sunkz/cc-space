@@ -31,8 +31,6 @@ struct SidebarView: View {
         // body 顶部各取一次沿渲染路径复用,避免一次渲染重复过滤/排序、逐行重建 Set。
         let state = presentationState
         let failedIDs = failedWorkplaceIDs
-        // 相对时间基准整轮渲染只取一次:逐行各取 Date() 会让同一屏里的"3 小时前"
-        // 跨在阈值两侧(相邻行显示不一致),且每次 body 求值都重复构造日期。
         let currentTime = Date()
         return VStack(spacing: 0) {
             List(selection: $appViewModel.sidebarSelection) {
@@ -60,9 +58,8 @@ struct SidebarView: View {
                             } label: {
                                 Image(systemName: "arrow.up.arrow.down")
                                     .font(.system(size: 11, weight: .bold))
-                                    // borderless Menu 的 label 不认 foregroundStyle(连显式
-                                    // Color 都会被静默忽略,实测渲染成主色近黑),只认按钮级
-                                    // tint;要与右侧新建按钮同色就得走 tint。
+                                    // borderless Menu 的 label 不认 foregroundStyle(连显式 Color 都会被静默忽略,
+                                    // 实测渲染成主色近黑),只认按钮级 tint;要与右侧新建按钮同色就得走 tint。
                                     .tint(.primary)
                             }
                             .menuStyle(.borderlessButton)
@@ -86,12 +83,9 @@ struct SidebarView: View {
                             .contentShape(Rectangle())
                             .ccspaceHeaderIconChip(isHovered: createControlHovered)
                             .onHover { createControlHovered = $0 }
-                            // 不用 Cmd+N:macOS 惯例是"新建窗口",占用后用户按不出
-                            // 预期行为且没有对应菜单项告知。Cmd+Shift+N 与"新增"语义一致。
+                            // 不用 Cmd+N(macOS 惯例是"新建窗口",占用后用户按不出预期行为);Cmd+Shift+N 与"新增"语义一致。
                             .keyboardShortcut("n", modifiers: [.command, .shift])
                             .accessibilityLabel("新增工作区")
-                            // 图标按钮没有可见文字,不悬浮不知道是干嘛的、也不知道有快捷键;
-                            // 提示语沿用界面既有叫法「创建工作区」,顺带亮出 ⌘⇧N。
                             .ccspaceQuickHelp("创建工作区（⌘⇧N）")
                         }
                         // 修正 header 与行的尾随缩进差,使新建按钮与行尾置顶图标中心线上下对齐(-9 为离屏实测值)。
@@ -128,8 +122,7 @@ struct SidebarView: View {
                                 }
                             }
                     }
-                    // macOS 惯例的"偏好设置"快捷键;菜单栏没有对应 App 菜单项,
-                    // 挂在按钮上让 ⌘, 有落点(设置页已打开时为无害 no-op)。
+                    // 菜单栏没有对应 App 菜单项,把 macOS 惯例的 ⌘, 挂在按钮上让它有落点(设置页已打开时为无害 no-op)。
                     .keyboardShortcut(",", modifiers: .command)
                     .help("设置")
                     .accessibilityLabel("设置")
@@ -161,7 +154,6 @@ struct SidebarView: View {
 private extension View {
     /// 悬浮底色。`.plain` 按钮与 borderless Menu 都不带任何按压/悬浮反馈,
     /// header 里只剩一个灰色小图标时会被当成不可点的装饰,补这层底色作可供性。
-    /// 动效沿用 `CCSpaceIconActionButtonModifier` 的 snappy 0.18。
     func ccspaceHeaderIconChip(isHovered: Bool) -> some View {
         background(
             RoundedRectangle(cornerRadius: 5, style: .continuous)

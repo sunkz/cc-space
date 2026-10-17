@@ -52,7 +52,7 @@ final class WorkplaceDetailFeedbackFactoryTests: XCTestCase {
 
     func test_pushAllReturnsWarningWhenSuccessAndFailureMixed() {
         let feedback = WorkplaceDetailFeedbackFactory.pushAll(
-            result: RepositoryPushResult(successCount: 2, failedCount: 1, skippedCount: 1)
+            result: WorkplaceBatchOperationResult(successCount: 2, failedCount: 1, skippedCount: 1)
         )
 
         XCTAssertEqual(feedback.style, .warning)
@@ -61,7 +61,7 @@ final class WorkplaceDetailFeedbackFactoryTests: XCTestCase {
 
     func test_pushAllReturnsInfoWhenEverythingIsSkipped() {
         let feedback = WorkplaceDetailFeedbackFactory.pushAll(
-            result: RepositoryPushResult(successCount: 0, failedCount: 0, skippedCount: 2)
+            result: WorkplaceBatchOperationResult(successCount: 0, failedCount: 0, skippedCount: 2)
         )
 
         XCTAssertEqual(feedback.style, .info)
@@ -168,7 +168,7 @@ final class WorkplaceDetailFeedbackFactoryTests: XCTestCase {
 
     func test_switchAllToDefaultBranchReturnsWarningForMixedResults() {
         let feedback = WorkplaceDetailFeedbackFactory.switchAllToDefaultBranch(
-            result: WorkplaceBulkBranchSwitchResult(successCount: 2, failedCount: 1)
+            result: WorkplaceBatchOperationResult(successCount: 2, failedCount: 1)
         )
 
         XCTAssertEqual(feedback.style, .warning)
@@ -178,21 +178,13 @@ final class WorkplaceDetailFeedbackFactoryTests: XCTestCase {
     func test_switchAllToWorkBranchReturnsSuccessMessage() {
         let feedback = WorkplaceDetailFeedbackFactory.switchAllToWorkBranch(
             branch: "88",
-            result: WorkplaceBulkBranchSwitchResult(successCount: 3, failedCount: 0)
+            result: WorkplaceBatchOperationResult(successCount: 3, failedCount: 0)
         )
 
         XCTAssertEqual(feedback.style, .success)
         XCTAssertEqual(feedback.message, "已将 3 个仓库切换到工作分支 88")
     }
 
-    func test_mergeDefaultBranchIntoCurrentReturnsInfoWhenAllSkipped() {
-        let feedback = WorkplaceDetailFeedbackFactory.mergeDefaultBranchIntoCurrent(
-            result: WorkplaceBulkBranchSwitchResult(successCount: 0, failedCount: 0, skippedCount: 2)
-        )
-
-        XCTAssertEqual(feedback.style, .info)
-        XCTAssertEqual(feedback.message, "已跳过 2 个默认分支仓库")
-    }
 
     func test_createBranchReturnsSuccessMessage() {
         let feedback = WorkplaceDetailFeedbackFactory.createBranch(

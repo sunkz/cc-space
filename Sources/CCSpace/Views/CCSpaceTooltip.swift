@@ -102,9 +102,6 @@ private struct CCSpaceQuickHelpModifier: ViewModifier {
                     CCSpaceQuickHelpBridge(text: text)
                 }
                 .accessibilityHint(resolvedHint)
-        } else {
-            // text 为空:上游 ccspaceQuickHelp 已挡,这里兜底保持原样透传。
-            content
         }
     }
 }

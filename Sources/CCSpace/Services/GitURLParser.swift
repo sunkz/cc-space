@@ -1,15 +1,12 @@
 import Foundation
 
 enum GitURLParser {
-    /// 允许进入 git argv 的传输协议:`validateRemoteURL` 的白名单与设置页地址形态校验
-    /// 共用这一份,避免两处各自加协议时漂移。
+    /// `validateRemoteURL` 白名单与设置页地址形态校验共用这一份,避免两处各自加协议时漂移。
     static let allowedRemoteSchemes: Set<String> = ["http", "https", "ssh", "git", "file"]
 
-    /// 校验用户配置的远端仓库 URL,阻止两类攻击面进入 git argv:
-    /// 1. `ext::`/`fd::` 等可执行任意命令的传输形式(git 对用户直接发起的命令默认放行 ext::);
-    /// 2. 以 `-` 开头的 URL 被 git 解析为选项(如 `--upload-pack=`)。
-    /// 放行:http(s)/ssh/git/file 协议、scp 风格(user@host:path)与本地路径。
-    /// GitProcessRunner 另以 GIT_ALLOW_PROTOCOL 做进程级兜底。
+    /// 校验用户配置的远端 URL,阻止两类攻击面进入 git argv:
+    /// 1. `ext::`/`fd::` 等可执行任意命令的传输形式(git 对用户直接发起的命令默认放行 ext::);2. 以 `-` 开头的 URL 被 git 解析为选项(如 `--upload-pack=`)。
+    /// 放行 http(s)/ssh/git/file、scp 风格与本地路径;GitProcessRunner 另以 GIT_ALLOW_PROTOCOL 做进程级兜底。
     static func validateRemoteURL(_ rawURL: String) throws {
         let trimmed = rawURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.isEmpty == false else {
@@ -18,8 +15,7 @@ enum GitURLParser {
         guard trimmed.hasPrefix("-") == false else {
             throw gitURLParserError("仓库地址不合法：不能以 - 开头")
         }
-        // 控制字符拦截覆盖全部 Unicode Cc(此前只查 ASCII,U+0085 NEL 等
-        // 可躲过词法防线进入 argv)。
+        // 控制字符拦截须覆盖全部 Unicode Cc:只查 ASCII 时 U+0085 NEL 等可躲过词法防线进入 argv。
         guard trimmed.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) == false else {
             throw gitURLParserError("仓库地址不合法：包含控制字符")
         }
@@ -28,28 +24,20 @@ enum GitURLParser {
             guard allowedRemoteSchemes.contains(scheme) else {
                 throw gitURLParserError("仓库地址不合法：不支持的协议 \(scheme)")
             }
-            // 明文凭据防线:`https://user:pass@host/repo` 会原样进入 git argv,
-            // ps 与错误日志可见。用户名单独出现(token 当用户名)仍放行;
-            // 同时带用户名和密码则拒绝,引导走凭据管理或 SSH。
-            // 词法检测而非 URLComponents:畸形 URL(含空格等非法字符)会让解析返回 nil,
-            // 依赖解析的防线整段被跳过,`https://user:pa ss@host/r` 就带着凭据进了 argv。
+            // 明文凭据防线:`https://user:pass@host/repo` 原样进 git argv,ps 与错误日志可见;用户名单独出现(token 当用户名)仍放行。
+            // 用词法检测而非 URLComponents:畸形 URL(含空格等)解析返回 nil 会让依赖解析的防线整段被跳过,凭据带着就进了 argv。
             guard Self.containsPlainCredentials(trimmed) == false else {
                 throw gitURLParserError("远端地址中包含明文账号密码，请改用 SSH 地址或凭据管理（osxkeychain）后再试")
             }
             return
         }
-        // 无 "://" 时拒绝一切 "xxx::" 传输形式(ext::/fd:: 等);
-        // 其余按 scp 风格(user@host:path)或本地路径放行。
+        // 无 "://" 时拒绝一切 "xxx::" 传输形式(ext::/fd:: 等),其余按 scp 风格或本地路径放行。
         guard trimmed.contains("::") == false else {
             throw gitURLParserError("仓库地址不合法：不支持的协议形式")
         }
     }
 
-    /// 检测 `scheme://user:password@...` 形式的明文凭据(密码必须非空)。
-    ///
-    /// 纯词法:自 `://` 起取 authority(到首个 `/` 为止,无 `/` 则到串尾),
-    /// 其中最后一个 `@` 之前是 userinfo;userinfo 含非空 `:` 段即判定为账号+密码形式。
-    /// 只有用户名(token 即用户名)的形式按既有口径放行。
+    /// 检测 `scheme://user:password@...` 明文凭据(密码须非空);只有用户名(token 即用户名)的形式按既有口径放行。
     static func containsPlainCredentials(_ url: String) -> Bool {
         guard let schemeRange = url.range(of: "://") else { return false }
         let afterScheme = url[schemeRange.upperBound...]
@@ -70,8 +58,7 @@ enum GitURLParser {
         return try repositoryNameFromLegacyTail(gitURL)
     }
 
-    /// 仓库 Web 主页链接(`https://host[:port]/owner/repo`),供"在浏览器打开仓库"使用。
-    /// 与 MR 链接同一解析口径:支持 http(s)/ssh/git 与 scp 风格地址,`.git` 后缀剥离。
+    /// 仓库 Web 主页链接;与 MR 链接同一解析口径:支持 http(s)/ssh/git 与 scp 风格,`.git` 后缀剥离。
     static func repositoryWebURL(from remoteURL: String) throws -> URL {
         let location = try repositoryWebLocation(from: remoteURL)
         var components = URLComponents()
@@ -152,8 +139,7 @@ private extension GitURLParser {
     static func repositoryWebLocation(from remoteURL: String) throws -> RepositoryWebLocation {
         let trimmedRemoteURL = remoteURL.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // host 须非空:`file:///path` 这类无 host 的本地 URL 会匹配出空 host,
-        // 直接放行会产出畸形 Web 链接;落到 scp 分支解析失败后统一报"无法解析仓库地址"。
+        // host 须非空:`file:///path` 这类无 host 的本地 URL 会匹配出空 host,直接放行会产出畸形 Web 链接;落到 scp 分支解析失败后统一报"无法解析仓库地址"。
         if let components = URLComponents(string: trimmedRemoteURL),
            let host = components.host, host.isEmpty == false,
            let repositoryPath = normalizedRepositoryPath(from: components.path) {
@@ -161,8 +147,7 @@ private extension GitURLParser {
                 scheme: normalizedWebScheme(from: components.scheme),
                 host: host,
                 port: normalizedWebPort(from: components),
-                // URLComponents.path 保留百分号编码,`my%20repo` 会以编码形态
-                // 泄漏进仓库名与 Web 链接(再被二次编码成 %2520);
+                // URLComponents.path 保留百分号编码,`my%20repo` 会以编码形态泄漏进仓库名与 Web 链接(再被二次编码成 %2520);
                 // 出口处统一解码,解码失败(字面 % 的非法序列)原样返回。
                 repositoryPath: percentDecoded(repositoryPath),
                 provider: hostingProvider(for: host)
@@ -191,9 +176,7 @@ private extension GitURLParser {
         if trimmedPath.hasSuffix(".git") {
             let repositoryPath = String(trimmedPath.dropLast(4))
                 .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            // 路径只有 `.git` 时剥完是空串:返回空串会让 Web 链接解析器以为解析成功
-            // (产出 `https://host/`),而 Store 取仓库名时抛"无法解析仓库名称"——
-            // 同一个输入两处口径不一致。这里直接判失败,让"能否解析"一次定死。
+            // 路径只有 `.git` 时剥完是空串:返回空串会让 Web 链接以为解析成功(产出 `https://host/`)而仓库名处又抛错,两处口径不一致;这里直接判失败,一次定死。
             return repositoryPath.isEmpty ? nil : repositoryPath
         }
         return trimmedPath
@@ -250,17 +233,16 @@ private extension GitURLParser {
     static func hostingProvider(for host: String) -> HostingProvider {
         let normalizedHost = host.lowercased()
 
-        // 精确后缀匹配:子串匹配(`contains("github")`)会把 gitlab-cache.example.net、
-        // my-giteo-mirror 这类自建域名误分类,生成打不开的 MR 链接。
+        // 精确后缀匹配:子串匹配(`contains("github")`)会把 gitlab-cache.example.net、my-giteo-mirror 这类自建域名误分类,生成打不开的 MR 链接。
         func matches(_ domain: String) -> Bool {
             normalizedHost == domain || normalizedHost.hasSuffix("." + domain)
         }
-        // 自建实例的 label 启发:主机名**首段**恰好是 gitlab/gitea 等(如 gitlab.acme.com)。
+        // 自建实例启发:主机名**首段**恰好是 gitlab/gitea 等(如 gitlab.acme.com)。
         func firstLabel(_ label: String) -> Bool {
             normalizedHost.split(separator: ".", omittingEmptySubsequences: true).first.map(String.init) == label
         }
 
-        if matches("github.com") || matches("ssh.github.com") || firstLabel("github") {
+        if matches("github.com") || firstLabel("github") {
             return .github
         }
         if matches("gitee.com") || firstLabel("gitee") {
@@ -272,20 +254,15 @@ private extension GitURLParser {
         if matches("dev.azure.com") || matches("visualstudio.com") || firstLabel("dev.azure") || firstLabel("visualstudio") {
             return .unsupported("Azure DevOps")
         }
-        // gitlab.net 是第三方商业域名,并非 GitLab 官方域,不作为实例后缀匹配
-        // (疑似 gitlab.io 笔误);`gitlab.xx` 自建实例形态由 firstLabel("gitlab") 覆盖。
+        // gitlab.net 是第三方商业域名而非 GitLab 官方域(疑似 gitlab.io 笔误),不作为实例后缀;自建形态由 firstLabel("gitlab") 覆盖。
         if matches("gitlab.com") || firstLabel("gitlab") {
             return .gitlab
         }
         if firstLabel("gitea") || firstLabel("gogs") || matches("gitea.com") {
             return .unsupported("Gitea")
         }
-        // 取舍说明:未知 host 维持 GitLab MR 格式兜底而非返回 .unsupported——
-        // 枚举虽有 unsupported(String) 可用,但现有 MergeRequestServiceTests 以
-        // 未知 host(code.example.com)锁定兜底行为,且自建 GitLab 场景兜底命中率
-        // 不低;改为显式报错需要连同上游测试与产品预期一起调整,此处不强行切换。
-        // 已知代价:非 GitLab 的未知平台会生成打不开的死 MR 链接
-        // (仓库主页链接不受影响)。
+        // 取舍:未知 host 维持 GitLab MR 格式兜底(自建 GitLab 命中率不低,且现有测试以未知 host 锁定该行为);
+        // 已知代价:非 GitLab 的未知平台会生成打不开的死 MR 链接(仓库主页链接不受影响)。
         return .gitlab
     }
 

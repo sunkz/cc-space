@@ -2,15 +2,10 @@ import SwiftUI
 import AppKit
 
 private enum WorkplaceDetailRefreshInterval {
-    /// 轮询 tick 间隔:应用激活期间的常驻心跳。
     static let activeGitStatus: TimeInterval = 5
-    /// 分支快照(含状态角标)的最小重载间隔。
-    ///
-    /// 每次重载对每个本地仓库各起一个 git 进程。此前跟着 5 秒心跳走,10 仓库的
-    /// 工作区就是每分钟 100+ 次 fork/exec;角标(领先/落后/未提交)延迟 30 秒
-    /// 完全可接受,进程数降到 1/6。
+    /// 分支快照最小重载间隔:每次重载对每个本地仓库各起一个 git 进程,不跟 5 秒心跳走
+    /// (角标延迟 30 秒可接受,进程数降到 1/6)。
     static let branchSnapshotReload: TimeInterval = 30
-    /// 聚焦等事件触发刷新的最小间隔,避免连续通知造成重复加载。
     static let minFocusEventInterval: TimeInterval = 2
 }
 
@@ -34,7 +29,6 @@ struct WorkplaceDetailActions {
     let onCreateMergeRequest: (RepositorySyncState, RepositoryConfig, String?) -> Void
     /// 分支面板行内"向该分支创建 MR"（目标分支为末参，当前分支为源，不 Push）。
     let onCreateMergeRequestForBranch: (RepositorySyncState, RepositoryConfig, String) -> Void
-    /// 在浏览器打开仓库主页(仓库行右键/⋯ 菜单)。
     let onOpenRepositoryWeb: (RepositorySyncState, RepositoryConfig) -> Void
     let onDeleteRepository: (RepositorySyncState, String) -> Void
     let onTogglePinnedRepository: (RepositorySyncState) -> Void
@@ -42,7 +36,6 @@ struct WorkplaceDetailActions {
     let onPopStash: (RepositorySyncState, GitStashEntry, String) -> Void
     let onDropStash: (RepositorySyncState, GitStashEntry, String) -> Void
     let onAbortInterruptedOperation: (RepositorySyncState, String) -> Void
-    let onMergeDefaultBranchIntoCurrent: () -> Void
     let onSwitchAllRepositoriesToDefaultBranch: () -> Void
     let onSwitchAllRepositoriesToWorkBranch: () -> Void
     let onRefreshStatuses: () -> Void
@@ -60,7 +53,6 @@ struct WorkplaceDetailView: View {
     let isPerformingAction: Bool
     let branchRefreshSeed: Int
     let gitService: GitServicing
-    /// 打开方式菜单的编辑器/终端列表,由根视图的 OpenActionsModel 定期刷新注入。
     let installedEditors: [ExternalEditor]
     let installedTerminals: [ExternalEditor]
     let preferredOpenActionID: String?
@@ -68,41 +60,35 @@ struct WorkplaceDetailView: View {
     @Binding var feedback: CCSpaceFeedback?
     @State private var branchSnapshots: [RepositoryBranchCacheKey: RepositoryBranchSnapshot] = [:]
     @State private var showingDeleteConfirmation = false
-    /// 删除确认弹窗内容:在删除按钮触发时刻做一次目录探测后写入。
-    /// 不能按 body 求值现算——此前 .alert 参数直接读计算属性,每帧一次主线程 stat。
+    /// 删除确认弹窗内容:在删除按钮触发时刻做一次目录探测后写入。不能按 body 求值现算——
+    /// `.alert` 参数直接读计算属性等于每帧一次主线程 stat。
     @State private var deleteConfirmation: WorkplaceDeleteConfirmationState?
     @State private var periodicRefreshSeed = 0
     @State private var manualRefreshSeed = 0
     @State private var pendingRefreshFeedback: CCSpaceFeedback?
     @State private var branchRefreshTask: Task<Void, Never>?
-    /// 分支刷新任务代际:任务体末尾只在"自己仍是最新一次排程"时才复位句柄。
-    /// 否则被取消的旧任务晚于视图复现后的新任务收尾时,会把**新任务**的句柄抹成
-    /// nil,下次排程再起一个并发加载器(同 RootSplitView 的 refreshGeneration 防线)。
+    /// 分支刷新任务代际:任务体末尾只在"自己仍是最新一次排程"时才复位句柄,否则被取消的旧任务晚于
+    /// 新任务收尾会把**新任务**句柄抹成 nil,下次排程再起一个并发加载器(同 RootSplitView 的 refreshGeneration)。
     @State private var branchRefreshGeneration: UInt64 = 0
     @State private var hasQueuedBranchRefresh = false
     @State private var lastFocusRefreshTime: Date?
     @State private var hostWindow: NSWindow?
-    /// 常驻轮询任务句柄:随场景阶段启停,视图消失时取消。
     @State private var periodicRefreshTask: Task<Void, Never>?
-    /// scenePhase 的 @State 镜像:长驻任务捕获的是首帧视图拷贝,@Environment 的值
-    /// 在拷贝上是冻结快照(同 RootSplitView 的做法),循环里读镜像才是当前值。
+    /// scenePhase 的 @State 镜像:长驻任务捕获首帧视图拷贝,@Environment 的值在拷贝上是冻结快照(同 RootSplitView)。
     @State private var mirroredScenePhase: ScenePhase = .active
-    /// syncStates 的本地目录镜像:@State 走外部存储,长驻闭包里读到的是当前值,
-    /// 不是首帧快照(镜像内容由 WorkplaceDetailLocalDirectoryMirror 求值)。
+    /// syncStates 的本地目录镜像:@State 走外部存储,长驻闭包里读到当前值而非首帧快照。
     @State private var localDirectoryMirror = WorkplaceDetailLocalDirectoryMirror(syncStates: [])
-    /// 工作区目录探测结果:仅在没有任何同步态行时供"打开目录"可用性兜底。
-    /// 后台异步探测写回,不让 fileExists 留在 body 求值链上(网盘/外置盘会卡主线程)。
+    /// 工作区目录探测结果:仅在没有任何同步态行时供"打开目录"可用性兜底;后台异步写回,
+    /// body 求值链零磁盘 IO(网盘/外置盘会卡主线程)。
     @State private var probedWorkplaceDirectoryExists = false
     /// presentationState.isActionLocked 的镜像:分支加载任务闭包读当前锁状态。
     @State private var mirroredIsActionLocked = false
-    /// 行视图共用的仓库信息服务。struct View 无稳定生命周期:SwiftUI 每次父视图
-    /// 重渲染都会重新执行 init 重建实例(纯值类型、Sendable,行为无害),
-    /// 这里只是避免同一次求值内每行各建一份,不要把它当有状态的长期持有物。
+    /// 行视图共用的仓库信息服务。struct View 无稳定生命周期:SwiftUI 每次父视图重渲染都重跑 init 重建实例
+    /// (纯值、Sendable,行为无害),这里只避免同一次求值内每行各建一份,不是有状态的长期持有物。
     private let repositoryInfoService: RepositoryInfoService
 
     private var repositoryByID: [UUID: RepositoryConfig] {
-        // 导入的备份 JSON 理论上可能含重复 id,uniqueKeysWithValues 会直接 trap;
-        // 循环构建时后者覆盖前者即可。
+        // 导入的备份 JSON 理论上可能含重复 id,uniqueKeysWithValues 会直接 trap;循环构建时后者覆盖前者。
         var lookup = Dictionary<UUID, RepositoryConfig>(minimumCapacity: repositories.count)
         for repository in repositories {
             lookup[repository.id] = repository
@@ -120,7 +106,6 @@ struct WorkplaceDetailView: View {
     private var actionState: WorkplaceActionState {
         WorkplaceActionState(
             workplace: workplace,
-            repositories: repositories,
             syncStates: syncStates,
             probedWorkplaceDirectoryExists: probedWorkplaceDirectoryExists
         )
@@ -237,9 +222,8 @@ struct WorkplaceDetailView: View {
         .ccspaceScreenBackground()
         .navigationTitle(workplace.name)
         .toolbar {
-            // 只构建一次并沿渲染路径下发:此前 9 个 toolbar 项各自访问
-            // presentationState,每次 body 求值重算 9 遍 WorkplaceActionState
-            // (遍历全部 syncStates + 建 Set + filter),是详情页最热的路径。
+            // 只构建一次并沿渲染路径下发:9 个 toolbar 项各读 presentationState 会让每次 body 求值
+            // 重算 9 遍 WorkplaceActionState(遍历全部 syncStates + 建 Set + filter),是详情页最热路径。
             let state = presentationState
             operationProgressToolbarItem(state)
             editToolbarItem(state)
@@ -263,22 +247,17 @@ struct WorkplaceDetailView: View {
         } message: {
             Text(deleteConfirmation?.message ?? "")
         }
-        // 定时轮询用 .task 长循环驱动;Timer.publish 写在 body 里会随每次渲染
-        // 重建、倒计时归零,交互频繁时轮询会被无限推迟。
-        // 轮询仅在 scenePhase == .active 时运行:非活跃(应用退到后台)立即停表,
-        // 回到活跃时立即刷一次并恢复定时器。
+        // 定时轮询用 .task 长循环驱动;Timer.publish 写在 body 里会随每次渲染重建、倒计时归零,轮询被无限推迟。
         .onAppear {
-            // 镜像先于周期任务对齐(onChange 只在**变化**时触发,首帧必须补一次):
-            // 分支刷新任务可能在 .task 之前就创建,那里同样只读镜像。
+            // 镜像先于周期任务对齐(onChange 只在**变化**时触发,首帧必须补一次):分支刷新任务可能在 .task 之前就创建。
             mirroredScenePhase = scenePhase
         }
         .task {
-            // @Environment 的值在 .task 执行时刻仍是当前值(闭包每次渲染重建),
-            // 先同步镜像再启停;此后长驻循环只读镜像,不碰冻结的首帧拷贝。
+            // @Environment 的值在 .task 执行时刻仍是当前值(闭包每次渲染重建),先同步镜像再启停;
+            // 此后长驻循环只读镜像,不碰冻结的首帧拷贝。
             mirroredScenePhase = scenePhase
             syncPeriodicStatusRefresh()
         }
-        // 目录存在性后台探测:结果只写入 @State,body 求值链零磁盘 IO。
         .task(id: workplace.path) {
             let path = workplace.path
             let exists = await Task.detached(priority: .utility) {
@@ -287,7 +266,6 @@ struct WorkplaceDetailView: View {
             guard Task.isCancelled == false else { return }
             probedWorkplaceDirectoryExists = exists
         }
-        // 应用重新激活(从其他 App 切回)立即刷新并恢复轮询;退到后台停表。
         .onChange(of: scenePhase) { _, newPhase in
             mirroredScenePhase = newPhase
             guard newPhase == .active else {
@@ -297,29 +275,23 @@ struct WorkplaceDetailView: View {
             triggerFocusDrivenStatusRefresh()
             syncPeriodicStatusRefresh()
         }
-        // 长驻/异步闭包(轮询循环、分支加载任务)只读这两个 @State 镜像,
-        // 不读视图拷贝上的 syncStates/presentationState 冻结快照;initial 保证挂载首帧就同步。
+        // 长驻/异步闭包(轮询循环、分支加载任务)只读这两个 @State 镜像,不读视图拷贝上的 syncStates/presentationState 冻结快照;
+        // initial 保证挂载首帧就同步。
         .onChange(of: syncStates, initial: true) { _, states in
             localDirectoryMirror = WorkplaceDetailLocalDirectoryMirror(syncStates: states)
             syncActionLockedMirror(syncStates: states, isPerformingAction: isPerformingAction)
         }
-        // isActionLocked = isPerformingAction || isBusy,而 isBusy 只依赖
-        // syncStates 中匹配 workplace.id + 选中集合的行,以及 workplace.selectedRepositoryIDs
-        // (repositories 只参与 failedRepositories 的 filter,对 isBusy 零影响,见
-        // WorkplaceActionState)——这三条 onChange 合起来覆盖它的全部变化源。
-        // 因此下游一律观察镜像 mirroredIsActionLocked,**不再直接观察
-        // presentationState.isActionLocked**:那会让 presentationState(构造 WorkplaceActionState:
-        // 遍历全部 syncStates + 建 Set)每帧多算一次,把详情页热路径刚收敛下来的成本又加回去。
+        // isActionLocked(= isPerformingAction || isBusy)的全部变化源就是 syncStates、
+        // workplace.selectedRepositoryIDs 与 isPerformingAction;下游只观察镜像,直接读 presentationState 会让它每帧多构造一次。
         .onChange(of: isPerformingAction, initial: true) { _, performing in
             syncActionLockedMirror(syncStates: syncStates, isPerformingAction: performing)
         }
-        // 选中集合是 isBusy 的直接输入,此前却没有观察者——不出问题靠的是"选中变化 ⇒
-        // syncStates 行集合变化"这条未写明的 Store 不变量;显式观察,不依赖它。
+        // 显式观察选中集合,不依赖"选中变化 ⇒ syncStates 行集合变化"这条未写明的 Store 不变量。
         .onChange(of: workplace.selectedRepositoryIDs, initial: true) { _, _ in
             syncActionLockedMirror(syncStates: syncStates, isPerformingAction: isPerformingAction)
         }
-        // 本窗口重新获得焦点(如在 IDE/终端提交后切回)立即刷新;
-        // 按 hostWindow 过滤,Diff 等其他窗口成为 key 不再触发全量刷新。
+        // 本窗口重新获得焦点(如在 IDE/终端提交后切回)立即刷新;按 hostWindow 过滤,
+        // 避免 Diff 等其他窗口成为 key 时触发全量刷新。
         .background(HostWindowReader { hostWindow = $0 })
         .onReceive(
             NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)
@@ -330,10 +302,8 @@ struct WorkplaceDetailView: View {
         .onChange(of: branchRefreshToken, initial: true) { _, _ in
             scheduleBranchSnapshotRefresh()
         }
-        // 兜底:锁释放瞬间补一次快照重载。动作完成时的 invalidate 若恰好在
-        // isActionLocked 仍为 true 的渲染帧里被消费,loadBranches 会被守卫跳过
-        // 且不再有第二次 token 变化——分支面板对号停在旧值直到 30s 轮询。
-        // 观察镜像(而非 presentationState.isActionLocked)以免每帧多构造一次 presentationState。
+        // 兜底:锁释放瞬间补一次快照重载。动作完成时的 invalidate 若恰在 isActionLocked 仍为 true 的渲染帧里
+        // 被消费,loadBranches 会被守卫跳过且不再有第二次 token 变化(故观察镜像,避免每帧多构造 presentationState)。
         .onChange(of: mirroredIsActionLocked) { _, locked in
             guard locked == false else { return }
             scheduleBranchSnapshotRefresh()
@@ -348,8 +318,6 @@ struct WorkplaceDetailView: View {
         }
     }
 
-    /// 按当前场景阶段启停常驻轮询:活跃且任务未运行则启动,否则停表。
-    /// 读 mirroredScenePhase(@State)而非 @Environment:后者在长驻闭包里是首帧快照。
     private func syncPeriodicStatusRefresh() {
         guard mirroredScenePhase == .active else {
             stopPeriodicStatusRefresh()
@@ -364,28 +332,20 @@ struct WorkplaceDetailView: View {
         periodicRefreshTask = nil
     }
 
-    /// 同步 isActionLocked 镜像;只由上面三条 onChange 调用(带 initial,挂载首帧即同步),
-    /// 不在 body 热路径上求值。式子与 WorkplaceDetailPresentationState.isActionLocked 同源
-    /// (= isPerformingAction || actionState.isBusy),显式接收最新入参而非读闭包捕获的视图拷贝。
+    /// 只由上面三条带 initial 的 onChange 调用,不在 body 热路径求值;式子与 PresentationState.isActionLocked
+    /// 同源(= isPerformingAction || isBusy),显式接收最新入参而非读闭包捕获的视图拷贝。
     private func syncActionLockedMirror(
         syncStates states: [RepositorySyncState],
         isPerformingAction performing: Bool
     ) {
         mirroredIsActionLocked = performing || WorkplaceActionState(
             workplace: workplace,
-            repositories: repositories,
             syncStates: states
         ).isBusy
     }
 
-    /// 常驻轮询 git 状态;仅在 App 活跃期间存在(由 scenePhase 门控启停)。
-    /// 场景退出活跃时 onChange 会取消任务而退出循环,避免后台仍触发全量分支快照。
-    /// 契约:循环内只读 @State 镜像(localDirectoryMirror 等),它们走外部存储,
-    /// 任何时刻都是当前值;不要读 @Environment 或视图拷贝上的存储属性——那在
-    /// 长驻任务捕获的首帧拷贝上是冻结快照,读不到实时值(启停仍依赖 .onChange
-    /// 的取消与重建,循环只需响应 Task.sleep 的取消错误)。
-    /// @MainActor:循环每拍直写 @State(periodicRefreshSeed/syncStates),
-    /// 必须落在主执行器;Task.sleep 本身异步等待,不会阻塞主线程。
+    /// 契约:循环内只读 @State 镜像(外部存储,任何时刻都是当前值),不读 @Environment 或视图拷贝上的存储属性——
+    /// 那在长驻任务捕获的首帧拷贝上是冻结快照。@MainActor:每拍直写 @State 须落主执行器;Task.sleep 异步等待不阻塞主线程。
     @MainActor
     private func runPeriodicStatusRefresh() async {
         var lastSnapshotReload = Date.distantPast
@@ -393,10 +353,9 @@ struct WorkplaceDetailView: View {
             do {
                 try await Task.sleep(for: .seconds(WorkplaceDetailRefreshInterval.activeGitStatus))
             } catch {
-                return // 任务被取消(视图销毁或退到后台),退出循环
+                return
             }
             guard localDirectoryMirror.hasAnyLocalDirectory else { continue }
-            // 分支快照按最小间隔节流推进,不跟着 5 秒心跳每次都重载。
             let now = Date()
             guard now.timeIntervalSince(lastSnapshotReload)
                 >= WorkplaceDetailRefreshInterval.branchSnapshotReload else { continue }
@@ -413,7 +372,7 @@ struct WorkplaceDetailView: View {
                 Image(systemName: "square.and.pencil")
             }
             .accessibilityLabel("编辑工作区")
-            .ccspaceToolbarActionButton(prominent: true)
+            .ccspaceToolbarActionButton()
             .disabled(!state.canEditWorkplace)
             .ccspaceQuickHelp(state.editHelp)
         }
@@ -449,7 +408,7 @@ struct WorkplaceDetailView: View {
                 Image(systemName: "square.and.arrow.up")
             }
             .accessibilityLabel("Push 所有仓库")
-            .ccspaceToolbarActionButton(prominent: true)
+            .ccspaceToolbarActionButton()
             .disabled(!state.canPushAllRepositories)
             .ccspaceQuickHelp(state.pushHelp)
         }
@@ -463,7 +422,7 @@ struct WorkplaceDetailView: View {
                 Image(systemName: "arrow.clockwise")
             }
             .accessibilityLabel("刷新全部仓库状态")
-            .ccspaceToolbarActionButton(prominent: true)
+            .ccspaceToolbarActionButton()
             .disabled(!state.canRefreshAllRepositories)
             .ccspaceQuickHelp(state.refreshHelp)
         }
@@ -477,7 +436,7 @@ struct WorkplaceDetailView: View {
                 Image(systemName: "square.and.arrow.down")
             }
             .accessibilityLabel("Pull 所有仓库")
-            .ccspaceToolbarActionButton(prominent: true)
+            .ccspaceToolbarActionButton()
             .disabled(!state.canSyncAllRepositories)
             .ccspaceQuickHelp(state.syncHelp)
         }
@@ -497,7 +456,7 @@ struct WorkplaceDetailView: View {
             } label: {
                 Label("切到默认分支", systemImage: "arrow.uturn.backward.circle")
             }
-            .ccspaceToolbarActionButton(prominent: true)
+            .ccspaceToolbarActionButton()
             .disabled(!state.canSwitchRepositoriesToDefaultBranch)
             .ccspaceQuickHelp(state.switchDefaultBranchHelp)
         }
@@ -510,7 +469,7 @@ struct WorkplaceDetailView: View {
             } label: {
                 Label("切到工作分支", systemImage: "hammer.circle")
             }
-            .ccspaceToolbarActionButton(prominent: true)
+            .ccspaceToolbarActionButton()
             .disabled(!state.canSwitchRepositoriesToWorkBranch)
             .ccspaceQuickHelp(state.switchWorkBranchHelp)
         }
@@ -542,7 +501,7 @@ struct WorkplaceDetailView: View {
             }
             .menuStyle(.borderlessButton)
             .accessibilityLabel("在 \(preferredOpenAction.displayName) 中打开")
-            .ccspaceToolbarActionButton(prominent: true)
+            .ccspaceToolbarActionButton()
             .disabled(!state.canOpenDirectory)
             .ccspaceQuickHelp("在 \(preferredOpenAction.displayName) 中打开")
         }
@@ -561,20 +520,16 @@ struct WorkplaceDetailView: View {
                 Image(systemName: "trash")
             }
             .accessibilityLabel("删除工作区")
-            .ccspaceToolbarActionButton(prominent: true)
+            .ccspaceToolbarActionButton()
             .disabled(!state.canDeleteWorkplace)
             .ccspaceQuickHelp(state.deleteHelp)
         }
     }
 
-    /// @MainActor:await 分支加载回来后直写 @State(branchSnapshots),
-    /// 需在主执行器落笔;快照加载本体仍在后台执行。
-    /// 返回值表示本轮是否真正完成了加载:被动作锁/非活跃跳过的轮次不得据此
-    /// 展示"已刷新"提示。
+    /// @MainActor:await 回来后直写 @State(branchSnapshots)需在主执行器落笔,快照加载本体仍在后台。
+    /// 返回值表示本轮是否真正完成加载:被动作锁/非活跃跳过的轮次不得据此展示"已刷新"提示。
     @MainActor
     private func loadBranches() async -> Bool {
-        // 读 @State 镜像而非视图拷贝上的存储属性:本方法由分支刷新任务的
-        // 长驻闭包调用,拷贝里的 syncStates/scenePhase/isActionLocked 是首帧冻结值。
         let localSyncStates = localDirectoryMirror.localDirectoryStates
         guard localSyncStates.isEmpty == false else {
             branchSnapshots = [:]
@@ -611,11 +566,8 @@ struct WorkplaceDetailView: View {
                 didLoadSnapshots = await loadBranches() || didLoadSnapshots
             } while hasQueuedBranchRefresh && Task.isCancelled == false
 
-            // 手动刷新的反馈在刷新真正完成后展示,避免"已刷新"先于刷新发生;
-            // 本轮全部被动作锁/非活跃跳过时不展示,防止误报。任务被取消时保留
-            // 待展示反馈,交给下一次排队加载(如锁释放兜底补刷)消费。
-            // 反馈与句柄复位都以"未被取消"为前提:被取消说明已有更新的排程接管,
-            // 旧任务不得回写 @State,更不能把新任务句柄抹成 nil(代际守卫)。
+            // 手动刷新的反馈在真正完成后展示,本轮全被动作锁/非活跃跳过时不展示;任务被取消时保留待展示反馈,
+            // 交给下一次排队加载消费。反馈与句柄复位都以"未取消 + 仍是最新代际"为前提:旧任务不得回写 @State、更不能抹掉新任务句柄。
             if Task.isCancelled == false, generation == branchRefreshGeneration {
                 if let pending = pendingRefreshFeedback {
                     if didLoadSnapshots {
@@ -640,14 +592,12 @@ struct WorkplaceDetailView: View {
         periodicRefreshSeed += 1
     }
 
-    /// sortedStates 由调用方在 body 顶部求值一次后传入,避免每轮重复排序。
     private func repositorySection(
         sortedStates: [RepositorySyncState],
         lookup: [UUID: RepositoryConfig],
         detailState: WorkplaceDetailPresentationState
     ) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            // 不渲染"Git 仓库"区块标题:详情页只此一区,标题冗余。
             if syncStates.isEmpty {
                 CCSpaceEmptyStateCard(
                     title: "暂无仓库",
@@ -671,8 +621,7 @@ struct WorkplaceDetailView: View {
     }
 
     /// 单行仓库卡片;参数较多,独立成函数避免 ViewBuilder 表达式类型检查超时。
-    /// lookup/state 由调用方沿渲染路径传入(每轮 body 求值各构建一次),
-    /// 否则 ForEach 每行各建一份字典/状态,退化为 O(N²)。
+    /// lookup/state 由调用方沿渲染路径传入,否则 ForEach 每行各建一份字典/状态,退化为 O(N²)。
     private func repositoryRow(
         for state: RepositorySyncState,
         lookup: [UUID: RepositoryConfig],
@@ -790,9 +739,8 @@ struct WorkplaceDetailView: View {
     }
 }
 
-/// 分支快照按 key 合并:本轮取数失败(快照缺失)的 key 沿用上一轮结果,
-/// 避免 30s 轮询中偶发 git 失败把该行分支信息整体抹掉;未参与本轮取数的 key
-/// (目录消失/仓库移除)不保留,快照字典不随历史无限膨胀。
+/// 分支快照按 key 合并:本轮取数失败的 key 沿用上一轮,避免 30s 轮询里偶发 git 失败抹掉该行分支信息;
+/// 未参与本轮取数的 key(目录消失/仓库移除)不保留,快照字典不随历史无限膨胀。
 enum WorkplaceBranchSnapshotMerge {
     static func merge(
         attemptedKeys: [RepositoryBranchCacheKey],
@@ -808,8 +756,7 @@ enum WorkplaceBranchSnapshotMerge {
     }
 }
 
-/// 读取宿主 NSWindow 的轻量探针:视图挂入窗口后回调一次,
-/// 用于把系统窗口通知过滤到"本视图所在的窗口"。
+/// 读取宿主 NSWindow 的轻量探针:用于把系统窗口通知过滤到本视图所在的窗口。
 private struct HostWindowReader: NSViewRepresentable {
     let onChange: (NSWindow?) -> Void
 

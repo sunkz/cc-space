@@ -57,24 +57,14 @@ struct RepositoryImportResult: Equatable, Sendable {
     let importedCount: Int
     let skippedCount: Int
     let mergedCount: Int
-
-    var hasChanges: Bool {
-        importedCount > 0 || mergedCount > 0
-    }
 }
 
 struct RepositoryDeduplicationResult: Sendable {
     let repositories: [RepositoryConfig]
     let changed: Bool
-    /// 被删重复项 id → 保留项 id。引用重映射用它把 selected/pinned/syncState
-    /// 从被删项转到保留项——此前"直接摘除引用"会让同时引用两条重复项的
-    /// 工作区明明有同 URL 的存活配置却丢掉仓库。
+    /// 被删重复项 id → 保留项 id:把 selected/pinned/syncState 从被删项转到保留项,
+    /// 直接摘除引用会让同时引用两条重复项的工作区明明有同 URL 的存活配置却丢掉仓库。
     var idRemapping: [UUID: UUID] = [:]
-    /// 同名但 URL 不同的冲突项(被丢弃那条的 repoName)。
-    ///
-    /// 这些 id **不在** `idRemapping` 里:引用会走兜底摘除,工作区显示"该仓库缺失",
-    /// 而不是被静默指向另一个远端。列出来供调用方留痕/提示用户重新添加。
-    var crossURLNameConflicts: [String] = []
 }
 
 enum RepositoryStoreError: LocalizedError, Equatable {
@@ -120,28 +110,20 @@ final class RepositoryStore: ObservableObject {
     @Published private(set) var repositories: [RepositoryConfig]
     private let fileStore: JSONFileStore
 
-    /// 本次启动 repositories.json 是否损坏并被重置为空。
-    /// 下游启动对账需据此跳过破坏性清理,避免单点损坏级联清空工作区数据。
+    /// 本次启动 repositories.json 是否损坏并被重置为空;下游启动对账据此跳过破坏性清理,
+    /// 避免单点损坏级联清空工作区数据。
     private(set) var didRecoverFromCorruptFile = false
-    /// 最近一次启动期自动去重实际清理的条数:nil 表示尚未发生过。
-    /// 去重是不可撤销的硬删除,只写 os_log 用户看不到"仓库少了一个"的原因,
-    /// 根视图据此给可见提示。本值只是提示里的条数**载荷**:事件由下面的单调
-    /// 序号触发观察,入队合并后可多次展示(见 DeduplicationNoticeQueue),
-    /// 不是"只提示一次"的开关。
+    /// 最近一次启动期自动去重清理的条数(nil = 尚未发生过)。去重是不可撤销的硬删除,只写
+    /// os_log 用户看不到"仓库少了一个"的原因,根视图据此给可见提示(事件由下面的序号触发)。
     @Published private(set) var lastDeduplicationCleanupCount: Int? = nil
-    /// 去重事件序号:每次成功去重 +1,单调递增。
-    /// 根视图按序号观察事件而非条数——`.onChange` 只在值变化时回调,
-    /// 同启动期两次清理条数相同(2→2)时按条数观察会漏掉第二次。
+    /// 去重事件序号:每次成功去重 +1。根视图按序号而非条数观察——`.onChange` 只在值变化时
+    /// 回调,同启动期两次清理条数相同(2→2)时按条数观察会漏掉第二次。
     @Published private(set) var deduplicationCleanupSequence: Int = 0
 
     init(fileStore: JSONFileStore) {
         self.fileStore = fileStore
-        // 抢救子集的回写必须排在 preserveCorruptFile **之后**(口径同 WorkplaceStore):
-        // save 走 rename 原子覆写,先回写就把磁盘上的原始损坏字节销毁了,随后
-        // preserveCorruptFile 优先 moveItem,会把**刚写好的抢救子集**改名成
-        // .corrupt- 副本拿走——repositories.json 直接不存在。下次启动 loadIfPresent
-        // 见文件缺失返回空列表且不再置 didRecoverFromCorruptFile(横幅与启动对账的
-        // 跳过闸门一并失效),表现为整池仓库凭空消失,并对账级联清空所有工作区选中项。
+        // 抢救子集的回写必须排在 preserveCorruptFile **之后**(口径同 WorkplaceStore):save 走 rename
+        // 原子覆写,先回写就把磁盘上的损坏字节销毁,随后 preserveCorruptFile 会把刚写好的子集改名拿走。
         var salvagedSubsetNeedsRewrite = false
         do {
             self.repositories = RepositoryStore.deduplicatedIDs(
@@ -150,8 +132,7 @@ final class RepositoryStore: ObservableObject {
         } catch {
             repositoryStoreLog.error("event=load_repositories_failed reason=\(error.localizedDescription, privacy: .public)")
             didRecoverFromCorruptFile = true
-            // 先逐元素容错抢救再保全原文件:preserveCorruptFile 会改名/复制原文件,
-            // 放到后面就读不到原始内容了。单条坏记录不该让整个仓库列表报废。
+            // 先逐元素容错抢救再保全原文件:preserveCorruptFile 会改名/复制原文件,放到后面就读不到原始内容。
             if let tolerated = fileStore.loadArrayToleratingBadElements(
                 RepositoryConfig.self,
                 from: "repositories.json"
@@ -164,7 +145,6 @@ final class RepositoryStore: ObservableObject {
             }
             fileStore.preserveCorruptFile(named: "repositories.json")
         }
-        // 保留成功后再回写子集:此刻原内容已存为 .corrupt- 副本,覆写才安全。
         if salvagedSubsetNeedsRewrite {
             do {
                 try fileStore.save(self.repositories, as: "repositories.json")
@@ -176,18 +156,15 @@ final class RepositoryStore: ObservableObject {
         }
     }
 
-    /// 按 `id` 去重保留首条:手工编辑或容错抢救可能引入重复 id。不去重则
-    /// `deduplicationResult` 的 keptIDs(Set<UUID>)会把两条不同 URL/名称的同 id
-    /// 记录都判为保留,UI ForEach(id: \.self) 撞重复身份,更新/删除只可达首条。
+    /// 按 `id` 去重保留首条:手工编辑或容错抢救可能引入重复 id。不去重则 `deduplicationResult` 的
+    /// keptIDs 会把两条同 id 记录都判为保留,UI ForEach(id: \.self) 撞重复身份,更新/删除只可达首条。
     nonisolated static func deduplicatedIDs(_ repositories: [RepositoryConfig]) -> [RepositoryConfig] {
         var seenIDs = Set<UUID>()
         return repositories.filter { seenIDs.insert($0.id).inserted }
     }
 
-    /// 内存先行、同步写盘:写盘成功才改内存,失败抛给调用方回滚。
-    /// 已知代价:每次写都是一次同步磁盘 I/O,数据目录在外置盘/网盘上时可能阻塞
-    /// 主线程数秒。刻意保持同步语义——跨文件原子提交与失败回滚都依赖
-    /// "写盘与状态更新在同一主线程上顺序发生",改成后台队列会牵动失败回滚时序。
+    /// 内存先行、同步写盘:写盘成功才改内存,失败抛给调用方回滚。刻意保持同步语义——跨文件原子提交
+    /// 与失败回滚都依赖"写盘与状态更新在同一主线程顺序发生",改到后台队列会牵动失败回滚时序。
     private func persistRepositories(_ newRepositories: [RepositoryConfig]) throws {
         try fileStore.save(newRepositories, as: "repositories.json")
         repositories = newRepositories
@@ -209,15 +186,13 @@ final class RepositoryStore: ObservableObject {
         JSONFileStore.makeEncoder()
     }
 
-    /// nonisolated:备份解码可能被挪到后台线程调用(见 decodeBackupEntries),
-    /// 不能挂在 @MainActor 实例上。
+    /// nonisolated:备份解码可能被挪到后台线程调用(见 decodeBackupEntries),不能挂在 @MainActor 实例上。
     nonisolated private static func makeBackupDecoder() -> JSONDecoder {
         JSONFileStore.makeDecoder()
     }
 
-    /// 建档一次落盘并返回创建好的记录:此前"建档→回填 MR 目标分支"两步写,
-    /// 第二步失败会留下"UI 报新增失败、记录已存在、重试撞 duplicateURL"的死角
-    /// )。返回实时记录供编排方直接使用,不必再按地址回查。
+    /// 建档一次落盘:此前"建档→回填 MR 目标分支"两步写,第二步失败会留下"UI 报新增失败、记录已存在、
+    /// 重试撞 duplicateURL"的死角。返回实时记录供编排方直接使用,不必再按地址回查。
     @discardableResult
     func addRepository(gitURL: String) throws -> RepositoryConfig {
         let normalizedGitURL = Self.expandingHomeDirectory(
@@ -248,15 +223,14 @@ final class RepositoryStore: ObservableObject {
         return repository
     }
 
-    /// internal:磁盘发现导入(`commitImportedRepositories`)要用同一套 URL 归一化口径
-    /// 判断"这个远端是否已在仓库池里",另写一份必然与这里的规则漂移。
+    /// internal:磁盘发现导入(`commitImportedRepositories`)要用同一套 URL 归一化口径判断远端是否已在池里,
+    /// 另写一份必然与这里的规则漂移。
     nonisolated static func gitURLsMatch(_ lhs: String, _ rhs: String) -> Bool {
         normalizedGitURLForComparison(lhs) == normalizedGitURLForComparison(rhs)
     }
 
     /// 本地路径的 `~/` 在建档时展开成绝对路径:git 子进程不经过 shell,`~` 不会被展开,
-    /// 原样入库后 `ls-remote`/`clone` 必然失败(机理同 `./`,只是它长得像绝对路径)。
-    /// 只认整串以 `~` 开头的形态;`git@host:~/x` 里的 `~` 属远端 shell 语义,不能动。
+    /// 原样入库后 ls-remote/clone 必然失败。只认整串以 `~` 开头;`git@host:~/x` 里的 `~` 属远端 shell 语义。
     nonisolated static func expandingHomeDirectory(_ gitURL: String) -> String {
         guard gitURL == "~" || gitURL.hasPrefix("~/") else { return gitURL }
         let home = NSHomeDirectory()
@@ -267,9 +241,8 @@ final class RepositoryStore: ObservableObject {
         var normalized = url
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
-        // 循环"先剥尾部 / 再剥 .git"直到稳定(与 GitURLParser.normalizedRepositoryPath
-        // 的顺序对齐):单次剥离会把 "https://x/repo.git/" 归一成 "https://x/repo/"
-        // (先剥 .git 不命中,再剥 / 后已无机会回头剥 .git),与 "https://x/repo" 不相等。
+        // 循环"先剥尾部 / 再剥 .git"直到稳定(与 GitURLParser.normalizedRepositoryPath 顺序对齐):
+        // 单次剥离会把 "https://x/repo.git/" 归一成 "https://x/repo/",与 "https://x/repo" 不相等。
         while true {
             let before = normalized
             if normalized.hasSuffix("/") {
@@ -283,21 +256,16 @@ final class RepositoryStore: ObservableObject {
         return normalized
     }
 
-    /// 删除仓库并同步清理所有工作区对它的关联。
-    /// `workplaceStore` 必须显式传入:删仓库天然要清工作区引用,省略会留下悬空引用。
-    /// repositories.json 与工作区文档(workplaces/sync-states)通过一次
-    /// `fileStore.save(documents)` 原子提交,任一失败整体回滚,不再存在
-    /// "仓库已删、关联清理失败只记 warning"的中间态。
-    /// 注意:要求两个 Store 共用同一数据目录(生产环境由 RootSplitView 注入同一 fileStore)。
+    /// 删仓库并同步清理所有工作区关联:repositories.json 与工作区文档(workplaces/sync-states)经一次
+    /// `fileStore.save(documents)` 原子提交,任一失败整体回滚,不留"仓库已删、关联清理失败"的中间态。
     func removeRepository(id: UUID, workplaceStore: WorkplaceStore) throws {
-        // 跨 Store 原子提交的前提是共用同一数据目录(注释级约定 → 运行时校验):
-        // 注入分叉时 applyPersistedState 会把内存更新到新状态、对方目录文件还是旧的,
-        // 内存与盘静默背离。宁可在提交前拦截。
+        // 跨 Store 原子提交的前提是共用同一数据目录:注入分叉时 applyPersistedState 只更新内存、
+        // 对方目录文件还是旧的,内存与盘静默背离,故提交前拦截。
         guard repositoryStoreRootsMatch(workplaceStore) else {
             throw RepositoryStoreError.crossStoreRootMismatch
         }
-        // id 不存在要当场拦:否则不存在的 id 会照常触发全量落盘
-        // (内容不变但 mtime/写放大照付),并把"删除成功"的假象传给调用方。
+        // id 不存在要当场拦:否则不存在的 id 照常触发全量落盘(mtime/写放大照付),
+        // 并把"删除成功"的假象传给调用方。
         guard repositories.contains(where: { $0.id == id }) else {
             throw RepositoryStoreError.notFound
         }
@@ -322,13 +290,11 @@ final class RepositoryStore: ObservableObject {
         }
     }
 
-    /// 仅测试直接调用的落库入口。生产路径一律走 `commitDiskRefresh`(它与
-    /// workplaces/sync-states 单批原子提交,消灭了"两步写之间被并发整体覆写"的窗口);
-    /// 新增生产调用点前先确认是否需要跨文件原子性,不要退回本方法。
+    /// 仅测试直接调用的落库入口;生产路径一律走 `commitDiskRefresh`(它与 workplaces/sync-states 单批
+    /// 原子提交,消灭"两步写之间被并发整体覆写"的窗口)。新增调用点前先确认是否需要跨文件原子性。
     func applyDeduplicationResult(_ result: RepositoryDeduplicationResult) {
         guard result.changed else { return }
-        // 自动去重是**硬删除**且立刻写盘、不可撤销。此前只有失败才留痕,
-        // 用户只会某次打开时"发现仓库少了一个"而无从得知原因,成功路径同样要记。
+        // 自动去重是不可撤销的硬删除:成功路径也要留痕,否则用户只会"发现仓库少了一个"而无从得知原因。
         let removedNames = Self.removedRepositoryNames(from: repositories, keeping: result.repositories)
         do {
             try persistRepositories(result.repositories)
@@ -350,42 +316,26 @@ final class RepositoryStore: ObservableObject {
         for repositories: [RepositoryConfig],
         protectedRepositoryIDs: Set<UUID> = []
     ) -> RepositoryDeduplicationResult {
-        // 保留优先级排序:被工作区/同步态引用者 > createdAt 更早者 > 其余。
-        // 旧逻辑按数组顺序"保留第一条、硬删其余",可能删掉的恰是被工作区引用的
-        // 那条而留下新添加的重复记录——工作区静默丢仓库。结果仍按原数组顺序输出,
-        // 不改变列表展示序。
+        // 保留优先级:被工作区/同步态引用者 > createdAt 更早者 > 其余。按数组顺序"留第一条、硬删其余"
+        // 可能删掉正被工作区引用的那条而留下新添加的重复记录(工作区静默丢仓库)。输出仍按原数组顺序。
         let prioritySorted = repositories.sorted { lhs, rhs in
             let lhsProtected = protectedRepositoryIDs.contains(lhs.id)
             let rhsProtected = protectedRepositoryIDs.contains(rhs.id)
             if lhsProtected != rhsProtected { return lhsProtected }
             if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
-            // createdAt 是 ISO8601 秒级精度,同秒创建时上面的比较是平局;
-            // 再比 repoName/id 兜底,避免依赖非稳定排序导致"留哪条"不确定。
+            // createdAt 只有 ISO8601 秒级精度,同秒创建时上面是平局;再比 repoName/id,避免"留哪条"不确定。
             if lhs.repoName != rhs.repoName { return lhs.repoName < rhs.repoName }
             return lhs.id.uuidString < rhs.id.uuidString
         }
 
-        // 两种"重复"必须分开处理,它们的安全性完全不同:
-        //
-        // 1) **同 URL**(归一化后相等):确实是同一远端被登记了两次。丢弃项的字段并入
-        //    保留项,并记入 idRemapping 做引用重映射——保留项与被丢弃项指向同一个远端,
-        //    把引用换过去是安全的(此前直接摘除引用,工作区明明有同 URL 的存活配置却丢了仓库)。
-        //
-        // 2) **同名、不同 URL**:名字相同但指向**不同远端**。既不能同时留两条
-        //    (仓库名全局唯一是建档侧硬约束:`addRepository` 直接拒 `duplicateRepoName`;
-        //    更重要的是工作区内仓库目录按 repoName 派生,两条同名记录会指向同一个磁盘目录),
-        //    也**绝不能**把引用重映射到另一条上——那会让工作区开始 pull/push 一个它从未
-        //    配置过的远端,而且完全静默,后果比丢一行严重得多。
-        //    处置:保留优先级高的一条、丢弃另一条,**不进 idRemapping**,
-        //    让引用走"未覆盖的 removedIDs 兜底摘除"路径(界面上表现为该仓库缺失,
-        //    用户重新添加正确的远端即可恢复),并单独留痕便于归因。
+        // 同 URL(归一化相等)= 同一远端被登记两次:字段并入保留项,引用记入 idRemapping 换挂过去。
+        // 同名不同 URL 是不同远端:只留优先级高的一条,不得进 idRemapping(否则工作区静默 pull/push 未配置的远端)。
         var keptRepositories: [RepositoryConfig] = []
         var keptIndexByURL: [String: Int] = [:]
         var keptIndexByName: [String: Int] = [:]
         var idRemapping: [UUID: UUID] = [:]
-        var crossURLNameConflicts: [String] = []
-        // 因"同名不同 URL"被丢弃的项,按归一化 URL 暂存其 id:后面若出现**同 URL** 的
-        // 存活配置,那些引用就该挂到它身上(指向的还是同一个远端),而不是被兜底摘除。
+        // "同名不同 URL"被丢弃项的 id 按归一化 URL 暂存:后面若出现**同 URL** 的存活配置,
+        // 引用就该挂到它身上(仍是同一远端),而不是被兜底摘除。
         var pendingSameURLRemaps: [String: [UUID]] = [:]
 
         for repository in prioritySorted {
@@ -397,7 +347,6 @@ final class RepositoryStore: ObservableObject {
                 continue
             }
             if let index = keptIndexByName[repository.repoName] {
-                crossURLNameConflicts.append(repository.repoName)
                 pendingSameURLRemaps[normalizedURL, default: []].append(repository.id)
                 repositoryStoreLog.error(
                     "event=dedup_rejected_cross_url_name_conflict repo_name=\(repository.repoName, privacy: .public) dropped_url=\(repository.gitURL, privacy: .public) kept_url=\(keptRepositories[index].gitURL, privacy: .public) reason=同名不同远端,重映射会把工作区指向未配置过的远端,改为摘除引用"
@@ -423,8 +372,7 @@ final class RepositoryStore: ObservableObject {
         return RepositoryDeduplicationResult(
             repositories: deduplicatedRepositories,
             changed: deduplicatedRepositories.count != repositories.count,
-            idRemapping: idRemapping,
-            crossURLNameConflicts: crossURLNameConflicts
+            idRemapping: idRemapping
         )
     }
 
@@ -463,13 +411,8 @@ final class RepositoryStore: ObservableObject {
         }
     }
 
-    /// sync-states 重映射:存活项自身的行优先保留,被删项的行改挂保留项 id 后
-    /// 按 (workplaceID, repositoryID) 去重(组合键唯一,同工作区双行会撞
-    /// `RepositorySyncState.id` 组合键)。
-    ///
-    /// 撞组合键时**优先保留 `hasLocalDirectory == true` 的那一行**:这一位为 true
-    /// 说明磁盘上确实有克隆。按"先到先得"留 false 的行会让 UI 误报"本地目录缺失",
-    /// 并诱发一次多余的重新克隆(对已有未提交改动的目录是破坏性的)。
+    /// sync-states 重映射:存活项行优先保留,被删项行改挂保留项 id 后按 (workplaceID, repositoryID) 去重。
+    /// 撞组合键时优先保留 `hasLocalDirectory == true` 的行:留 false 会误报"本地目录缺失"并诱发多余的重新克隆。
     nonisolated static func remappingSyncStates(
         _ syncStates: [RepositorySyncState],
         idRemapping: [UUID: UUID]
@@ -507,7 +450,6 @@ final class RepositoryStore: ObservableObject {
         return result
     }
 
-    /// 从工作区记录中摘除对 `removedRepositoryIDs` 的选中/置顶引用(纯函数)。
     nonisolated static func removingReferences(
         from workplaces: [Workplace],
         to removedRepositoryIDs: Set<UUID>
@@ -521,12 +463,8 @@ final class RepositoryStore: ObservableObject {
         }
     }
 
-    /// 磁盘刷新结果 + 去重硬删除的**单批原子提交**:三份文档(repositories/
-    /// workplaces/sync-states)一次 `save(documents)` 落盘,任一失败整体回滚。
-    /// 取代此前"apply 刷新结果 → 再单独 pruneReferencesToRepositories"的两步写:
-    /// 两步之间任何并发跨 Store 提交(如 removeRepository)会基于旧内存把首步结果
-    /// 整体覆写回盘,且立即 prune 落盘的又是新内存——去重删除与其引用清理
-    /// 不再原子,悬空引用窗口重新打开。
+    /// 磁盘刷新结果 + 去重硬删除的**单批原子提交**:三份文档一次 `save(documents)`,任一失败整体回滚。
+    /// 两步写(先 apply 刷新结果、再单独 prune)之间任何并发跨 Store 提交都会用旧内存把首步整体覆写回盘。
     func commitDiskRefresh(
         workplaceResult: WorkplaceDiskRefreshResult,
         repositoryResult: RepositoryDeduplicationResult,
@@ -535,15 +473,10 @@ final class RepositoryStore: ObservableObject {
         guard repositoryStoreRootsMatch(workplaceStore) else {
             throw RepositoryStoreError.crossStoreRootMismatch
         }
-        // 引用处理:先按 idRemapping 重映射到保留项(去重合并的新路径),
-        // 再对**未被映射覆盖**的被删 id 兜底摘除(调用方手工构造结果、
-        // 或未来新增删除来源时不留悬空引用)。基于**快照输入**
-        // (workplaceResult.workplaces)改写,与 diskRefreshResult 自身的
-        // 去重改写在同一份数据上完成。
+        // 引用处理:先按 idRemapping 重映射到保留项,再对**未被映射覆盖**的被删 id 兜底摘除
+        // (调用方手工构造结果或未来新增删除来源时不留悬空引用);改写基于快照输入。
         let keptIDs = Set(repositoryResult.repositories.map(\.id))
         let removedIDs = Set(repositories.map(\.id)).subtracting(keptIDs)
-        // 重映射在先:被删 id 的引用已换成保留 id(不在 removedIDs 中,不会被摘除);
-        // 摘除兜底在后:只命中"没有重映射记录"的悬空引用。
         let remappedWorkplaces = Self.removingReferences(
             from: Self.remappingReferences(
                 from: workplaceResult.workplaces,
@@ -585,13 +518,8 @@ final class RepositoryStore: ObservableObject {
         }
     }
 
-    /// 提交磁盘发现导入:以**调用时刻**的三个 Store 内存状态重新生成计划,
-    /// 再把 repositories/workplaces/sync-states 一次原子落盘。
-    ///
-    /// 重新生成(而不是套用后台算好的结果)是必须的:候选枚举 + 逐个读远端地址
-    /// 期间,用户可能增删仓库或工作区,套用旧快照会把并发的写入整体覆写回盘。
-    /// 导入只做追加,复用同一 URL 的既有配置,不删任何东西。
-    /// - Returns: 实际纳入列表的仓库数;0 表示本轮没有可导入的目录。
+    /// 提交磁盘发现导入:以**调用时刻**的三个 Store 内存状态重新生成计划,再一次原子落盘;导入只追加、不删。
+    /// 重新生成是必须的:候选枚举 + 逐个读远端地址期间用户可能增删仓库或工作区,套用旧快照会把并发写入覆写回盘。
     func commitImportedRepositories(
         discovered: [DiscoveredGitRepository],
         workplaceStore: WorkplaceStore
@@ -632,8 +560,6 @@ final class RepositoryStore: ObservableObject {
         return result.importedCount
     }
 
-    /// 去重是硬删除、不可撤销:除了 os_log 还要留一份可见提示的计数,
-    /// 由根视图消费(只记日志用户不会知道"仓库少了一个"的原因)。
     private func announceDeduplicationCleanup(_ removedNames: [String]) {
         lastDeduplicationCleanupCount = removedNames.count
         deduplicationCleanupSequence += 1
@@ -686,9 +612,8 @@ final class RepositoryStore: ObservableObject {
         let directoryURL = fileURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
         try data.write(to: fileURL, options: .atomic)
-        // 目标路径由用户自选(不受数据目录 0600 收紧的管辖),备份含完整仓库清单,
-        // 写完补一次仅本人可读写。收紧失败不影响导出结果(文件保持默认权限),
-        // 但此前 `try?` 连日志都没有,失败完全无从发现——必须留痕。
+        // 目标路径由用户自选(不受数据目录 0600 管辖),备份含完整仓库清单,写完补一次仅本人可读写。
+        // 收紧失败不影响导出结果,但必须留痕:`try?` 静默会让"权限没收紧"这件事完全无从发现。
         do {
             try FileManager.default.setAttributes(
                 [.posixPermissions: 0o600],
@@ -707,9 +632,8 @@ final class RepositoryStore: ObservableObject {
         try importBackup(entries: try Self.decodeBackupEntries(from: fileURL))
     }
 
-    /// 读备份文件并解码(v2/v1 兼容 + 版本门槛 + 空条目清洗)。
-    /// nonisolated:大备份"读盘 + JSON 解码"可达秒级,调用方可把它挪出主 actor
-    /// (见 OnboardingView),主线程只保留合并落盘的 importBackup(entries:)。
+    /// 读备份文件并解码(v2/v1 兼容 + 版本门槛 + 空条目清洗)。nonisolated:大备份"读盘 + JSON 解码"可达
+    /// 秒级,调用方可把它挪出主 actor(见 OnboardingView),主线程只保留合并落盘的 importBackup(entries:)。
     nonisolated static func decodeBackupEntries(from fileURL: URL) throws -> [RepositoryBackupEntry] {
         let data = try Data(contentsOf: fileURL)
         let decoder = Self.makeBackupDecoder()
@@ -727,8 +651,7 @@ final class RepositoryStore: ObservableObject {
             throw RepositoryStoreError.invalidBackupFormat
         }
 
-        // 版本必须落在受支持的区间:此前只设上界,version 为 0/负数(手工编辑或
-        // 伪造的备份)也会被当受支持版本导入。
+        // 版本必须落在受支持的区间:只设上界时,version 为 0/负数(手工编辑或伪造的备份)也会被当受支持版本导入。
         guard (1...RepositoryBackupDocument.currentVersion).contains(version) else {
             throw RepositoryStoreError.unsupportedBackupVersion(version)
         }
@@ -742,11 +665,18 @@ final class RepositoryStore: ObservableObject {
         return cleanedEntries
     }
 
-    /// 把已解码的备份条目合并进当前列表并落盘。读写 @Published repositories,
-    /// 只能在 MainActor 上调用。
     func importBackup(entries cleanedEntries: [RepositoryBackupEntry]) throws -> RepositoryImportResult {
         var existingNames = Set(repositories.map(\.repoName))
         var updatedRepositories = repositories
+        // 归一化 URL → 下标:原写法每条 entry 都拿全池做一次 firstIndex 比较
+        // (且每次比较各做两遍归一化),条目多时是 O(条目×池)。首见优先,与 firstIndex 同语义。
+        var existingIndexByGitURL: [String: Int] = [:]
+        for (index, repository) in updatedRepositories.enumerated() {
+            let existingKey = Self.normalizedGitURLForComparison(repository.gitURL)
+            if existingIndexByGitURL[existingKey] == nil {
+                existingIndexByGitURL[existingKey] = index
+            }
+        }
         var importedCount = 0
         var skippedCount = 0
         var mergedCount = 0
@@ -765,19 +695,16 @@ final class RepositoryStore: ObservableObject {
                 continue
             }
 
-            if let existingIndex = updatedRepositories.firstIndex(where: { Self.gitURLsMatch($0.gitURL, gitURL) }) {
+            let matchKey = Self.normalizedGitURLForComparison(gitURL)
+            if let existingIndex = existingIndexByGitURL[matchKey] {
                 var changed = false
                 if updatedRepositories[existingIndex].defaultBranch == nil, let entryDefault = entry.defaultBranch {
                     updatedRepositories[existingIndex].defaultBranch = entryDefault
                     changed = true
                 }
                 if !entry.mrTargetBranches.isEmpty {
-                    // 必须过 `RepositoryConfig.deduplicated` 这一不变式收敛点:
-                    // `RepositoryBackupEntry.init(from:)` 不做去重(与 RepositoryConfig
-                    // 解码不同口径),而按"现有集合"过滤只拦得下跨条目重复,条目自身的
-                    // 重复(备份文件可手工编辑,正是本函数反复防御的场景)会原样并入——
-                    // 分支胶囊 ForEach(id: \.self) 出现重复身份,且开关只摘除首个匹配,
-                    // 用户点掉后那颗永远还在。顺带把既有行的历史重复一并收敛。
+                    // 必须过 `RepositoryConfig.deduplicated` 这一不变式收敛点:备份条目解码不去重,按"现有集合"
+                    // 过滤只拦得下跨条目重复,条目自身的重复会原样并入 → 分支胶囊 ForEach(id: \.self) 撞重复身份。
                     let mergedBranches = RepositoryConfig.deduplicated(
                         updatedRepositories[existingIndex].mrTargetBranches + entry.mrTargetBranches
                     )
@@ -813,6 +740,7 @@ final class RepositoryStore: ObservableObject {
                 )
             )
             existingNames.insert(repoName)
+            existingIndexByGitURL[matchKey] = updatedRepositories.count - 1
             importedCount += 1
         }
 

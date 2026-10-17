@@ -1,22 +1,14 @@
 import Foundation
 
-/// Derived action state for a single workplace.
-/// `repositories` is expected to contain repositories relevant to the workplace,
-/// and we defensively intersect with `workplace.selectedRepositoryIDs` so an
-/// accidentally broader input does not leak unrelated failures into the UI.
+/// 单个工作区的派生操作状态;与 `workplace.selectedRepositoryIDs` 取交集,避免过宽输入把无关仓库算进来。
 struct WorkplaceActionState {
     let workplace: Workplace
-    let failedRepositories: [RepositoryConfig]
-    let activeRepositoryCount: Int
     let hasLocalRepositories: Bool
     let isBusy: Bool
-    let canRetryFailedRepositories: Bool
-    let canSyncAllRepositories: Bool
     let canOpenDirectory: Bool
 
     init(
         workplace: Workplace,
-        repositories: [RepositoryConfig],
         syncStates: [RepositorySyncState],
         probedWorkplaceDirectoryExists: Bool = false
     ) {
@@ -26,33 +18,20 @@ struct WorkplaceActionState {
         var hasLocal = false
         var hasAnySyncStateRow = false
         var activeCount = 0
-        var failedIDs = Set<UUID>()
 
         for state in syncStates where state.workplaceID == workplace.id && selectedRepositoryIDs.contains(state.repositoryID) {
             hasAnySyncStateRow = true
             if state.hasLocalDirectory { hasLocal = true }
             switch state.status {
             case .cloning, .pulling, .switching, .removing: activeCount += 1
-            case .failed: failedIDs.insert(state.repositoryID)
-            case .idle, .success: break
+            case .failed, .idle, .success: break
             }
         }
 
         hasLocalRepositories = hasLocal
-        activeRepositoryCount = activeCount
         isBusy = activeCount > 0
-
-        let failedRepositoryIDs = failedIDs
-
-        failedRepositories = repositories.filter {
-            selectedRepositoryIDs.contains($0.id) && failedRepositoryIDs.contains($0.id)
-        }
-        canRetryFailedRepositories = !failedRepositories.isEmpty && !isBusy
-        canSyncAllRepositories = hasLocalRepositories && !isBusy
-        // 有同步态行时用"任一仓库目录在盘"推断工作区目录存在(仓库目录必然
-        // 在工作区目录下),避免此前每次 body 求值走一次主线程 fileExists;
-        // 没有任何仓库行的工作区无从推断,改用视图侧后台探测的缓存结果——
-        // 本 init 在 body 求值链上,这里绝不能做同步磁盘 IO(网盘/外置盘可卡主线程数秒)。
+        // 有同步态行时用"任一仓库目录在盘"推断工作区目录存在(仓库目录必在工作区目录下),省掉 body 里的主线程 fileExists;
+        // 没有仓库行时无从推断,只能用视图侧后台探测的缓存结果。本 init 在 body 求值链上,绝不能做同步磁盘 IO(网盘/外置盘可卡主线程数秒)。
         if hasAnySyncStateRow {
             canOpenDirectory = hasLocal
         } else {

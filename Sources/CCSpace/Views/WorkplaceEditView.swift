@@ -48,10 +48,8 @@ struct WorkplaceEditView: View {
     init(
         workplace: Workplace,
         repositories: [RepositoryConfig],
-        syncStates: [RepositorySyncState] = [],
-        onSave: @escaping (String, [UUID], String?, WorkplaceOperationProgressHandler?) async throws -> Void = {
-            _, _, _, _ in
-        }
+        syncStates: [RepositorySyncState],
+        onSave: @escaping (String, [UUID], String?, WorkplaceOperationProgressHandler?) async throws -> Void
     ) {
         self.workplace = workplace
         self.repositories = repositories
@@ -118,6 +116,9 @@ struct WorkplaceEditView: View {
     }
 
     var body: some View {
+        // 派生状态每轮 body 只求值一次:每次读取都重跑分支名校验与整池排序。
+        let state = presentationState
+
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
@@ -127,7 +128,7 @@ struct WorkplaceEditView: View {
                         name: $name,
                         branch: $branch,
                         isDisabled: isSaving,
-                        branchValidationError: presentationState.branchValidationError,
+                        branchValidationError: state.branchValidationError,
                         nameHint: "名称会作为根目录下的文件夹名",
                         branchHint: "选填，统一切换分支时使用此名称",
                         onInputChanged: clearFeedback
@@ -142,15 +143,15 @@ struct WorkplaceEditView: View {
                         onToggle: toggleSelection
                     )
 
-                    if let removalWarningFeedback = presentationState.removalWarningFeedback {
+                    if let removalWarningFeedback = state.removalWarningFeedback {
                         CCSpaceFeedbackBanner(feedback: removalWarningFeedback)
                     }
 
-                    if let changeSummaryFeedback = presentationState.changeSummaryFeedback {
+                    if let changeSummaryFeedback = state.changeSummaryFeedback {
                         CCSpaceFeedbackBanner(feedback: changeSummaryFeedback)
                     }
 
-                    if let branchChangeFeedback = presentationState.branchChangeFeedback {
+                    if let branchChangeFeedback = state.branchChangeFeedback {
                         CCSpaceFeedbackBanner(feedback: branchChangeFeedback)
                     }
 
@@ -167,7 +168,7 @@ struct WorkplaceEditView: View {
                 submitTitle: "保存",
                 submittingTitle: "保存中",
                 isSubmitting: isSaving,
-                isSubmitDisabled: !presentationState.canSubmit,
+                isSubmitDisabled: !state.canSubmit,
                 progress: operationProgress,
                 // 保存中取消按钮改用作"中止":中止走 saveTask?.cancel() 的回滚通道,
                 // 而不是留下半途改动直接关窗。

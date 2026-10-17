@@ -1,9 +1,5 @@
 import SwiftUI
 
-/// Diff 查看器:展示一组文件的 unified diff,按文件分组、可折叠、带行号着色。
-///
-/// 以独立窗口呈现:仓库与标题集成在窗口标题栏(navigationTitle/Subtitle),
-/// 文件数与折叠开关集成在工具栏;数据由父视图注入,不直接调用 GitService。
 struct DiffViewerView: View {
     let repositoryName: String
     let title: String
@@ -11,41 +7,28 @@ struct DiffViewerView: View {
     let isLoading: Bool
     var error: String? = nil
     var onRetry: (() -> Void)? = nil
-    /// 非 nil 时每个文件卡片展示"丢弃改动"按钮;仅工作区未提交改动来源传入,
-    /// commit/分支对比等历史 diff 没有可丢弃的对象。
+    /// 非 nil 时每个文件卡片展示「丢弃改动」;仅工作区未提交改动来源传入,历史 diff 没有可丢弃的对象。
     var onDiscardFile: ((GitDiffEntry) -> Void)? = nil
-    /// 空态文案;默认"没有改动",工作区提交成功后由调用方传入"提交成功"。
-    var emptyState: DiffViewerEmptyState = .noChanges
-    /// 「展示所有行」按文件取新侧全文,由调用方按来源注入(工作区来源读磁盘,
-    /// commit/分支对比来源取历史 blob,见 DiffFullFileContentStrategy);
-    /// 取到 nil(删除的文件、二进制等)时该文件保持仅改动行。
-    /// nil 表示当前来源无法展开,该开关置灰不可用。
+    var emptyState: DiffViewerEmptyState
+    /// 「展示所有行」按文件取新侧全文,由调用方按来源注入(见 DiffFullFileContentStrategy);
+    /// 取到 nil(删除的文件、二进制等)时该文件保持仅改动行,nil 表示当前来源无法展开、开关置灰。
     var fullFileContent: (@Sendable (GitDiffEntry) async -> String?)? = nil
-    /// true 时在本视图的工具栏控件前插一个 Divider:macOS 26 玻璃容器会把连续的
-    /// 普通按钮并进同一颗胶囊,分隔符让 diff 控件组与前方的分支 chip 组拆开
-    /// (分支比较窗口使用;独立 Diff 窗口不需要,保持单颗胶囊)。
+    /// true 时在本视图的工具栏控件前插一个 ToolbarSpacer:macOS 26 玻璃容器会把连续的
+    /// 普通按钮并进同一颗胶囊(分支比较窗口需要,独立 Diff 窗口保持单颗胶囊)。
     var toolbarLeadingSeparator = false
 
-    /// 每个文件的展开状态,以稳定展开键为索引,缺省值为 true(展开)。
     @State private var expandedStates: [String: Bool] = [:]
 
-    /// 单栏/双栏对比模式;跨窗口共享并持久化。
     @AppStorage("DiffViewerView.isSplitView") private var isSplitView = false
 
-    /// 展示文件所有行(补全 hunk 之间未更改的内容),关闭时仅展示改动行;跨窗口共享并持久化。
     @AppStorage("DiffViewerView.showAllLines") private var showAllLines = false
 
-    /// 列表顶部锚点,折叠/展开全部后回到顶部。
     private static let listTopAnchorID = "diff-list-top"
 
-    /// 列表外边距:顶部收紧,首卡片紧贴标题栏下方。
     private static let listPadding = EdgeInsets(top: 1, leading: 12, bottom: 12, trailing: 12)
 
     /// 与 `diffs` 一一对应的稳定展开键(见 `DiffExpansionKeys`)。
-    ///
-    /// O(n) 且要建计数字典:上千文件的 diff 上,一次 body 求值里若被重复计算
-    /// (工具栏的图标/提示/动作三处 + 列表 + 批量切换)就是 5n 次字符串散列。
-    /// 因此 body 只求一次,再把这个 `let` 往下传,不要让各计算属性各自算。
+    /// O(n) 且要建计数字典:body 只求一次再把这个 `let` 往下传,不要让各计算属性各自算。
     private var expansionKeys: [String] {
         DiffExpansionKeys.make(for: diffs)
     }
@@ -54,7 +37,6 @@ struct DiffViewerView: View {
         expandedStates[key] ?? true
     }
 
-    /// 「展示所有行」的提示文案(描述点击后的效果);无全文取用能力的来源不可展开。
     private var fullFileToggleHelp: String {
         if fullFileContent == nil { return "当前来源不支持展示所有行" }
         return showAllLines ? "隐藏未更改的行" : "展示所有行"
@@ -66,9 +48,6 @@ struct DiffViewerView: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            // 一次 body 求值只算一份稳定展开键,工具栏与列表共用。
-            // 放在这里而不是各自走 `expansionKeys`:O(n) 的字典构建在上千文件的
-            // diff 上按调用次数线性叠加。
             let keys = expansionKeys
             Group {
                 if isLoading {
@@ -89,7 +68,7 @@ struct DiffViewerView: View {
                 idealHeight: 520,
                 maxHeight: .infinity
             )
-            // 四个状态(加载/错误/空/列表)统一铺窗口底色,避免空态落回系统默认背景造成样式不一致。
+            // 四个状态(加载/错误/空/列表)统一铺窗口底色,否则空态落回系统默认背景。
             .background(Color(nsColor: .windowBackgroundColor))
             .navigationTitle(repositoryName)
             .navigationSubtitle(title)
@@ -102,9 +81,8 @@ struct DiffViewerView: View {
     @ToolbarContentBuilder
     private func toolbarContent(proxy: ScrollViewProxy, keys: [String]) -> some ToolbarContent {
         if toolbarLeadingSeparator {
-            // macOS 26 玻璃容器会把连续的普通按钮并进同一颗胶囊;ToolbarSpacer
-            // 是官方间隔,让 diff 控件组与前方的分支 chip 组分成两颗胶囊。
-            // Divider 实测会被并进胶囊内部,不起分隔作用。
+            // macOS 26 玻璃容器会把连续的普通按钮并进同一颗胶囊;ToolbarSpacer 是官方间隔,
+            // Divider 实测会被并进胶囊内部、不起分隔作用。
             if #available(macOS 26.0, *) {
                 ToolbarSpacer(.fixed, placement: .primaryAction)
             }
@@ -115,7 +93,7 @@ struct DiffViewerView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                // 无改动时同样展示这三个按钮(置灰),保证有无改动时标题栏样式一致。
+                // 三个按钮恒常展示、无改动时置灰,保证有无改动时标题栏样式一致。
                 Button {
                     withAnimation(.easeInOut(duration: 0.15)) {
                         isSplitView.toggle()
@@ -148,7 +126,6 @@ struct DiffViewerView: View {
         }
     }
 
-    /// 加载中展示与最终版式同构的骨架屏,窗口打开首帧就是完整布局,数据到达后原地淡入。
     private var loadingView: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 10) {
@@ -202,8 +179,8 @@ struct DiffViewerView: View {
                 Color.clear
                     .frame(height: 0)
                     .id(Self.listTopAnchorID)
-                // 视图身份同样用稳定键:patch 变化不再重建卡片,@State(解析缓存、
-                // 全文展开结果)得以保留,由卡片自己的 onChange 按内容作废旧值。
+                // 视图身份也用稳定键:patch 变化不再重建卡片,@State(解析缓存、全文展开
+                // 结果)得以保留,由卡片自己的 onChange 按内容作废旧值。
                 ForEach(Array(zip(diffs, keys)), id: \.1) { diff, key in
                     DiffFileCard(
                         diff: diff,
@@ -223,8 +200,6 @@ struct DiffViewerView: View {
         }
     }
 
-    /// 全部展开或全部折叠。
-    ///
     /// 批量切换会让内容总高度剧变,LazyVStack 收缩期间滚动位置会悬空、留下大片空白,
     /// 因此切换后主动动画回到顶部。
     private func toggleAll(_ expanded: Bool, keys: [String], proxy: ScrollViewProxy) {
@@ -237,9 +212,7 @@ struct DiffViewerView: View {
     }
 }
 
-/// 骨架屏占位块:与 CCSpaceShimmerPill 相同的呼吸动画。
 private struct DiffSkeletonBlock: View {
-    /// nil 表示撑满可用宽度(模拟整行内容)。
     var width: CGFloat? = nil
     var height: CGFloat = 10
     @State private var pulse = false
@@ -254,9 +227,7 @@ private struct DiffSkeletonBlock: View {
     }
 }
 
-/// 文件卡片骨架屏:与 DiffFileCard 同构,数据加载期间保持最终版式。
 private struct DiffFileCardSkeleton: View {
-    /// 模拟 patch 行的宽度序列(nil 表示整行)。
     private static let lineWidths: [CGFloat?] = [nil, 240, nil, 160, 300]
 
     var body: some View {
@@ -292,26 +263,20 @@ private struct DiffFileCardSkeleton: View {
     }
 }
 
-/// 单个文件的 diff 卡片:可折叠的 header + 带行号的 patch 内容。
 private struct DiffFileCard: View {
     let diff: GitDiffEntry
     let isSplitView: Bool
     let showAllLines: Bool
-    /// 「展示所有行」的新侧全文取用;nil 时开关不可用。
     let fullFileContent: (@Sendable (GitDiffEntry) async -> String?)?
     @Binding var isExpanded: Bool
-    /// nil 时不展示丢弃按钮(历史 diff 或未接入丢弃流程的调用方)。
     var onDiscard: (() -> Void)? = nil
-    /// patch 解析结果缓存(引用类型,写入不触发视图刷新):
-    /// 折叠/展开任一文件都会让兄弟卡片重算 body,不缓存则每次重跑逐行正则解析与双栏配对。
+    /// patch 解析缓存(引用类型,写入不触发视图刷新):折叠/展开任一文件都会让兄弟卡片
+    /// 重算 body,不缓存则每次重跑逐行解析与双栏配对。
     @State private var parseMemo = PatchParseMemo()
-    /// 「展示所有行」的展开结果;开关打开后惰性取全文计算一次,存 @State 驱动刷新。
-    /// 取不到全文(删除的文件、二进制等)时与 patch 行一致,不会重复再取。
     @State private var expandedLines: [DiffPatchLine]?
     @State private var expandedSplitRows: [DiffSplitRow]?
     /// 全文展开请求的代际号:.task(id:) 与 onChange 里的裸 Task 可并发取全文,
-    /// 旧 diff 的结果若晚到会以"过期内容"覆盖新结果——与丢弃按钮同屏的陈旧展示
-    /// 正是本文件注释里定性过的真实丢失风险,必须按代际落笔。
+    /// 旧 diff 的结果晚到会覆盖新结果,必须按代际落笔。
     @State private var expandGeneration = 0
     @State private var expandTask: Task<Void, Never>?
     @State private var isDiscardHovered = false
@@ -333,14 +298,14 @@ private struct DiffFileCard: View {
             expandGeneration += 1
         }
         .onChange(of: diff) { oldDiff, newDiff in
-            // 聚焦刷新后同一路径带回新 patch:「展示所有行」的全文展开结果必须作废,
-            // 否则开关打开时仍展示旧磁盘内容(解析行缓存由 patchHash 校验兜底)。
+            // 聚焦刷新后同一路径带回新 patch:全文展开结果必须作废,否则开关打开时
+            // 仍展示旧磁盘内容(解析行缓存由 patch 内容比对兜底)。
             guard oldDiff.patch != newDiff.patch else { return }
             expandedLines = nil
             expandedSplitRows = nil
             if showAllLines {
-                // .task(id: showAllLines) 不会因 diff 变化重跑,这里主动重新取全文。
-                // 旧请求不取消也会因代际+1 被丢弃落笔,取消只是省一次网络/磁盘取数。
+                // .task(id: showAllLines) 不会因 diff 变化重跑,这里主动重新取全文;
+                // 旧请求不取消也会因代际 +1 被丢弃落笔,取消只是省一次取数。
                 expandTask?.cancel()
                 expandTask = Task { await expandFullFileIfNeeded() }
             }
@@ -387,7 +352,6 @@ private struct DiffFileCard: View {
                     Button {
                         onDiscard()
                     } label: {
-                        // 用回退箭头而非垃圾桶:丢弃改动是"恢复到上次提交",垃圾桶会误读为删除文件。
                         Image(systemName: "arrow.uturn.backward")
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(isDiscardHovered ? Color.red : Color.secondary)
@@ -466,10 +430,6 @@ private struct DiffFileCard: View {
 
     private var parsedPatch: (lines: [DiffPatchLine], splitRows: [DiffSplitRow]) {
         if parseMemo.cachedID == diff.id {
-            // 同一路径聚焦刷新可能带回新 patch:与缓存持有的 patch 做全等比较判定命中。
-            // 相等比较是 memcmp 级开销(首个差异字节即短路),且字符串赋值走写时复制、
-            // 不产生真实拷贝——取代此前每次 body 求值都对全量 patch 计算 hashValue
-            // 的 O(N) 哈希。不相等时重解析并更新缓存。
             if parseMemo.cachedPatch == diff.patch {
                 return (parseMemo.lines, parseMemo.splitRows)
             }
@@ -483,25 +443,19 @@ private struct DiffFileCard: View {
         return (lines, splitRows)
     }
 
-    /// 「展示所有行」打开后惰性取一次全文并展开;结果存入 @State,取数只发生一次。
-    /// 取不到全文时展开原样返回 patch 行,同样只取一次,不会反复发起。
-    /// @MainActor:方法体内读写 @State(expandGeneration/expandedLines 等)并触发
-    /// parsedPatch 对 PatchParseMemo 引用类型的写入,必须与主线程 body 求值同隔离域;
-    /// 取全文的重活在读盘/解码本体:注入的 provider 实现(DiffWindowView/
-    /// BranchCompareWindowView 的 fullFileContentProvider)已把文件读取与 git
-    /// 输出解码包进 `Task.detached` 在全局执行器执行,本方法只是 await 等待,
-    /// 不在此处阻塞主线程。
+    /// @MainActor:体内读写 @State 并触发 memo 引用类型写入,须与主线程 body 同隔离域;
+    /// 取全文的重活由注入的 provider 自己包进 `Task.detached`,本方法只 await。
     @MainActor
     private func expandFullFileIfNeeded() async {
         guard showAllLines, expandedLines == nil, let fullFileContent else { return }
         expandGeneration += 1
         let generation = expandGeneration
         let content = await fullFileContent(diff)
-        // 取全文期间若有更新的请求(diff 刷新/开关重开)发起,本次结果已过时,禁止落笔。
+        // 取全文期间若有更新请求(diff 刷新/开关重开)发起,本次结果已过时,禁止落笔。
         guard generation == expandGeneration else { return }
         let patchLines = parsedPatch.lines
-        // 展开与双栏配对是纯函数,单文件几万行时开销可观:放进后台任务算,
-        // 主线程只做代际比对与落笔(与分支排序走 Task.detached 同一约定)。
+        // 展开与双栏配对是纯函数,单文件几万行时开销可观:放后台任务算,
+        // 主线程只做代际比对与落笔。
         let expanded = await Task.detached(priority: .userInitiated) {
             () -> ([DiffPatchLine], [DiffSplitRow]) in
             let lines = DiffFullFileExpander.expand(patchLines: patchLines, fileContent: content)
@@ -512,10 +466,6 @@ private struct DiffFileCard: View {
         expandedSplitRows = expanded.1
     }
 
-    /// 根据 showAllLines 过滤后的行:开 = 全文件,关 = 仅改动行。
-    ///
-    /// 每次 body 求值只算一次(`patchContent` 内单一访问点),且上游 `parsedPatch`
-    /// 已由 `PatchParseMemo` 缓存,不重复解析补丁文本。
     /// 全文取到之前先按 patch 行展示,内容到达后自动补全(hunk 间行是在容器里追加的)。
     private var filteredLines: [DiffPatchLine] {
         if showAllLines {
@@ -524,7 +474,6 @@ private struct DiffFileCard: View {
         return parsedPatch.lines.filter { $0.kind != .context }
     }
 
-    /// 根据 showAllLines 过滤后的双栏行:开 = 全文件,关 = 仅改动行(hunk 头与说明行保留)。
     private var filteredSplitRows: [DiffSplitRow] {
         if showAllLines {
             if let expandedSplitRows { return expandedSplitRows }
@@ -561,18 +510,15 @@ private struct DiffFileCard: View {
     }
 }
 
-/// patch 解析结果的进程内 memo;由 DiffFileCard 以 @State 持有,实例在视图重渲染间保持稳定。
 private final class PatchParseMemo {
     var cachedID: String?
-    /// 缓存对应的 patch 内容。diff.id 只是文件路径:聚焦刷新后同一路径
-    /// 可能带回新 patch,只比对 id 会让正文停留在旧内容(header 却是新的),
-    /// 用户可能基于陈旧 diff 执行「丢弃改动」造成真实丢失,须按内容判定命中。
+    /// diff.id 只是文件路径:同一路径可能带回新 patch,只比 id 会让正文停在旧内容而
+    /// header 是新的,用户可能基于陈旧 diff 执行「丢弃改动」——须按内容判定命中。
     var cachedPatch: String?
     var lines: [DiffPatchLine] = []
     var splitRows: [DiffSplitRow] = []
 }
 
-/// 双栏对比的单行:hunk 头/说明行整行横跨,内容行左旧右新配对展示。
 private struct DiffSplitRowView: View {
     let row: DiffSplitRow
 
@@ -627,7 +573,6 @@ private struct DiffSplitRowView: View {
             .padding(.trailing, 8)
     }
 
-    /// 变更侧按增删着色,对侧缺失的空位给一个更弱的底色示意"此处无内容"。
     private func sideBackground(_ line: DiffPatchLine?, changeKind: DiffPatchLine.Kind) -> Color {
         guard let line else { return Color.primary.opacity(0.035) }
         if line.kind == changeKind {
@@ -637,7 +582,6 @@ private struct DiffSplitRowView: View {
     }
 }
 
-/// 双栏对比的单侧单元格:行号 + 内容,按传入背景着色。
 private struct DiffSplitCellView: View {
     let line: DiffPatchLine?
     let lineNumber: Int?
@@ -671,7 +615,6 @@ private struct DiffSplitCellView: View {
     }
 }
 
-/// 单行 diff:行号栏 + 变更符号 + 着色内容。
 private struct DiffPatchLineView: View {
     let line: DiffPatchLine
 

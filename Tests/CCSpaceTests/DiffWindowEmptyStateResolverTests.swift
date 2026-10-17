@@ -24,22 +24,11 @@ final class DiffWindowEmptyStateResolverTests: XCTestCase {
         XCTAssertEqual(state.subtitle, "该提交没有可展示的改动")
     }
 
-    func test_compareSourceKeepsTwoSideCopy() {
-        let state = DiffWindowEmptyStateResolver.resolve(source: .compare(base: "main", head: "feat"), didCommit: false)
-
-        XCTAssertEqual(state, .noChanges)
-        XCTAssertEqual(state.subtitle, "两侧内容完全一致")
-    }
-
     func test_nonWorkingDirectorySourcesNeverShowCommittedState() {
-        // 提交栏只在工作区改动来源出现,这里防御历史 diff/分支对比误染"提交成功"。
+        // 提交栏只在工作区改动来源出现,这里防御历史 diff 误染"提交成功"。
         XCTAssertEqual(
             DiffWindowEmptyStateResolver.resolve(source: .commit(hash: "abc123"), didCommit: true),
             .noCommitChanges
-        )
-        XCTAssertEqual(
-            DiffWindowEmptyStateResolver.resolve(source: .compare(base: "main", head: "feat"), didCommit: true),
-            .noChanges
         )
     }
 

@@ -27,12 +27,13 @@ final class DiffPatchLineParserTests: XCTestCase {
         XCTAssertFalse(lines.contains { $0.text.hasPrefix("--- ") || $0.text.hasPrefix("+++ ") })
     }
 
-    func test_parsesHunkHeaderWithContext() {
+    func test_parsesHunkHeaderKeepsRawText() {
         let lines = DiffPatchLineParser.parse(samplePatch)
-        guard case .hunkHeader(let context) = lines[0].kind else {
+        guard case .hunkHeader = lines[0].kind else {
             return XCTFail("首行应为 hunk 头,实际:\(lines[0])")
         }
-        XCTAssertEqual(context, "func hello()")
+        // 函数上下文不作为独立字段:整行原文(含 @@ 尾部)交给 text 展示。
+        XCTAssertTrue(lines[0].text.hasSuffix("func hello()"))
         XCTAssertNil(lines[0].oldLineNumber)
         XCTAssertNil(lines[0].newLineNumber)
     }
@@ -57,10 +58,9 @@ final class DiffPatchLineParserTests: XCTestCase {
     func test_resetsCountersOnSecondHunk() {
         let lines = DiffPatchLineParser.parse(samplePatch)
         // 第二个 hunk @@ -10,2 +10,3 @@(无上下文),行号从 10 重新计数。
-        guard case .hunkHeader(let context) = lines[5].kind else {
+        guard case .hunkHeader = lines[5].kind else {
             return XCTFail("应解析出第二个 hunk 头,实际:\(lines[5])")
         }
-        XCTAssertNil(context)
         XCTAssertEqual(lines[6].oldLineNumber, 10)
         XCTAssertEqual(lines[6].newLineNumber, 10)
         XCTAssertEqual(lines[7].newLineNumber, 11)
@@ -94,7 +94,7 @@ final class DiffPatchLineParserTests: XCTestCase {
         +b
         """
         let lines = DiffPatchLineParser.parse(patch)
-        XCTAssertEqual(lines.map(\.kind), [.hunkHeader(context: nil), .removed, .added])
+        XCTAssertEqual(lines.map(\.kind), [.hunkHeader, .removed, .added])
         XCTAssertEqual(lines[1].oldLineNumber, 1)
         XCTAssertEqual(lines[2].newLineNumber, 1)
     }
@@ -109,7 +109,7 @@ final class DiffPatchLineParserTests: XCTestCase {
         @@ -0,0 +1,1 @@
         +hello
         """)
-        XCTAssertEqual(newFile.map(\.kind), [.hunkHeader(context: nil), .added])
+        XCTAssertEqual(newFile.map(\.kind), [.hunkHeader, .added])
 
         let deletedFile = DiffPatchLineParser.parse("""
         diff --git a/d.txt b/d.txt
@@ -120,7 +120,7 @@ final class DiffPatchLineParserTests: XCTestCase {
         @@ -1 +0,0 @@
         -x
         """)
-        XCTAssertEqual(deletedFile.map(\.kind), [.hunkHeader(context: nil), .removed])
+        XCTAssertEqual(deletedFile.map(\.kind), [.hunkHeader, .removed])
     }
 
     func test_emptyPatchProducesNoLines() {
@@ -144,7 +144,7 @@ final class DiffPatchLineParserTests: XCTestCase {
         """
         let lines = DiffPatchLineParser.parse(patch)
         XCTAssertEqual(lines.count, 5)
-        XCTAssertEqual(lines[0].kind, .hunkHeader(context: "body"))
+        XCTAssertEqual(lines[0].kind, .hunkHeader)
         XCTAssertEqual(lines[1].kind, .context)
         XCTAssertEqual(lines[2].kind, .removed)
         XCTAssertEqual(lines[2].oldLineNumber, 2)

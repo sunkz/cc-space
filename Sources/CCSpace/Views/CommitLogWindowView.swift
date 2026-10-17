@@ -8,11 +8,8 @@ struct CommitLogWindowPayload: Codable, Hashable {
     let localPath: String
 }
 
-/// 提交记录窗口:浏览任意分支(本地 + 远端跟踪)的历史。
-///
-/// 以普通窗口(非模态)呈现,与 Diff 窗口同级:标题栏分支 pill 点击弹出分支选择器 +
-/// 搜索 + 仅看未推送 + 分页加载;行点击展开完整提交详情,右键/更多菜单支持基于提交建分支、
-/// 浏览器打开提交页、打开该提交的 Diff 窗口。加载与操作状态由本窗口自持,与主窗口解耦。
+/// 提交记录独立窗口:浏览任意分支(本地 + 远端跟踪)的历史,以普通窗口(非模态)呈现。
+/// 行点击展开详情,右键/更多菜单支持基于提交建分支、打开提交页与 Diff;加载与操作状态由本窗口自持。
 struct CommitLogWindowView: View {
     let payload: CommitLogWindowPayload
     /// 写操作(基于提交建分支)的唯一入口:协调器内部持 per-path 锁与后台 pull/push 互斥。
@@ -37,12 +34,8 @@ struct CommitLogWindowView: View {
     @State private var branchMetadata: [String: GitBranchMetadata] = [:]
     @State private var showingBranchPicker = false
     @State private var commits: [GitCommitEntry] = []
-    /// git 侧已消耗的偏移量(`--skip` 的真实游标)。
-    ///
-    /// 与 `commits.count` **不是一回事**:追加下一页时按哈希去过重,期间若有新提交
-    /// 落到分支顶端,去重会吞掉 k 条,展示数就比 git 实际返回的行数少 k。
-    /// 用展示数当游标,下一页的 `--skip` 会少让 k 条,那 k 条历史提交既不在已展示页里、
-    /// 也永远翻不到(静默丢数据)。游标一律按 git 返回的行数推进。
+    /// git 侧已消耗的偏移量(`--skip` 游标),与 `commits.count` 不是一回事:顶端新进提交时翻页去重会吞掉 k 条,
+    /// 用展示数当游标会少让 k 条,那 k 条历史既不在已展示页也永远翻不到(静默丢数据);游标按 git 返回行数推进。
     @State private var fetchedRowCount = 0
     @State private var isLoading = true
     @State private var isLoadingMore = false
@@ -50,22 +43,18 @@ struct CommitLogWindowView: View {
     @State private var searchText = ""
     @State private var isUnpushedOnly = false
     @State private var hasMore = false
-    /// 程序性重置"仅看未推送"(换 payload / 换分支)时置真,由
-    /// onChange(of: isUnpushedOnly) 消费一次即复位:程序重置与用户切换分流,
-    /// 前者由各条路径自己的 reload 统一刷新,避免重复触发整屏加载。
+    /// 程序性重置"仅看未推送"(换 payload / 换分支)时置真,由 onChange 消费一次即复位:
+    /// 程序重置由各路径自己的 reload 统一刷新,避免重复触发整屏加载。
     @State private var programmaticUnpushedReset = false
-    /// payload 代际号:WindowGroup 复用同一窗口更换 payload 时,旧仓库的进行中加载
-    /// 不得再把结果写进新仓库的状态(与 DiffWindowView 的 payloadGeneration 同模式)。
+    /// payload 代际号:WindowGroup 复用同一窗口更换 payload 时,旧仓库的进行中加载不得再写进新仓库状态。
     @State private var payloadGeneration = 0
-    /// 首次加载是否已完成;用于跳过窗口刚打开时的 becomeKey 通知,避免重复加载
-    /// (与 DiffWindowView 同一套模式:后台打开的窗口聚焦事件不可靠,首载由 task 驱动)。
+    /// 首次加载是否已完成;用于跳过窗口刚打开时的 becomeKey 通知,避免重复加载(首载由 task 驱动)。
     @State private var hasLoadedInitialData = false
     /// 展开详情的提交 id 集合(支持全部展开/折叠)与详情缓存;详情按需 `git show -s` 拉取。
     @State private var expandedIDs: Set<String> = []
     @State private var commitDetails: [String: GitCommitDetail] = [:]
     @State private var detailLoadingIDs: Set<String> = []
     @State private var detailFailedIDs: Set<String> = []
-    /// "基于此提交创建分支"流程。
     @State private var createBranchCandidate: GitCommitEntry?
     @State private var newBranchName = ""
     @State private var isCreatingBranch = false
@@ -75,25 +64,18 @@ struct CommitLogWindowView: View {
     @State private var createBranchTask: Task<Void, Never>?
     /// 单行展开的详情任务句柄(按提交 id 归档):窗口关闭时纳入 cancelAllTasks 一并取消。
     @State private var detailTasks: [String: Task<Void, Never>] = [:]
-    /// "全部展开"的限流详情加载任务句柄。
     @State private var expandAllTask: Task<Void, Never>?
-    /// 搜索输入防抖任务:关键词过滤现在下推到 git(每轮都要扫历史),
-    /// 逐键触发会在一串输入里排起连续查询,停手后才发一次。
+    /// 搜索输入防抖:关键词过滤已下推到 git(每轮扫历史),逐键触发会排起连续查询,停手后才发一次。
     @State private var searchTask: Task<Void, Never>?
     /// 当前"全部展开"批次覆盖的提交 id,取消时用于同步清加载标记。
     @State private var expandAllBatchIDs: Set<String> = []
     /// 批次令牌:每次启动新批次自增,批次回写点比对令牌,过期批次只认领标记不写状态。
     @State private var expandAllBatchToken = 0
-    /// 已被取消/取代的批次 id 集合。git show 对取消不协作(进程返回后才生效),
-    /// 旧批次的迟到写回会破坏新批次的加载标记,回写前先在此认领跳过。
-    @State private var supersededDetailIDs: Set<String> = []
     @Environment(\.openWindow) private var openWindow
 
     private static let pageSize = 20
-    /// 搜索防抖时长。关键词现在进 git 查询,每轮都要扫一遍历史,
-    /// 逐键触发等于把一串击键排成一串 git log。
+    /// 搜索防抖时长:关键词进 git 查询,每轮都要扫一遍历史。
     private static let searchDebounceNanoseconds: UInt64 = 250_000_000
-    /// 全部展开时详情加载的最大并发数(与 WorkplaceBranchLoader.maxConcurrentSnapshotLoads 同一量级)。
     private static let maxConcurrentDetailLoads = 8
 
     private var presentationState: CommitLogPresentationState {
@@ -113,21 +95,18 @@ struct CommitLogWindowView: View {
         return branchMetadata[branch]?.hasUpstream ?? false
     }
 
-    /// 当前浏览的是否为远端跟踪引用(origin/x):"仅看未推送"的提示按此归因,
-    /// 不能对远端跟踪分支说"当前分支未关联远端"。
+    /// 当前浏览的是否为远端跟踪引用(origin/x):"仅看未推送"的提示按此归因。
     private var selectedIsRemoteTrackingRef: Bool {
         guard let branch = selectedBranch else { return false }
         return remoteTrackingBranches.contains(branch)
     }
 
-    /// 标题栏展示的分支名。
     private var branchLabel: String {
         selectedBranch ?? currentBranch ?? "HEAD"
     }
 
     var body: some View {
-        // presentationState 每次访问都全量重过滤:body 顶部取一次局部值沿渲染路径复用,
-        // 避免控制行/列表/分隔线判断各自触发一遍过滤。
+        // presentationState 每次访问都全量重过滤:body 顶部取一次局部值沿渲染路径复用。
         let state = presentationState
         return VStack(alignment: .leading, spacing: 0) {
             if let noticeMessage {
@@ -150,8 +129,7 @@ struct CommitLogWindowView: View {
         .navigationTitle(payload.repositoryName)
         .navigationSubtitle("提交记录")
         .toolbar {
-            // 分支 pill 与展开/折叠拆成两颗胶囊:靠 ToolbarSpacer(.fixed) 分隔
-            // (分支比较窗口同款);普通按钮直接一步切换,不带 Menu 下拉箭头。
+            // 分支 pill 与展开/折叠拆成两颗胶囊:靠 ToolbarSpacer(.fixed) 分隔(分支比较窗口同款)。
             ToolbarItem(placement: .primaryAction) {
                 branchPillButton
                     .padding(.leading, 6)
@@ -176,10 +154,8 @@ struct CommitLogWindowView: View {
             reload()
         }
         .onChange(of: payload) { _, _ in
-            // WindowGroup(for:) 复用同一窗口更换 payload 时 .task 不会重跑:
-            // 重置自持状态并按新参数重新加载,避免把旧仓库的提交列表展示进新仓库窗口。
-            // 「基于提交建分支」等写动作据此不会指向旧仓库路径:弹窗输入与候选提交
-            // 先行作废,在途加载的写回由代际比对拦下。
+            // WindowGroup(for:) 复用同一窗口更换 payload 时 .task 不会重跑:重置自持状态并按新参数重载。
+            // 建分支弹窗与候选提交先行作废,在途加载的写回由代际比对拦下。
             payloadGeneration += 1
             cancelAllTasks()
             selectedBranch = nil
@@ -208,11 +184,8 @@ struct CommitLogWindowView: View {
         }
         .onWindowBecomeKey {
             // 相等 payload 的 openWindow 只聚焦不重建内容:聚焦时静默刷新保证数据最新。
-            // 不得调 reload():它会把列表打回首页并闪整屏加载态——用户翻看历史
-            // 提交时切出再切回,浏览位置直接丢失。这里走 .reloadLoaded:
-            // 按已加载条数整窗重取并保留现有列表(仅加载区转圈),与 Diff 窗口聚焦行为
-            // (load(isRefresh: true))对齐。首次打开的 becomeKey 与 .task 首载
-            // 重叠,由 hasLoadedInitialData 跳过。
+            // 不得调 reload()(会打回首页并闪整屏加载态,翻历史时切出再切回浏览位置直接丢失):
+            // 走 .reloadLoaded 按已加载条数整窗重取;首开的 becomeKey 与 .task 首载重叠,由 hasLoadedInitialData 跳过。
             guard hasLoadedInitialData else { return }
             guard isCreatingBranch == false else { return }
             loadBranchContext()
@@ -237,7 +210,6 @@ struct CommitLogWindowView: View {
         }
     }
 
-    /// 标题栏分支 pill:与仓库行同款样式,兼作分支选择器入口。
     private var branchPillButton: some View {
         Button {
             showingBranchPicker = true
@@ -248,8 +220,7 @@ struct CommitLogWindowView: View {
         .buttonStyle(.plain)
         .ccspaceQuickHelp("点击切换要查看的分支")
         .ccspacePopover(isPresented: $showingBranchPicker, arrowEdge: .bottom) {
-            // 锚点在系统标题栏上:弹窗内容会继承锚点环境,标题栏的大字号会让整个
-            // 分支列表比仓库行版本大一圈,这里显式钉回常规控件尺寸与正文字号。
+            // 弹窗内容继承标题栏锚点环境的大字号,显式钉回常规控件尺寸与正文字号。
             BranchListPopoverView(
                 currentBranch: selectedBranch ?? currentBranch,
                 localBranches: branchNames,
@@ -259,8 +230,7 @@ struct CommitLogWindowView: View {
                     showingBranchPicker = false
                     guard ref != selectedBranch else { return }
                     selectedBranch = ref
-                    // 换分支后"仅看未推送"的可用性可能变化(新分支未必有上游),
-                    // 留在勾选态会得到误导性的空列表,直接重置。
+                    // 新分支未必有上游:留在勾选态会得到误导性的空列表,换分支直接重置。
                     resetUnpushedOnlyProgrammatically()
                     reloadCommits(.firstPageWithSpinner)
                 }
@@ -307,7 +277,6 @@ struct CommitLogWindowView: View {
                     }
                     .buttonStyle(.plain)
                 }
-                // 搜索进行中:结果会整批换掉列表,行内给个进行指示,免得看着像没反应。
                 if isLoadingMore {
                     ProgressView()
                         .controlSize(.small)
@@ -329,7 +298,6 @@ struct CommitLogWindowView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            // 刷新收进搜索行尾:标题栏让给仓库名与分支 pill;窗口聚焦也会自动刷新。
             Button {
                 reload()
             } label: {
@@ -342,8 +310,7 @@ struct CommitLogWindowView: View {
             .accessibilityLabel("刷新")
         }
         .onChange(of: searchText) { _, _ in
-            // 关键词进 git 查询,不做防抖的话一串击键会排成一串历史扫描。
-            // 清空(含点 xmark)同样走这条路:防抖后回到无过滤的首页。
+            // 关键词进 git 查询,防抖避免一串击键排成一串历史扫描;清空同样走这条路回无过滤首页。
             scheduleSearchReload()
         }
         .onChange(of: isUnpushedOnly) { _, _ in
@@ -352,7 +319,6 @@ struct CommitLogWindowView: View {
                 programmaticUnpushedReset = false
                 return
             }
-            // 切换筛选只回到首页,保留搜索词。
             reloadCommits(.firstPageWithSpinner)
         }
     }
@@ -401,7 +367,7 @@ struct CommitLogWindowView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            // 分隔线判断改用下标:此前每行取一次 visibleCommits.last,整列表 O(N²)。
+            // 分隔线判断用下标:每行取一次 visibleCommits.last 会让整列表 O(N²)。
             let visibleCommits = state.visibleCommits
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -422,7 +388,6 @@ struct CommitLogWindowView: View {
                         }
                     }
                     if hasMore {
-                        // 固定高度:按钮与加载指示切换、末页消失都不改变页脚占位,列表不抖动。
                         ZStack {
                             Button("加载更多") { loadMore() }
                                 .controlSize(.small)
@@ -453,7 +418,6 @@ struct CommitLogWindowView: View {
     private func cancelAllTasks() {
         // 共享加载器(分支上下文/提交列表)的在途任务一并取消,避免迟到写回。
         context.cancelAll()
-        // 详情任务与提示任务同样纳入取消:此前遗漏,窗口关闭后 git show 仍在后台跑。
         cancelExpandAllBatch()
         for task in detailTasks.values {
             task.cancel()
@@ -469,8 +433,7 @@ struct CommitLogWindowView: View {
         createBranchTask = nil
     }
 
-    /// 程序性复位"仅看未推送":仅在实际处于勾选态时打分流标记——
-    /// 值未变化则 onChange 不触发,标记会悬留并吞掉下一次用户切换的刷新。
+    /// 程序性复位"仅看未推送":仅在勾选态时打分流标记——值未变化则 onChange 不触发,标记会悬留吞掉下次用户切换。
     private func resetUnpushedOnlyProgrammatically() {
         guard isUnpushedOnly else { return }
         programmaticUnpushedReset = true
@@ -482,8 +445,7 @@ struct CommitLogWindowView: View {
         reloadCommits(.firstPageWithSpinner)
     }
 
-    /// 分支名单/远端跟踪分支/元数据/当前分支:供标题栏分支选择器与"仅看未推送"可用性判断。
-    /// 并发取数与代际防过期写回收进 RepositoryWindowContext,这里只消费快照。
+    /// 分支名单/远端跟踪分支/元数据/当前分支:供标题栏分支选择器与"仅看未推送"可用性判断;取数与代际写回收进 RepositoryWindowContext。
     private func loadBranchContext() {
         let generation = payloadGeneration
         context.loadBranchContext(
@@ -492,9 +454,7 @@ struct CommitLogWindowView: View {
         ) { [self] snapshot in
             // payload 已更换(复用窗口换仓库)时旧仓库快照不得落笔。
             guard generation == payloadGeneration else { return }
-            // nil = 该项读取失败(超时/输出超限/进程起不来):保留上一轮结果。
-            // 直接落 nil/[] 会把一次 git 超时渲染成"这个仓库没有分支",
-            // 用户看到的是空列表而不是"读取失败",且无从归因。
+            // nil = 该项读取失败(超时/输出超限/进程起不来):保留上一轮结果,不把一次超时报成"没有分支"。
             if let branches = snapshot.branches { branchNames = branches }
             if let remote = snapshot.remoteTrackingBranches { remoteTrackingBranches = remote }
             if let metadata = snapshot.metadata { branchMetadata = metadata }
@@ -502,8 +462,7 @@ struct CommitLogWindowView: View {
         }
     }
 
-    /// 提交列表的加载方式。分页游标就是"已加载条数"(git 侧 `--skip` 偏移),
-    /// 各方式只是 skip/count 的不同组合,翻到第 N 页不再需要从仓库头重拉整段历史。
+    /// 提交列表加载方式:分页游标即"已加载条数"(git 侧 `--skip` 偏移),各方式只是 skip/count 组合。
     private enum CommitLogLoadKind {
         /// 回到首页并整屏转圈(首载、换分支、换"仅看未推送"、手动刷新)。
         case firstPageWithSpinner
@@ -530,7 +489,7 @@ struct CommitLogWindowView: View {
             skip = 0
         case .nextPage:
             pageSize = Self.pageSize
-            // 用 git 侧游标,不用去重后的展示条数(见 fetchedRowCount 注释)。
+            // 游标用 git 侧偏移,不用去重后的展示条数(见 fetchedRowCount 注释)。
             skip = fetchedRowCount
         }
 
@@ -571,16 +530,13 @@ struct CommitLogWindowView: View {
                     fetchedRowCount = pageCommits.count
                 }
                 if kind == .nextPage {
-                    // 游标是"已加载条数"的偏移,期间若有新提交落到分支顶端,
-                    // 下一页会重复带上已展示的头部提交:按哈希去重后再追加。
+                    // 期间若有新提交落到分支顶端,下一页会重复带上已展示的头部提交:按哈希去重后再追加。
                     let shown = Set(commits.map(\.hash))
                     commits.append(contentsOf: pageCommits.filter { shown.contains($0.hash) == false })
                 } else {
                     commits = pageCommits
                 }
-                // 静默刷新(firstPageQuietly/reloadLoaded/nextPage)也要清错误:
-                // content 优先渲染错误页,不清则目录恢复后列表已更新、
-                // 界面却永远停在"本地目录不存在"。
+                // 静默刷新也要清错误:content 优先渲染错误页,不清则列表已更新、界面却永远停在错误。
                 errorMessage = nil
                 isLoading = false
                 isLoadingMore = false
@@ -593,8 +549,7 @@ struct CommitLogWindowView: View {
         reloadCommits(.nextPage)
     }
 
-    /// 关键词防抖:搜索已下推到 git,每轮都要扫一遍历史,
-    /// 逐键触发等于把一串击键排成一串 `git log`。
+    /// 关键词防抖:搜索已下推到 git,每轮都要扫一遍历史,停手后才发一次。
     private func scheduleSearchReload() {
         searchTask?.cancel()
         searchTask = Task { @MainActor in
@@ -615,21 +570,15 @@ struct CommitLogWindowView: View {
         ensureDetail(for: commit)
     }
 
-    /// 当前可见提交是否已全部展开(与 Diff 查看器"全部展开/折叠"按钮同语义)。
+    /// 当前可见提交是否已全部展开。
     private func allExpanded(_ state: CommitLogPresentationState) -> Bool {
         let visible = state.visibleCommits
         guard visible.isEmpty == false else { return false }
         return visible.allSatisfy { expandedIDs.contains($0.id) }
     }
 
-    /// 全部展开/折叠。展开时详情经 ConcurrencyUtilities.runLimitedTasks 限并发拉取:
-    /// 此前每个可见提交各起一个无句柄 Task,长列表会同时压上几十个 git show 进程,
-    /// 且窗口关闭时无法取消。
-    /// 取消当前"全部展开"批次并同步清理其加载标记。
-    /// gitService.commitDetail 对取消不协作(要等 git 进程返回),旧批次的标记
-    /// 会滞留到最慢进程退出——期间再次展开会因 pending 全被标记排除而提前返回,
-    /// 造成"已展开、非加载、无详情"的死态。取消即认领:标记立刻交还,
-    /// 旧批次的迟到写回经 supersededDetailIDs 拦下,不再破坏新批次。
+    /// 取消当前"全部展开"批次并同步清加载标记:git show 对取消不协作(要等进程返回),旧批次标记会滞留——
+    /// 期间再次展开会因 pending 全被标记排除而提前返回,造成"已展开、无详情"死态;令牌自增拦下旧批次迟到写回。
     private func cancelExpandAllBatch() {
         expandAllTask?.cancel()
         expandAllTask = nil
@@ -639,7 +588,6 @@ struct CommitLogWindowView: View {
         guard expandAllBatchIDs.isEmpty == false else { return }
         for id in expandAllBatchIDs {
             detailLoadingIDs.remove(id)
-            supersededDetailIDs.insert(id)
         }
         expandAllBatchIDs.removeAll()
     }
@@ -663,17 +611,12 @@ struct CommitLogWindowView: View {
         for commit in pending {
             detailLoadingIDs.insert(commit.id)
             detailFailedIDs.remove(commit.id)
-            // 新批次认领自己的 id:清掉任何来源的滞留 superseded 标记,
-            // 防止陈旧标记影响后续批次的收尾统计。
-            supersededDetailIDs.remove(commit.id)
         }
         let path = payload.localPath
         let context = _context.wrappedValue
         expandAllBatchIDs = Set(pending.map(\.id))
-        let batchIDs = expandAllBatchIDs
         let batchToken = expandAllBatchToken
         expandAllTask = Task {
-            // 结果经 MainActor.run 直接写回状态集合,返回值本身无需消费。
             _ = await ConcurrencyUtilities.runLimitedTasks(
                 pending,
                 maxConcurrentTasks: Self.maxConcurrentDetailLoads
@@ -682,14 +625,8 @@ struct CommitLogWindowView: View {
                 let detail = await context.commitDetail(hash: commit.hash, directory: path)
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
-                    // 取代判定只看令牌:旧批次(令牌过期)的回写必被拦下。
-                    // 不能按 supersededDetailIDs 逐条拦截——旧批次的标记要等其
-                    // 最慢进程退出才被认领,期间**新批次**对同一提交 id 的合法
-                    // 回写会被滞留标记误杀,重新造成"已展开、非加载、无详情"死空白。
-                    if batchToken != expandAllBatchToken {
-                        supersededDetailIDs.remove(commit.id)
-                        return
-                    }
+                    // 令牌过期即旧批次,其迟到写回直接丢弃。
+                    guard batchToken == expandAllBatchToken else { return }
                     detailLoadingIDs.remove(commit.id)
                     if let detail {
                         commitDetails[commit.id] = detail
@@ -698,28 +635,19 @@ struct CommitLogWindowView: View {
                     }
                 }
             }
-            // 取消路径(折叠/再次展开/关窗)下子任务直接 return,不写回状态:
-            // 这里统一清掉本批置入的加载标记,否则被取消的提交永久滞留
-            // detailLoadingIDs,后续单行展开被守卫跳过、UI 卡"加载中"死态。
-            // 已被 cancelExpandAllBatch 认领过的批次此处只清 superseded,remove 幂等。
+            // 取消路径下子任务直接 return 不写回:这里统一清掉本批置入的加载标记,
+            // 否则被取消的提交永久滞留 detailLoadingIDs,后续单行展开被守卫跳过、卡"加载中"死态。
             await MainActor.run {
-                if batchToken == expandAllBatchToken {
-                    for commit in pending {
-                        detailLoadingIDs.remove(commit.id)
-                        supersededDetailIDs.remove(commit.id)
-                    }
-                    expandAllBatchIDs = []
-                } else {
-                    for id in batchIDs {
-                        supersededDetailIDs.remove(id)
-                    }
+                guard batchToken == expandAllBatchToken else { return }
+                for commit in pending {
+                    detailLoadingIDs.remove(commit.id)
                 }
+                expandAllBatchIDs = []
             }
         }
     }
 
-    /// 按需拉取提交详情并缓存;同一提交只发一次,加载中的不重复触发。
-    /// 任务句柄按提交 id 归档,纳入 cancelAllTasks 统一取消。
+    /// 按需拉取提交详情并缓存;同一提交只发一次,任务句柄按 id 归档纳入 cancelAllTasks 统一取消。
     private func ensureDetail(for commit: GitCommitEntry) {
         let id = commit.id
         guard commitDetails[id] == nil, detailLoadingIDs.contains(id) == false else { return }
@@ -733,14 +661,12 @@ struct CommitLogWindowView: View {
         }
     }
 
-    /// 拉取单条提交详情并回写缓存/加载/失败集合(单行展开与全部展开共用)。
     private func loadDetail(for commit: GitCommitEntry) async {
         let id = commit.id
         let path = payload.localPath
         let hash = commit.hash
         let detail = await _context.wrappedValue.commitDetail(hash: hash, directory: path)
-        // 取消同样要收口加载标记:ensureDetail 已把 id 置入 detailLoadingIDs,
-        // 直接 return 会让该提交永久滞留,再次点开展开被守卫跳过、UI 卡"加载中"死态。
+        // 取消同样要收口加载标记:直接 return 会让提交永久滞留,再次展开被守卫跳过、UI 卡"加载中"死态。
         guard !Task.isCancelled else {
             detailLoadingIDs.remove(id)
             return
@@ -774,8 +700,7 @@ struct CommitLogWindowView: View {
     private func submitCreateBranch() {
         let branch = newBranchName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard branch.isEmpty == false, let commit = createBranchCandidate else { return }
-        // 与 BranchSwitchPopoverView 的内联建分支同一套校验规则:空格/^/../等
-        // 非法名在提交前拦下并提示,而不是把裸 git 报错甩给用户。
+        // 非法分支名在提交前拦下并提示(与内联建分支同一校验规则),不甩裸 git 报错给用户。
         if let validationProblem = BranchNameValidation.validate(branch) {
             showNotice(validationProblem, isError: true)
             return
@@ -820,8 +745,7 @@ struct CommitLogWindowView: View {
     }
 }
 
-/// 提交行:标题 + hash/统计/作者/时间 + 行内操作(复制 commit ID/基于此提交建分支/
-/// 查看改动);点击展开完整详情。
+/// 提交行:标题 + hash/统计/作者/时间 + 行内操作;点击展开完整详情。
 struct CommitLogRowView: View {
     let commit: GitCommitEntry
     let isExpanded: Bool
@@ -874,7 +798,7 @@ struct CommitLogRowView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                    // 窄窗口下压缩顺序里保作者不被截掉:优先让位给作者,时间/按钮本身定宽。
+                    // 窄窗口压缩顺序里保作者不被截掉:时间/按钮本身定宽,优先让位给作者。
                     .layoutPriority(1)
                 Spacer()
                 Text(commit.date.relativeDescription)
@@ -919,8 +843,7 @@ struct CommitLogRowView: View {
         }
         .animation(.easeInOut(duration: 0.2), value: copied)
         .onDisappear {
-            // 先清状态再取消:行身份存续、仅滚出可视区时 @State 保留,
-            // 只取消不复位会让 1.5s 内消失的行对勾常亮(同 BranchSwitchPopoverView)。
+            // 行身份存续、仅滚出可视区时 @State 保留:先清 copied 再取消,只不复位会让对勾常亮(同 BranchSwitchRow)。
             copied = false
             resetTask?.cancel()
             resetTask = nil

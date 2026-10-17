@@ -33,8 +33,7 @@ struct RepositoryConfig: Equatable, Identifiable, Sendable, Codable {
         gitURL = try container.decode(String.self, forKey: .gitURL)
         repoName = try container.decode(String.self, forKey: .repoName)
         defaultBranch = try container.decodeIfPresent(String.self, forKey: .defaultBranch)
-        // 保序去重:手工编辑/导入的 JSON 可能含重复分支,直存会让
-        // MR 分支胶囊与分支面板的 ForEach(id: \.self) 出现重复 ID(SwiftUI UB)。
+        // 保序去重:手工编辑/导入的 JSON 可能含重复分支,直存会让 ForEach(id: \.self) 出现重复 ID(SwiftUI UB)。
         mrTargetBranches = Self.deduplicated(
             try container.decodeIfPresent([String].self, forKey: .mrTargetBranches) ?? []
         )
@@ -42,9 +41,7 @@ struct RepositoryConfig: Equatable, Identifiable, Sendable, Codable {
         updatedAt = try container.decode(Date.self, forKey: .updatedAt)
     }
 
-    /// 不变式收敛点:`mrTargetBranches` 无重复。
-    /// 去重原先只挡解码路径,成员式构造(导入前的内存对象)可带着
-    /// 重复值进入同一个 `ForEach(id: \.self)`,因此两条路径共用此实现。
+    /// 不变式收敛点:`mrTargetBranches` 无重复;解码路径与成员式构造(导入前的内存对象)都走这里。
     static func deduplicated(_ branches: [String]) -> [String] {
         var seen = Set<String>()
         return branches.filter { seen.insert($0).inserted }

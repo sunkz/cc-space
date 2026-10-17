@@ -7,25 +7,20 @@ enum CCSpaceScreenshotScene: String, Equatable {
     case createWorkplace = "create-workplace"
 }
 
-/// 启动时"恢复上次所在页面"的纯决策(便于测试,见 RootSplitViewSupportTests)。
 enum RouteRestoreSupport {
     struct Selection: Equatable {
         let route: AppRoute
-        /// 恢复出的工作区;上次在工作区页但选中项缺失/非法/工作区已删时为 nil,
-        /// 此时降级为"工作区列表",而不是什么都不做落回默认设置页。
-        /// 注意降级只切路由:经 `apply(_:to:)` 固定走 `showDegradedRoute`,
-        /// 不得把 nil 回写 `lastSelectedWorkplaceID`,否则会级联改写设置文件。
+        /// 上次在工作区页但选中项缺失/非法/工作区已删时为 nil,此时降级为"工作区列表"而非落回默认设置页。
+        /// 降级只切路由(固定走 `showDegradedRoute`),不得把 nil 回写 `lastSelectedWorkplaceID`——那会级联改写设置文件。
         let workplaceID: UUID?
     }
 
-    /// 持久化路由缺失或非法时返回 nil(调用方落到默认路由)。
     static func restoredSelection(
         lastSelectedRoute: String?,
         lastSelectedWorkplaceID: String?,
         workplaces: [Workplace]
     ) -> Selection? {
-        // 经 AppRoute(rawValue:) 校验而非裸字符串比较:持久化值可能来自
-        // 旧版本/手改文件,非法值直接忽略。
+        // 持久化值可能来自旧版本/手改文件,经 AppRoute(rawValue:) 校验,非法值直接忽略。
         guard let lastSelectedRoute,
               let route = AppRoute(rawValue: lastSelectedRoute) else { return nil }
         switch route {
@@ -41,10 +36,6 @@ enum RouteRestoreSupport {
         }
     }
 
-    /// 把恢复出的选中项落到 ViewModel(降级接线的唯一入口,便于测试锁住)。
-    ///
-    /// 降级分支(`.workplaces` + nil)固定走 `showDegradedRoute`,不回写
-    /// `lastSelectedWorkplaceID`;正常分支照常通知选中变化。
     @MainActor
     static func apply(_ selection: Selection, to viewModel: AppViewModel) {
         switch selection.route {
@@ -132,8 +123,7 @@ struct CCSpaceLaunchConfiguration {
         return workplaces.first
     }
 
-    /// 解析应用支撑目录:环境变量覆盖优先;否则 Application Support/CCSpace,
-    /// 极端情况下(如沙盒配置异常)回退用户主目录下的 CCSpace 目录而不是启动即崩。
+    /// 环境变量覆盖优先;取不到 Application Support 时回退主目录下的 CCSpace,而不是启动即崩。
     func resolvedAppSupportDirectory() -> URL {
         if let appSupportDirectory { return appSupportDirectory }
         let appSupportBase = FileManager.default

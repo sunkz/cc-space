@@ -11,34 +11,28 @@ private let repositoryConfigViewLog = Logger(
 struct RepositorySettingsSection: View {
     @ObservedObject var repositoryStore: RepositoryStore
     @ObservedObject var workplaceStore: WorkplaceStore
-    let gitService: GitServicing
-    /// 搜索词由 SettingsView 持有:仓库区与同页「回到顶部」共用同一份。
     @Binding var searchText: String
-    /// 仓库区只读信息查询(默认分支探测、MR 分支名单):提升为存储属性,
-    /// 避免在 body 每次求值时重建一份。
+    /// 仓库区只读信息查询(默认分支探测、MR 分支名单):提升为存储属性,避免 body 每次求值重建一份。
     private let infoService: RepositoryInfoService
-    /// 把某条仓库行滚进视野:由 SettingsView 注入(它才持有外层 ScrollView 的 reader)。
+    /// 由 SettingsView 注入(它才持有外层 ScrollView 的 reader),把某条仓库行滚进视野。
     let scrollToRepository: (UUID) -> Void
-    /// 新增仓库专用的地址框:与 `searchText` 是两个互不相干的控件——
-    /// 地址框只负责建档,搜索框只负责过滤,粘贴地址不再把列表筛成"未找到"。
+    /// 与 `searchText` 是两个互不相干的控件:地址框只负责建档,搜索框只负责过滤,否则粘贴地址会把列表筛成"未找到"。
     @State private var addURLText = ""
     /// 点过「新增仓库」但框里是空的:提示行要说"没填",不能报"格式不对"。
     @State private var addSubmitAttempted = false
     @FocusState private var addURLFocused: Bool
     @State private var feedback: CCSpaceFeedback?
     @State private var deletePresentationState: RepositoryDeletePresentationState?
-    /// 刚新增成功的仓库:行高亮一小段时间,配合滚动定位让用户看见它加在哪儿了。
     @State private var justAddedRepositoryID: UUID?
     @State private var justAddedResetTask: Task<Void, Never>?
-    /// MR 目标分支面板的状态(开在哪一行 / 远端名单 / 加载态 / 探测代际)。
-    /// 四者必须同进同退,故收在 `MRBranchPanelState` 里由它自己守住不变式。
+    /// 面板状态(开在哪一行 / 远端名单 / 加载态 / 探测代际)必须同进同退,
+    /// 故收在 `MRBranchPanelState` 里由它自己守住不变式。
     @State private var mrPanel = MRBranchPanelState()
     /// 在途的 `ls-remote`:连同它属于哪一次呈现一起记账。取消只允许针对同一次呈现,
     /// 否则旧面板迟到的 `onDisappear` 会把新面板刚起的探测打成"探测失败"。
     @State private var mrRemoteProbe: (session: MRBranchPanelState.Session, task: Task<Void, Never>)?
-    /// 在途的默认分支补探。它不在面板状态机里(一次性的旁路写盘),但同样必须记账:
-    /// 任务强引用 `RepositoryStore`,主窗口关闭→重开会换一个新 store 实例,这条没归宿
-    /// 的任务会以**旧实例的内存快照**整库回写,把期间删掉的仓库复活。
+    /// 在途的默认分支补探:任务强引用 `RepositoryStore`,主窗口关闭→重开会换一个新 store 实例,
+    /// 这条没归宿的任务会以旧实例的内存快照整库回写,把期间删掉的仓库复活。
     @State private var defaultBranchProbeTask: Task<Void, Never>?
     /// 补探代际:`Task.isCancelled` 通过后、落笔前仍可能被新的补探取代,与 mrPanel 同用令牌兜住。
     @State private var defaultBranchProbeSequence = 0
@@ -52,7 +46,6 @@ struct RepositorySettingsSection: View {
     ) {
         self.repositoryStore = repositoryStore
         self.workplaceStore = workplaceStore
-        self.gitService = gitService
         self._searchText = searchText
         self.scrollToRepository = scrollToRepository
         infoService = RepositoryInfoService(gitService: gitService)
@@ -126,7 +119,6 @@ struct RepositorySettingsSection: View {
                     .ccspaceAutoDismissFeedback($feedback)
             }
 
-            // 地址框(含提示行)在上,搜索框在下:两个入口不共用一个控件。
             addRepositoryRow
 
             // 仓库池为空时搜索框没有可过滤的内容,不出现;新增引导由地址框承担。
@@ -143,7 +135,6 @@ struct RepositorySettingsSection: View {
                     EmptyView()
                 }
             } else {
-                // 仓库列表全量平铺,随设置页整体滚动,不再固定高度内部滚动。
                 repositoryList(searchState)
             }
 
@@ -185,7 +176,7 @@ struct RepositorySettingsSection: View {
             }
         }
         .onDisappear {
-            // 离开设置页:高亮定时器与在途探测都没有归宿了,别留着空转的 Task 持有状态箱。
+            // 离开设置页:高亮定时器与在途探测都没有归宿,别留空转的 Task 持有状态箱。
             justAddedResetTask?.cancel()
             justAddedResetTask = nil
             justAddedRepositoryID = nil
@@ -209,8 +200,6 @@ struct RepositorySettingsSection: View {
         .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
-    /// 地址框 + 框外实心蓝按钮。下方那一行只在该有话说时插入(格式错/已存在/将创建预览),
-    /// 空框时不留占位行——两个输入框之间默认就是普通间距。
     private var addRepositoryRow: some View {
         let hint = addHint
         return VStack(alignment: .leading, spacing: 6) {
@@ -224,8 +213,7 @@ struct RepositorySettingsSection: View {
         }
     }
 
-    /// 白底 + 浅描边,与灰底搜索框一眼分开;聚焦只加深描边灰度,不上蓝色焦点环
-    /// (设置页通篇没有彩色边框)。
+    /// 聚焦只加深描边灰度、不上蓝色焦点环:设置页通篇没有彩色边框。
     private var addURLField: some View {
         HStack(spacing: 8) {
             Image(systemName: "link")
@@ -295,8 +283,8 @@ struct RepositorySettingsSection: View {
         }
     }
 
-    /// 点击时才判定,按钮不置灰。拦截性反馈一律落在地址框下方那一行,不再占用
-    /// 区块顶部横幅——顶部只留"已新增 xxx"和写盘失败这类整页级信息。
+    /// 点击时才判定,按钮不置灰。拦截性反馈一律落在地址框下方那一行,顶部横幅只留
+    /// "已新增 xxx"和写盘失败这类整页级信息。
     private func addRepository() {
         let gitURL = addURLText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard gitURL.isEmpty == false else {
@@ -304,8 +292,7 @@ struct RepositorySettingsSection: View {
             addURLFocused = true
             return
         }
-        // 格式与重复都已在提示行里说清了,这里只需挡住提交:再去 store 撞一次异常,
-        // 只会得到同一条信息的第二个版本(顶部红条)。
+        // 格式与重复都已在提示行里说清了,这里只挡住提交:再去 store 撞一次异常只会得到同一条信息的第二个版本。
         let hint = addHint
         guard hint.style != .error, hint.duplicateRepositoryID == nil else {
             addURLFocused = true
@@ -326,8 +313,7 @@ struct RepositorySettingsSection: View {
         }
     }
 
-    /// 搜索词还挂着、而这条记录不匹配它时先把词清掉——否则用户看不见刚加的仓库
-    /// (判据与列表过滤同源,见 `RepositorySearchPresentationState.matches`)。
+    /// 搜索词还挂着、而这条记录不匹配它时先把词清掉——否则用户看不见刚加的仓库(判据与列表过滤同源)。
     private func clearSearchIfOccluding(_ repository: RepositoryConfig) {
         let keyword = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard keyword.isEmpty == false,
@@ -335,19 +321,15 @@ struct RepositorySettingsSection: View {
         searchText = ""
     }
 
-    /// 从提示行跳到已建档的那一行:同一判据先保证它没被搜索词滤掉,再滚过去。
     private func locateRepository(_ id: UUID) {
         if let repository = repositoryStore.repository(for: id) {
             clearSearchIfOccluding(repository)
         }
-        // 刚清过词,这一轮列表才重排;同帧 scrollTo 可能找不到锚点,跳一拍再做。
         Task { @MainActor in
             scrollToRepository(id)
         }
     }
 
-    /// 新增后定位并高亮那一行:高亮 2.4s 自动退场;滚动等下一次渲染再做
-    /// (行是这一轮才插进列表的,同帧 scrollTo 找不到锚点)。
     private func flagJustAdded(_ id: UUID) {
         justAddedResetTask?.cancel()
         justAddedRepositoryID = id
@@ -382,13 +364,12 @@ struct RepositorySettingsSection: View {
         }
     }
 
-    /// 关闭:先取回这一行的归属快照,状态机与在途任务一起按它收口(归属判定见 MRBranchPanelState)。
+    /// 关闭:先取回这一行的归属快照,状态机与在途任务一起按它收口。
     private func closeMREditor(repositoryID: UUID) {
         let session = mrPanel.sessionToken(for: repositoryID)
         mrPanel.close(repositoryID: repositoryID)
-        // 取不到归属说明面板早已换到别的行了,这一行没有在途任务要收口。此时**不能**按
-        // nil 全量取消:那会正好作废新面板刚发起的探测,而任务体在 `Task.isCancelled`
-        // 处直接返回、不会 `finishLoad`,加载态永远停在 true(转圈且没有重试入口)。
+        // 取不到归属说明面板早已换到别的行,这一行没有在途任务要收口。此时**不能**按 nil 全量取消:那会作废
+        // 新面板刚发起的探测,而任务体在 `Task.isCancelled` 处直接返回、不 `finishLoad`,加载态永远停在 true。
         if let session {
             cancelRemoteProbe(matching: session)
         }
@@ -415,9 +396,8 @@ struct RepositorySettingsSection: View {
         mrRemoteProbe = nil
     }
 
-    /// 面板打开与点刷新时拉远端名单(`ls-remote`)。
-    /// 归一(去重+trim+本地化排序)不能省:不排序的话同一仓库在设置面板里是 git 的
-    /// 原始 ref 顺序、在工作区分支面板里是本地化顺序;分支多时排序也不能留在主线程。
+    /// 面板打开与点刷新时拉远端名单(`ls-remote`)。归一(去重+trim+本地化排序)不能省:
+    /// 不排序的话同一仓库在设置面板是 git 原始 ref 顺序、在工作区分支面板是本地化顺序;排序也不能留在主线程。
     private func loadRemoteBranches(session: MRBranchPanelState.Session?, gitURL: String) {
         guard let session, let generation = mrPanel.beginLoad(session) else { return }
         cancelRemoteProbe(matching: session)
@@ -429,17 +409,16 @@ struct RepositorySettingsSection: View {
                 let normalized: [String]?
                 if let probed {
                     normalized = await Task.detached(priority: .userInitiated) {
-                        BranchListNormalization.remoteBranches(probed)
+                        BranchListNormalization.normalized(probed)
                     }.value
                 } else {
                     normalized = nil
                 }
-                // 被取消说明这次呈现已被取代(且取消路径会把结果打成 nil,即"探测失败"):
+                // 被取消说明这次呈现已被取代(取消路径会把结果打成 nil,即"探测失败"):
                 // 直接丢弃,别让旧面板把新面板的名单收口成空。
                 guard !Task.isCancelled else { return }
                 mrPanel.finishLoad(session, generation: generation, branches: normalized)
-                // 默认分支只在建档那一刻探一次,离线/超时就没有第二次机会(编辑弹窗已删,
-                // 再没有别的写入口)。用户既然打开了这个仓库的面板,顺手补探一次。
+                // 默认分支只在建档那一刻探一次,离线/超时就没有第二次机会;用户既然打开了这个仓库的面板,顺手补探一次。
                 if normalized != nil {
                     refreshDefaultBranch(id: session.repositoryID, gitURL: gitURL)
                 }
@@ -448,7 +427,7 @@ struct RepositorySettingsSection: View {
     }
 
     /// 面板里点一条:已加过的移除、没加过的追加。名单以 Store 实时值为基准——
-    /// 面板保持打开,闭包捕获的行快照从第二次点击起就是旧的。
+    /// 面板保持打开时,闭包捕获的行快照从第二次点击起就是旧的。
     private func toggleMRBranch(repository: RepositoryConfig, branch: String) {
         guard let current = repositoryStore.repository(for: repository.id) else { return }
         writeMRBranches(
@@ -467,8 +446,8 @@ struct RepositorySettingsSection: View {
         }
     }
 
-    /// 补探测并回写默认分支:行上的「默认分支」胶囊、MR 面板的默认分支保护与工作区
-    /// 行的 MR 兜底都依赖这个值。探测/写盘失败都静默(不打扰主流程,下次开面板再补)。
+    /// 补探测并回写默认分支:行上的「默认分支」胶囊、MR 面板的默认分支保护与工作区行的 MR
+    /// 兜底都依赖这个值;探测/写盘失败都静默(下次开面板再补)。
     private func refreshDefaultBranch(id: UUID, gitURL: String) {
         // 已有值就不发这次请求:这里是"补空",不是"纠正"。
         let recorded = repositoryStore.repository(for: id)
@@ -483,8 +462,8 @@ struct RepositorySettingsSection: View {
         let token = defaultBranchProbeSequence
         defaultBranchProbeTask = Task { @MainActor in
             let probeResult = await infoService.defaultBranch(for: gitURL)
-            // 令牌与取消双闸:视图已消失/已被新一次补探取代时不得再碰 store——
-            // 那可能已是上一个窗口实例的内存快照,整库回写会复活期间删掉的仓库。
+            // 令牌与取消双闸:视图已消失/已被新一次补探取代时不得再碰 store——那可能已是上一个窗口
+            // 实例的内存快照,整库回写会复活期间删掉的仓库。
             guard !Task.isCancelled, token == defaultBranchProbeSequence else { return }
             // 探测期间记录可能被改(换地址/删库/导入合并写了值),按回来后的实时值再判一次。
             let current = repositoryStore.repository(for: id)
@@ -530,10 +509,8 @@ struct RepositorySettingsSection: View {
     }
 
     private var headerSection: some View {
-        // 区块头只留标题+副标题:仓库计数不再展示。
-        // 导入/导出是**整个仓库区**的备份动作,不属于「新增」这一操作,故置于区块头右侧:
-        // 有仓库/空列表两种状态下位置完全一致,操作区只剩搜索+新增仓库。
-        // 与副标题行对齐(.lastTextBaseline):贴标题显得偏高,压到副标题这条线上视觉重心才稳。
+        // 导入/导出是**整个仓库区**的备份动作,故置于区块头右侧(有无仓库两种状态下位置完全一致)。
+        // 与副标题行对齐(.lastTextBaseline):贴标题会显得偏高。
         HStack(alignment: .lastTextBaseline, spacing: 8) {
             CCSpaceSectionTitle(
                 title: "Git 仓库",
@@ -546,7 +523,6 @@ struct RepositorySettingsSection: View {
         }
     }
 
-    /// 导入/导出不再收进「更多」菜单,作为可见按钮呈现。
     /// 空列表没有可备份的内容,导出置灰,避免导出一份空 JSON。
     private var backupActionButtons: some View {
         Group {
@@ -585,9 +561,6 @@ struct RepositorySettingsSection: View {
                                 .ccspaceQuickHelp("默认分支")
                         }
 
-                        // MR 目标分支与默认分支同一行,单行平铺、超出折叠为「+N」;
-                        // 默认分支已由上面那颗橙色胶囊表达,这里再画一遍就是重复信息。
-                        // 胶囊只读:增删统一在「添加 MR 目标分支」面板里点选完成。
                         let mrOnlyBranches = MRBranchChipDisplay.visibleBranches(
                             branches: repository.mrTargetBranches,
                             defaultBranch: repository.defaultBranch
@@ -605,8 +578,6 @@ struct RepositorySettingsSection: View {
 
                 Spacer(minLength: 8)
 
-                // 三个操作按钮收紧密度(2pt)+ 放大一档(28pt 框):
-                // 与仓库行的行内按钮簇同款"贴排"口径。
                 HStack(spacing: 2) {
                     Button {
                         openRepositoryWeb(repository)
@@ -616,10 +587,7 @@ struct RepositorySettingsSection: View {
                     .ccspaceIconActionButton(large: true)
                     .ccspaceQuickHelp("在浏览器打开仓库", providesLabel: true)
 
-                    // 原「编辑仓库地址」位置换成 MR 目标分支入口:点开工作区仓库行同款的
-                    // 分支面板(远端名单 + 搜索),点行即增删,面板保持打开可连续配置。
-                    // 图标沿用全 app 的 MR 记号;不用 arrow.triangle.branch——
-                    // 那颗在菜单里已经表示"切换分支"。
+                    // 图标沿用全 app 的 MR 记号;不用 arrow.triangle.branch——那颗在菜单里已表示"切换分支"。
                     Button {
                         toggleMREditor(for: repository)
                     } label: {
@@ -656,7 +624,7 @@ struct RepositorySettingsSection: View {
                 }
             }
         }
-        // 刚新增的行:底色之外再描一圈主色边框,2.4s 后随 justAddedRepositoryID 清空一起退场。
+        // 高亮描边随 justAddedRepositoryID 清空退场(2.4s 定时见 flagJustAdded)。
         .overlay {
             if isJustAdded {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -690,7 +658,6 @@ struct RepositorySettingsSection: View {
         )
     }
 
-    /// 在浏览器打开仓库主页:按配置的远端地址生成链接,失败弹本区反馈。
     private func openRepositoryWeb(_ repository: RepositoryConfig) {
         do {
             let url = try GitURLParser.repositoryWebURL(from: repository.gitURL)
@@ -710,9 +677,8 @@ struct RepositorySettingsSection: View {
     }
 }
 
-/// MR 目标分支胶囊:**单行只读**展示,超出阈值折叠为「+N」(悬停逐条列出)。
-/// 默认分支由仓库行那颗橙色「默认分支」胶囊表达,调用方已把它从列表里滤掉;
-/// 增删一律在「添加 MR 分支」面板里点选完成,胶囊本身不带任何操作。
+/// MR 目标分支胶囊:**单行只读**,超出阈值折叠为「+N」(悬停逐条列出);增删一律在「添加 MR 分支」面板里点选完成。
+/// 默认分支由仓库行那颗橙色「默认分支」胶囊表达,调用方已把它从列表里滤掉。
 struct MRBranchChips: View {
     let branches: [String]
 

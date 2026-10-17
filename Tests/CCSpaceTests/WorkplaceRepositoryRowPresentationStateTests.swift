@@ -364,29 +364,22 @@ final class WorkplaceRepositoryRowPresentationStateTests: XCTestCase {
         XCTAssertTrue(unknown.message.contains("丢弃进行中的当前操作"))
     }
 
-    func test_branchPillShowsCurrentBranchNameAndGenericTooltip() {
+    func test_branchPillShowsCurrentBranchName() {
         let pillState = WorkplaceRepositoryBranchPillState(
             currentBranch: " feature/login ",
-            defaultBranch: "main",
-            hasAvailableBranches: true
+            defaultBranch: "main"
         )
 
         XCTAssertEqual(pillState?.title, "feature/login")
-        XCTAssertEqual(pillState?.quickHelp, "当前分支")
         XCTAssertEqual(pillState?.isDefault, false)
     }
 
-    func test_branchPillMarksDefaultBranchAndEmptyBranchMenu() {
+    func test_branchPillMarksDefaultBranch() {
         let pillState = WorkplaceRepositoryBranchPillState(
             currentBranch: "main",
-            defaultBranch: " main ",
-            hasAvailableBranches: false
+            defaultBranch: " main "
         )
 
-        XCTAssertEqual(
-            pillState?.quickHelp,
-            "当前分支，暂无可切换的本地分支"
-        )
         XCTAssertEqual(pillState?.title, "main")
         XCTAssertEqual(pillState?.isDefault, true)
     }
@@ -395,8 +388,7 @@ final class WorkplaceRepositoryRowPresentationStateTests: XCTestCase {
         XCTAssertNil(
             WorkplaceRepositoryBranchPillState(
                 currentBranch: "   ",
-                defaultBranch: "main",
-                hasAvailableBranches: true
+                defaultBranch: "main"
             )
         )
     }

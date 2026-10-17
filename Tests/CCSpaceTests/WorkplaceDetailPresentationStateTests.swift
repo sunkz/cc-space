@@ -34,7 +34,6 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
         )
         let actionState = WorkplaceActionState(
             workplace: workplace,
-            repositories: [repository],
             syncStates: [
                 RepositorySyncState(
                     workplaceID: workplace.id,
@@ -59,7 +58,6 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
         XCTAssertTrue(presentationState.canRefreshAllRepositories)
         XCTAssertTrue(presentationState.canSyncAllRepositories)
         XCTAssertTrue(presentationState.canPushAllRepositories)
-        XCTAssertTrue(presentationState.canMergeDefaultBranchIntoCurrent)
         XCTAssertTrue(presentationState.canSwitchRepositoriesToDefaultBranch)
         XCTAssertFalse(presentationState.canSwitchRepositoriesToWorkBranch)
         XCTAssertTrue(presentationState.canOpenDirectory)
@@ -81,7 +79,6 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
         // 空仓库列表的工作区:目录存在性由视图侧后台探测注入,init 不再同步 stat。
         let actionState = WorkplaceActionState(
             workplace: workplace,
-            repositories: [],
             syncStates: [],
             probedWorkplaceDirectoryExists: true
         )
@@ -97,7 +94,6 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
         XCTAssertFalse(presentationState.canRefreshAllRepositories)
         XCTAssertFalse(presentationState.canSyncAllRepositories)
         XCTAssertFalse(presentationState.canPushAllRepositories)
-        XCTAssertFalse(presentationState.canMergeDefaultBranchIntoCurrent)
         XCTAssertFalse(presentationState.canSwitchRepositoriesToDefaultBranch)
         XCTAssertFalse(presentationState.canSwitchRepositoriesToWorkBranch)
         XCTAssertTrue(presentationState.canOpenDirectory)
@@ -137,14 +133,12 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
         XCTAssertTrue(
             WorkplaceActionState(
                 workplace: workplace,
-                repositories: [repository],
                 syncStates: [pulling]
             ).isBusy
         )
         XCTAssertTrue(
             WorkplaceActionState(
                 workplace: workplace,
-                repositories: [],
                 syncStates: [pulling]
             ).isBusy
         )
@@ -152,7 +146,6 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
         // 同一行 syncStates,只把选中集合清空即可翻转 isBusy → 该变化源必须被观察。
         let deselected = WorkplaceActionState(
             workplace: makeWorkplace(path: "/tmp/blog", selectedRepositoryIDs: [], id: workplaceID),
-            repositories: [repository],
             syncStates: [pulling]
         )
         XCTAssertFalse(deselected.isBusy)
@@ -175,7 +168,6 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
         )
         let actionState = WorkplaceActionState(
             workplace: workplace,
-            repositories: [],
             syncStates: []
         )
 
@@ -284,7 +276,6 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
         )
         let actionState = WorkplaceActionState(
             workplace: workplace,
-            repositories: [repository],
             syncStates: [
                 RepositorySyncState(
                     workplaceID: workplace.id,
@@ -304,7 +295,6 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
         )
 
         XCTAssertTrue(presentationState.canRefreshAllRepositories)
-        XCTAssertTrue(presentationState.canMergeDefaultBranchIntoCurrent)
         XCTAssertTrue(presentationState.canPushAllRepositories)
         XCTAssertTrue(presentationState.canSwitchRepositoriesToDefaultBranch)
         XCTAssertTrue(presentationState.canSwitchRepositoriesToWorkBranch)
@@ -345,7 +335,6 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
                 onPopStash: { _, _, _ in },
                 onDropStash: { _, _, _ in },
                 onAbortInterruptedOperation: { _, _ in },
-                onMergeDefaultBranchIntoCurrent: {},
                 onSwitchAllRepositoriesToDefaultBranch: {},
                 onSwitchAllRepositoriesToWorkBranch: {},
                 onRefreshStatuses: {},

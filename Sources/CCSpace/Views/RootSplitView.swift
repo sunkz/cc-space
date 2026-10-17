@@ -8,15 +8,12 @@ private let rootSplitViewLog = Logger(
 
 struct RootSplitView: View {
     @Environment(\.scenePhase) private var scenePhase
-    /// scenePhase 的 @State 镜像:长驻 `.task` 闭包捕获的是挂载时刻的**视图结构体拷贝**,
-    /// `@Environment` 的值在拷贝上是冻结的——周期任务里直接读 scenePhase 永远看到启动瞬间
-    /// 的快照(active 判定整体失效)。@State 读写走外部存储,任何时刻读到的都是当前值。
-    /// onAppear/onChange 双点同步,保证镜像与真实环境一致。
+    /// scenePhase 的 @State 镜像:长驻 `.task` 闭包捕获首帧视图拷贝,@Environment 的值在拷贝上冻结;
+    /// @State 走外部存储,任何时刻读到的都是当前值(onAppear/onChange 双点同步)。
     @State private var mirroredScenePhase: ScenePhase = .active
-    /// 磁盘刷新任务世代号:被取消的旧任务晚于新任务返回时,若无条件清 refreshTask
-    /// 会把**新任务**的句柄抹掉,后续调度 guard 放行、并发磁盘刷新。
+    /// 磁盘刷新世代号:被取消的旧任务晚于新任务返回时无条件清 refreshTask,会抹掉**新任务**的句柄,
+    /// 后续调度 guard 放行、并发磁盘刷新。
     @State private var refreshGeneration: UInt64 = 0
-    /// 在飞的磁盘刷新是否由用户显式触发(供"再点一次刷新"判断要不要重开一轮)。
     @State private var isInFlightDiskRefreshForced = false
     @StateObject private var appViewModel = AppViewModel()
     @StateObject private var detailActionCoordinator = WorkplaceDetailActionCoordinator()
@@ -30,16 +27,12 @@ struct RootSplitView: View {
     @State private var refreshTask: Task<Void, Never>?
     @State private var hasAppliedLaunchConfiguration = false
     @State private var showOnboarding = false
-    /// 外观切换保存失败时的可见提示(挂在根视图顶层,设置页工具栏操作也能看到)。
     @State private var appearanceFeedback: CCSpaceFeedback?
-    /// 待展示的去重清理提示:去重事件随时可能发生,横幅同一时刻只挂一条,
-    /// 事件先入队、横幅空出后补放(纯逻辑见 DeduplicationNoticeQueue)。
     @State private var deduplicationNotices = DeduplicationNoticeQueue()
     private let launchConfiguration: CCSpaceLaunchConfiguration
     private let syncCoordinator: SyncCoordinator
     private let gitService: GitService
-    /// 仓库只读信息查询(实际 origin 等):RootSplitView 作为顶层持有并注入,
-    /// 视图侧不再出现 `gitService.remoteURL(...)` 这类直接 git 调用。
+    /// 仓库只读信息查询(实际 origin 等)由顶层注入,View 侧不直接调 git(AGENTS.md 分层规则)。
     private let repositoryInfoService: RepositoryInfoService
 
     private var selectedWorkplace: Workplace? {
@@ -72,10 +65,10 @@ struct RootSplitView: View {
     }
 
     private var workplaceRuntimeService: WorkplaceRuntimeService {
-        RootSplitRuntimeServices.makeWorkplaceRuntimeService(
+        WorkplaceRuntimeService(
             workplaceStore: workplaceStore,
             syncCoordinator: syncCoordinator,
-            settings: settingsStore.settings
+            workplaceRootPath: settingsStore.settings.workplaceRootPath
         )
     }
 
@@ -88,7 +81,6 @@ struct RootSplitView: View {
         )
     }
 
-    /// 工具栏「获取更新」按钮的文案/图标状态,与版本号展示同源(都取自 updatePresentationState)。
     private var updateButtonState: UpdateButtonPresentationState {
         UpdateButtonPresentationState(updatePresentationState: updatePresentationState)
     }
@@ -110,13 +102,8 @@ struct RootSplitView: View {
         let fileStore = JSONFileStore(
             rootDirectory: launchConfiguration.resolvedAppSupportDirectory()
         )
-        // 三个 Store 必须在 StateObject(wrappedValue:) 的 autoclosure 内惰性构造:
-        // 先 `let instance = Store(...)` 再塞进去会让 autoclosure 的延迟语义失效,
-        // 视图结构体每次重建都同步读盘(损坏文件还会触发 preserveCorruptFile 副作用)
-        // 而实例随即被丢弃。三者互不依赖(SettingsStore 的换根在调用时才传入
-        // WorkplaceStore),可以各自独立惰性构造。
-        // autoclosure 在视图生命周期内只求值一次 → SettingsStore.init 只跑一次,
-        // 读盘(loadIfPresent)因此是"每启动一次"。
+        // 三个 Store 必须在 StateObject(wrappedValue:) 的 autoclosure 内惰性构造:先 `let instance = Store(...)`
+        // 再塞进去会让延迟语义失效,视图结构体每次重建都同步读盘(损坏文件还触发 preserveCorruptFile 副作用)而实例随即被丢弃。
         _settingsStore = StateObject(wrappedValue: SettingsStore(fileStore: fileStore))
         _repositoryStore = StateObject(wrappedValue: RepositoryStore(fileStore: fileStore))
         _workplaceStore = StateObject(wrappedValue: WorkplaceStore(fileStore: fileStore))
@@ -125,18 +112,10 @@ struct RootSplitView: View {
         syncCoordinator = SyncCoordinator(gitService: gitService)
 
         let appViewModel = AppViewModel()
-        // 路由持久化回调在 onAppear 注入(见 bindRoutePersistenceCallbacks):
-        // 此处拿不到 SwiftUI 实际持有的那个 SettingsStore(它还在 autoclosure 里),
-        // 提前构造实例正是要消灭的重复读盘。AppViewModel 仍是路由的唯一事实来源,
-        // 写 settings.json 镜像由其内部触发,View 修饰链不承担持久化职责。
         _appViewModel = StateObject(wrappedValue: appViewModel)
 
-        // 首帧外观:直接读盘一次并应用(仅进程内第一次构造执行)。
-        // 不能读 _settingsStore.wrappedValue——那会强制求值 autoclosure,
-        // 视图结构体每次重建都新造一个 SettingsStore 又丢弃(白白同步读盘,
-        // 且 corrupt 文件还会触发 preserveCorruptFile 副作用)。
-        // onAppear 里的 reconcileOverride 兜底后续变更与 SwiftUI 实际持有的实例。
-        // View init 必在主线程执行,但编译器无法证明——assumeIsolated 显式声明。
+        // 首帧外观:直接读盘一次并应用(仅进程内第一次构造执行)。不能读 _settingsStore.wrappedValue——那会强制求值
+        // autoclosure,视图每次重建都新造一个 SettingsStore 又丢弃(白白同步读盘);onAppear 的 reconcileOverride 兜底后续变更。
         MainActor.assumeIsolated {
             guard Self.hasAppliedLaunchAppearance == false else { return }
             Self.hasAppliedLaunchAppearance = true
@@ -149,8 +128,7 @@ struct RootSplitView: View {
         }
     }
 
-    /// 首帧外观只应用一次;@MainActor 隔离由编译器强制主线程访问,
-    /// View 构造虽然总在主线程,但需经 assumeIsolated 声明后才能触达。
+    /// 首帧外观标记。View 构造总在主线程,但编译器无法证明,须经 assumeIsolated 声明后才能触达 @MainActor 存储。
     @MainActor private static var hasAppliedLaunchAppearance = false
 
     var body: some View {
@@ -203,14 +181,14 @@ struct RootSplitView: View {
         )
     }
 
-    /// 生命周期/定时刷新修饰单独成链:body 的单条修饰链过长会触发类型检查超时。
+    /// 生命周期/定时刷新修饰单独成链:body 单条修饰链过长会触发类型检查超时。
     private func rootLifecycleModifiers(_ content: some View) -> some View {
         content
             .task {
                 await updateChecker.check()
             }
-            // 周期任务用 .task 长循环驱动;Timer.publish 写在 body 修饰链里会随
-            // 每次渲染重建,倒计时反复归零,周期任务事实失效。
+            // 周期任务用 .task 长循环驱动;Timer.publish 写在 body 修饰链里会随每次渲染重建、
+            // 倒计时反复归零,周期任务事实失效。
             .task {
                 // 启动校正:老数据缺 hasLocalDirectory key,依赖磁盘刷新修正可能永不触发。
                 await workplaceStore.reconcileHasLocalDirectoryFlags()
@@ -225,21 +203,16 @@ struct RootSplitView: View {
             .onAppear {
                 // 镜像先于一切周期任务对齐(onChange 只在**变化**时触发,首帧必须补一次)。
                 mirroredScenePhase = scenePhase
-                // 反馈通道的选中项读取器:动作完成后据此判断用户是否已切走,
-                // 不把 A 工作区的"已同步/失败"弹在 B 的详情页上。
                 detailActionCoordinator.selectedWorkplaceIDProvider = { [appViewModel] in
                     appViewModel.selectedWorkplaceID
                 }
-                // 路由持久化回调必须先于下面任何会改路由的动作(否则首个回调
-                // 找不到落点)。
+                // 路由持久化回调必须先于下面任何会改路由的动作(否则首个回调找不到落点)。
                 bindRoutePersistenceCallbacks()
-                // 启动恢复持久化的外观;覆盖若已被外部清空(显式模式下即不一致)会在此重新应用。
                 AppearanceModeApplier.reconcileOverride(with: settingsStore.settings.appearanceMode)
                 applyLaunchConfigurationIfNeeded()
                 restoreLastSelectedRoute()
-                // 启动对账:补建丢失的 sync state,清理指向已删仓库的孤儿引用。
-                // 任一持久化文件本次损坏被重置时**必须跳过**:此时空集合不是真实状态,
-                // 继续对账会把另外两个健康文件里的关联数据一并清空(级联丢失)。
+                // 启动对账:补建丢失的 sync state、清理指向已删仓库的孤儿引用。任一持久化文件本次
+                // 损坏被重置时**必须跳过**:空集合不是真实状态,继续对账会级联清空另外两个健康文件的关联数据。
                 if repositoryStore.didRecoverFromCorruptFile
                     || workplaceStore.didRecoverFromCorruptFile {
                     rootSplitViewLog.error(
@@ -255,9 +228,8 @@ struct RootSplitView: View {
                         rootSplitViewLog.error("event=startup_reconcile_failed reason=\(error.localizedDescription, privacy: .public)")
                     }
                 }
-                // 任一持久化文件本次启动曾损坏:必须让用户知道"配置变默认值/记录变少"
-                // 不是自己没设置过,且原始文件已保全为 .corrupt- 副本
-                // (各 Store 的 didRecoverFromCorruptFile 消费点,此前只有 settings/仓库/工作区有横幅)。
+                // 任一持久化文件本次启动曾损坏:必须让用户知道"配置变默认值/记录变少"的缘由,
+                // 且原始文件已保全为 .corrupt- 副本(各 Store 的 didRecoverFromCorruptFile 消费点)。
                 var corruptedFiles: [String] = []
                 if settingsStore.didRecoverFromCorruptFile { corruptedFiles.append("设置") }
                 if repositoryStore.didRecoverFromCorruptFile { corruptedFiles.append("仓库配置") }
@@ -303,38 +275,29 @@ struct RootSplitView: View {
                 workplaceStore.flushSyncStates()
                 settingsStore.flushSettings()
             }
-            // 关窗在 macOS 上不等于退出进程:store 随视图一起释放,防抖里尚未落盘的
-            // 终态会跟着一起没了,重开窗口读到的还是旧文件。关窗即 flush。
+            // 关窗在 macOS 上不等于退出进程:store 随视图释放,防抖里尚未落盘的终态会一起丢掉。
             .onDisappear {
                 workplaceStore.flushSyncStates()
                 settingsStore.flushSettings()
             }
             .onChange(of: appViewModel.selectedWorkplaceID) { _, _ in
-                // 持久化镜像由 AppViewModel 的回调负责(见 bindRoutePersistenceCallbacks,
-                // 于 onAppear 注入),这里只清理视图层的动作反馈。
                 detailActionCoordinator.feedback = nil
             }
-            // 兜底:磁盘刷新也可能静默删除工作区,此时选中项会悬空,
-            // 这里在工作区集合变化时校验选中项仍然有效。
+            // 兜底:磁盘刷新也可能静默删除工作区,此时选中项悬空,在集合变化时校验选中项仍有效。
             .onChange(of: Set(workplaceStore.workplaces.map(\.id))) { _, currentIDs in
                 if let selected = appViewModel.selectedWorkplaceID,
                    !currentIDs.contains(selected) {
                     appViewModel.showRoute(.workplaces)
                 }
             }
-            // 启动期自动去重是不可撤销的硬删除:此前只写 os_log,用户只会"某次打开
-            // 发现仓库少了一个"而无从得知原因。展示与事件解耦(见 DeduplicationNoticeQueue):
-            // 1) 观察单调递增的去重序号而非清理条数——onChange 只在值变化时回调,
-            //    同启动期两次清理条数相同(2→2)时按条数观察会漏掉第二次;
-            // 2) 已有横幅(损坏恢复 .warning 约 3 秒后才消失、.error 需手动关闭)时
-            //    不打断,提示入队等横幅空出后补放——此前直接丢弃且事件不会重放。
+            // 去重是不可撤销的硬删除,提示必须送达。这里观察单调递增的去重序号而非清理条数:
+            // onChange 只在值变化时回调,同启动期两次清理条数相同(2→2)时按条数观察会漏掉第二次。
             .onChange(of: repositoryStore.deduplicationCleanupSequence) { _, _ in
                 deduplicationNotices.record(
                     cleanupCount: repositoryStore.lastDeduplicationCleanupCount ?? 0
                 )
                 presentPendingDeduplicationNotice()
             }
-            // 横幅关闭(手动/3 秒自动)后补放入队中的去重提示。
             .onChange(of: appearanceFeedback) { _, newFeedback in
                 guard newFeedback == nil else { return }
                 presentPendingDeduplicationNotice()
@@ -344,7 +307,6 @@ struct RootSplitView: View {
                 refreshTask = nil
                 isInFlightDiskRefreshForced = false
             }
-            // 外观保存失败等根级操作的可见提示:挂顶层 overlay,任意路由下都能呈现。
             .overlay(alignment: .top) {
                 if let shownFeedback = appearanceFeedback {
                     CCSpaceFeedbackBanner(feedback: shownFeedback, onClose: { appearanceFeedback = nil })
@@ -359,8 +321,8 @@ struct RootSplitView: View {
     private func rootSheetModifiers(_ content: some View) -> some View {
         content
             .sheet(item: $editingWorkplace) { workplace in
-            // sheet item 是打开弹窗那一刻的快照;弹窗打开期间 store 可能已被磁盘刷新
-            // 或别处编辑改写。按 id 取实时值,避免拿陈旧快照渲染与比对改动基线。
+            // sheet item 是打开弹窗那一刻的快照,期间 store 可能已被磁盘刷新或别处编辑改写;
+            // 按 id 取实时值,避免拿陈旧快照渲染与比对改动基线。
             let currentWorkplace = workplaceStore.workplaces.first { $0.id == workplace.id } ?? workplace
             WorkplaceEditView(
                 workplace: currentWorkplace,
@@ -405,11 +367,8 @@ struct RootSplitView: View {
         let filteredSyncStates = workplaceStore.syncStates.filter { $0.workplaceID == workplace.id }
         let actions = WorkplaceDetailActions(
             onEdit: {
-                // 动作触发时取最新记录:渲染期快照的心跳刷新滞后,拿它开编辑窗
-                // 会展示旧仓库集合,保存时覆盖最新值。
-                // 工作区已不在名单(被并发删除)时直接跳过而非用 `?? workplace` 兜底:
-                // 编辑入口语义是打开窗口,用旧快照开窗同样会把它落盘覆盖/重建;
-                // 侧栏渲染的就是当前行,点击时命中最新记录几乎必然,跳过路径近乎不可达。
+                // 动作触发时取最新记录:渲染期快照滞后,拿它开编辑窗会展示旧仓库集合并在保存时覆盖最新值。
+                // 工作区已不在名单(被并发删除)时跳过而非 `?? workplace` 兜底:旧快照同样会落盘覆盖/重建。
                 guard let current = latestWorkplace(for: workplace.id) else { return }
                 editingWorkplace = current
             },
@@ -417,12 +376,8 @@ struct RootSplitView: View {
                 detailActionCoordinator.run(
                     actionName: "删除工作区"
                 ) {
-                    // 动作触发时取最新记录:渲染期快照可能已被磁盘刷新改写,
-                    // 拿陈旧集合操作会漏处理仓库/路径(与删除仓库路径同一动机)。
-                    // 必须 guard 而非 `?? workplace` 兜底:deleteWorkplace 先 rm -rf
-                    // 目录后验记录,若工作区已被并发删除且同名重建(新 id),陈旧快照
-                    // 会让这里先删掉新目录、再抛 workplaceNotFound——宁可静默不执行,
-                    // 也不能拿陈旧快照删盘(同 onDeleteRepository 的写法)。
+                    // 必须 guard 而非 `?? workplace` 兜底:deleteWorkplace 先 rm -rf 目录后验记录,
+                    // 陈旧快照会先删掉同名重建的新目录——宁可静默不执行,也不能拿陈旧快照删盘。
                     guard let current = latestWorkplace(for: workplace.id) else { return }
                     try await workplaceRuntimeService.deleteWorkplace(
                         current,
@@ -695,8 +650,6 @@ struct RootSplitView: View {
                 )
             },
             onCreateMergeRequestForBranch: { state, repository, targetBranch in
-                // 分支面板行内入口:当前分支为源、该行分支为目标。不 Push——
-                // 非当前分支无法复用"push 当前分支"逻辑,链接生成后由托管平台校验。
                 RootSplitWorkplaceActions.runCreateMergeRequestForBranch(
                     coordinator: detailActionCoordinator,
                     repositoryName: repository.repoName,
@@ -716,8 +669,7 @@ struct RootSplitView: View {
             onOpenRepositoryWeb: { syncState, repository in
                 RootSplitWorkplaceActions.runOpenRepositoryWeb(
                     coordinator: detailActionCoordinator,
-                    // 与"创建 MR"同口径:已克隆仓库优先读**实际 origin**——克隆后
-                    // 改过远端(如迁 fork)时两个入口不再指向不同仓库;
+                    // 与"创建 MR"同口径:已克隆优先读**实际 origin**(克隆后改过远端时两个入口不再指向不同仓库),
                     // 读不到(未克隆/无 origin)回退配置的 gitURL。
                     resolveRepositoryURL: {
                         let remote = await repositoryInfoService.remoteURL(
@@ -844,19 +796,6 @@ struct RootSplitView: View {
                     }
                 )
             },
-            onMergeDefaultBranchIntoCurrent: {
-                detailActionCoordinator.run(
-                    actionName: "合并默认分支",
-                    refreshBranches: true,
-                    operation: {
-                        let current = latestWorkplace(for: workplace.id) ?? workplace
-                        return try await workplaceRuntimeService.mergeDefaultBranchIntoCurrent(in: current)
-                    },
-                    successFeedback: { result in
-                        WorkplaceDetailFeedbackFactory.mergeDefaultBranchIntoCurrent(result: result)
-                    }
-                )
-            },
             onSwitchAllRepositoriesToDefaultBranch: {
                 detailActionCoordinator.run(
                     actionName: "批量切到默认分支",
@@ -910,8 +849,7 @@ struct RootSplitView: View {
             installedTerminals: openActionsModel.installedTerminals,
             preferredOpenActionID: settingsStore.settings.preferredOpenActionID,
             onSelectOpenAction: { actionID in
-                // 不再用 `try?` 静默吞掉写盘失败:UI 行为不变(仍停在原选择),
-                // 但失败必须留痕可查。
+                // 不用 `try?` 静默吞掉写盘失败:UI 行为不变(仍停在原选择),但失败必须留痕可查。
                 do {
                     try settingsStore.updatePreferredOpenActionID(actionID)
                 } catch {
@@ -976,36 +914,28 @@ struct RootSplitView: View {
         if appViewModel.route == .settings {
             ToolbarItem(placement: .primaryAction) {
                 HStack(spacing: 8) {
-                    // 外观单按钮三态循环:浅色→深色→跟随系统;图标跟随持久化模式。
                     Button {
                         applyAppearanceMode(settingsStore.settings.appearanceMode.nextInCycle)
                     } label: {
                         Image(systemName: settingsStore.settings.appearanceMode.toolbarSystemImage)
                     }
                     .accessibilityLabel(settingsStore.settings.appearanceMode.toolbarButtonTitle)
-                    .ccspaceToolbarActionButton(prominent: true)
+                    .ccspaceToolbarActionButton()
                     .ccspaceQuickHelp(settingsStore.settings.appearanceMode.toolbarButtonTitle)
 
-                    // 图标没有文字基线,整行按 .center 对齐:标识(15pt 墨迹)与 13pt 的
-                    // 版本号文字自然居中,不需要为字号变化维护魔法偏移。
+                    // 图标没有文字基线,整行按 .center 对齐:标识与 13pt 版本号文字自然居中,不需要为字号变化维护魔法偏移。
                     HStack(alignment: .center, spacing: 6) {
-                        // GitHub 标识代替原来的「获取更新 ↗」文字:系统符号库没有
-                        // GitHub 标识(见 GitHubMarkShape),且工具栏越短越好——
-                        // 完整文案(含"发现新版本 vX.Y.Z")走悬浮提示与无障碍名称。
-                        // 不加"跳转外链"角标:GitHub 标识本身已说明去处,再加符号只会更挤。
                         Button(action: openReleasesPage) {
                             GitHubMarkShape()
                                 .fill(updateButtonState.usesAccentTint ? Color.accentColor : Color.primary)
                                 .frame(width: 15, height: 15)
-                                // Shape 的默认命中区只覆盖墨迹,标识外圈的留白(圆角四角、
-                                // 尾巴细线之间)点击会落空——表现为"有时点了没反应"。
-                                // 撑成 23×23 矩形命中区:与文字的实际间距仍是原来的 10pt。
+                                // Shape 的默认命中区只覆盖墨迹,标识外圈留白(圆角四角、尾巴细线之间)点击会落空;
+                                // 撑成 23×23 矩形命中区,与文字的实际间距仍是原来的 10pt。
                                 .frame(width: 23, height: 23)
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        // 图标按钮没有可见文字,靠 providesLabel 把文案挂成无障碍名称;
-                        // 传 true 后 QuickHelp 会去重,不会 label/hint 各读一遍。
+                        // 图标按钮无可见文字,靠 providesLabel 挂成无障碍名称;传 true 后 QuickHelp 去重,不会 label/hint 各读一遍。
                         .ccspaceQuickHelp(updateButtonState.title, providesLabel: true)
 
                         toolbarVersionText
@@ -1018,23 +948,19 @@ struct RootSplitView: View {
         }
     }
 
-    /// 生效外观变化(本 App 切换、系统切换、外部重置 NSApp.appearance 均会触发):
-    /// 持久化为显式 light/dark 而覆盖被重置时重新应用,自愈"切换不生效"。
     @MainActor
     private func handleEffectiveAppearanceChange() {
         AppearanceModeApplier.reconcileOverride(with: settingsStore.settings.appearanceMode)
     }
 
-    /// 应用外观分段选择:持久化 + 立即生效。在按钮动作上下文执行,
-    /// 避免渲染期修改 NSApp.appearance(表现为闪两次、需再次交互才恢复)。
+    /// 持久化 + 立即生效。必须在按钮动作上下文执行:渲染期修改 NSApp.appearance 会闪两次、需再次交互才恢复。
     @MainActor
     private func applyAppearanceMode(_ mode: AppSettings.AppearanceMode) {
         do {
             try settingsStore.updateAppearanceMode(mode)
             AppearanceModeApplier.apply(mode)
         } catch {
-            // 保存失败时保持现状,下次启动仍为原外观;
-            // 不再静默吞掉:记日志并给用户可见提示。
+            // 保存失败时保持现状,下次启动仍为原外观;记日志并给用户可见提示。
             rootSplitViewLog.error(
                 "持久化外观模式 \(mode.rawValue, privacy: .public) 失败: \(error.localizedDescription, privacy: .public)"
             )
@@ -1064,8 +990,7 @@ struct RootSplitView: View {
     }
 
     private func openReleasesPage() {
-        // open 返回 false 是"浏览器根本没起来"(默认浏览器异常等),与命中区落空的
-        // 表现相同;静默失败无法区分,所以给出可见提示并附上可手动访问的地址。
+        // open 返回 false 与命中区落空表现相同,无法区分,故给出可见提示并附上可手动访问的地址。
         if !NSWorkspace.shared.open(updateChecker.releasesURL) {
             appearanceFeedback = CCSpaceFeedback(
                 style: .error,
@@ -1150,17 +1075,13 @@ struct RootSplitView: View {
         for workplaceID: UUID
     ) {
         guard appViewModel.selectedWorkplaceID == workplaceID else {
-            // 从侧栏对"未选中"的工作区操作(置顶/归档等)时,详情区的反馈通道不在
-            // 当前屏上——此前直接 return,失败与成功提示双双被吞。错误改走根级
-            // overlay 横幅(任意路由可见);成功提示同样上抛,避免"点了没反应"。
+            // 侧栏对"未选中"工作区操作时详情区反馈不在当前屏上,改走根级 overlay 横幅(任意路由可见)。
             appearanceFeedback = feedback
             return
         }
         detailActionCoordinator.feedback = feedback
     }
 
-    /// 出队待展示的去重清理提示;横幅被占用时原地保留,等横幅关闭后由
-    /// `.onChange(of: appearanceFeedback)` 再次进入本方法。
     @MainActor
     private func presentPendingDeduplicationNotice() {
         guard let feedback = deduplicationNotices.presentIfIdle(currentBanner: appearanceFeedback) else {
@@ -1173,8 +1094,6 @@ struct RootSplitView: View {
         workplaceStore.workplaces.first { $0.id == id }
     }
 
-    /// 取工作区当前配置的工作分支(去首尾空白);未配置时返回空串。
-    /// 单个/批量"切到工作分支"两个入口共用,避免裁剪逻辑两处漂移。
     private func currentWorkBranch(for workplaceID: UUID) -> String {
         latestWorkplace(for: workplaceID)?.branch?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -1227,12 +1146,8 @@ struct RootSplitView: View {
         }
     }
 
-    /// 注入路由持久化回调:AppViewModel 是路由的唯一事实来源,写 settings.json
-    /// 镜像由其内部触发,View 修饰链不承担持久化职责。
-    /// 必须在 onAppear 绑定而不是 init:init 里拿不到 SwiftUI 实际持有的
-    /// SettingsStore(它还在 StateObject 的 autoclosure 里惰性构造),提前构造
-    /// 实例正是要消灭的"每次视图重建都同步读盘再丢弃";onAppear 时 body 已求值,
-    /// 此处读到的就是同一个实例。
+    /// 路由持久化回调必须在 onAppear 而不是 init 绑定:init 拿不到 SwiftUI 实际持有的 SettingsStore
+    /// (还在 StateObject autoclosure 里),提前构造正是要消灭的"每次视图重建都同步读盘再丢弃";onAppear 时 body 已求值。
     @MainActor
     private func bindRoutePersistenceCallbacks() {
         let settingsStore = self.settingsStore
@@ -1242,23 +1157,16 @@ struct RootSplitView: View {
 
     @MainActor
     private func restoreLastSelectedRoute() {
-        // 截图模式下 applyLaunchConfigurationIfNeeded 已指定目标路由,
-        // 恢复上次选中会把它覆盖掉(截图场景拍成上次退出时的页面),直接跳过。
+        // 截图模式下 applyLaunchConfigurationIfNeeded 已指定目标路由,恢复上次选中会把它覆盖掉。
         guard launchConfiguration.screenshotScene == nil else { return }
         let settings = settingsStore.settings
-        // 经 AppRoute(rawValue:) 校验而非裸字符串比较:
-        // 持久化值可能来自旧版本/手改文件,非法值直接忽略,落到默认路由。
-        // 上次在工作区页但选中项缺失/非法/工作区已删时,降级到"工作区列表"
-        // 而不是什么都不做——否则会落回默认 .settings,与用户上次所在页面无关。
         guard let selection = RouteRestoreSupport.restoredSelection(
             lastSelectedRoute: settings.lastSelectedRoute,
             lastSelectedWorkplaceID: settings.lastSelectedWorkplaceID,
             workplaces: workplaceStore.workplaces
         ) else { return }
-        // 分支接线收在 RouteRestoreSupport.apply(可测):降级到列表页只切路由,
-        // 不得把 nil 写回 lastSelectedWorkplaceID——旧版本在此分支什么都不做。
-        // 选中项缺失/非法/已删往往正是本轮 workplaces.json 被损坏重置的结果,
-        // 再把 nil 落盘等于单点损坏级联改写另一份健康数据;真正的删除由运行期删除路径持久化。
+        // 降级到列表页只切路由,不得把 nil 回写 lastSelectedWorkplaceID(接线收在 RouteRestoreSupport.apply):
+        // 选中项非法往往正是本轮 workplaces.json 被损坏重置的结果,再落盘等于级联改写另一份健康数据。
         RouteRestoreSupport.apply(selection, to: appViewModel)
     }
 
@@ -1286,12 +1194,8 @@ struct RootSplitView: View {
         refreshGeneration += 1
         let generation = refreshGeneration
         isInFlightDiskRefreshForced = force
-        // 接手式取消只是把旧任务推进取消状态:它此刻多半正挂在 `refreshCalculator`
-        // 里逐候选跑 ls-remote(秒级),要等回到下一个 `Task.isCancelled` 检查点才退出,
-        // 也就到那时才执行 `defer { gate.end(rootPath) }` 释放 DiskRefreshService 的
-        // 进程级单飞闸门。新任务若直接抢跑,`gate.begin` 失败 → 立刻返回
-        // `importedRepositoryCount: 0`:用户点的"刷新"静默无事发生,没有反馈、
-        // 也没有重试入口。因此先等前一轮真正收尾(含释放闸门)再开始本轮。
+        // 接手式取消只是把旧任务推进取消状态:它多半正逐候选跑 ls-remote(秒级),要等回到下一个 `Task.isCancelled`
+        // 检查点才退出并 defer 释放 DiskRefreshService 的单飞闸门;新任务抢跑会 gate.begin 失败、静默返回 0 个纳入。
         let previousTask = refreshTask
         refreshTask = Task {
             await previousTask?.value
@@ -1300,16 +1204,14 @@ struct RootSplitView: View {
             if isCurrentGeneration {
                 refreshTask = nil
                 isInFlightDiskRefreshForced = false
-                // 反馈同样只在当前代发布:被取代的旧任务此前会绕过所有归属检查,
-                // 把过期消息盖到唯一槽位上(连启动期的损坏文件横幅都会被顶掉)。
+                // 反馈同样只在当前代发布:被取代的旧任务会绕过归属检查,把过期消息盖到唯一槽位上。
                 if outcome.importedRepositoryCount > 0 {
                     // 仓库是"自己冒出来"的,不给提示用户只会看到一个没配过的仓库出现在列表里。
                     appearanceFeedback = CCSpaceFeedbackFactory.actionSuccess(
                         "已自动纳入 \(outcome.importedRepositoryCount) 个拷入工作区目录的 Git 仓库"
                     )
                 }
-                // 被取消的旧任务绝不能触碰句柄与分支缓存:它返回时新任务可能正在跑,
-                // 清句柄会导致下一轮调度与前一轮并发。
+                // 被取消的旧任务不得触碰分支缓存:它返回时新任务可能正在跑。
                 if Task.isCancelled == false, shouldInvalidateBranches {
                     detailActionCoordinator.invalidateBranches()
                 }
@@ -1317,31 +1219,31 @@ struct RootSplitView: View {
         }
     }
 
-    /// 每小时检查一次更新;仅 App 处于活跃状态时执行。
-    /// Task 取消(视图消失)时 sleep 抛错退出循环。
-    /// 读 mirroredScenePhase(@State)而非 @Environment:后者的值在长驻闭包里是首帧快照。
+    /// 每小时检查一次更新,仅 App 活跃时执行;Task 取消(视图消失)时 sleep 抛错退出循环。
     private func runPeriodicUpdateCheck() async {
         while true {
             do {
                 try await Task.sleep(for: .seconds(3600))
             } catch {
-                return // 任务被取消(视图销毁),退出循环
+                return
             }
             guard mirroredScenePhase == .active else { continue }
             await updateChecker.check()
         }
     }
 
-    /// 每 120 秒做一次磁盘刷新,并周期重检编辑器/终端,
-    /// 新安装的 App 无需重启即可出现在"打开方式"菜单。
+    /// 每 120 秒磁盘刷新,并周期重检编辑器/终端——新装的 App 无需重启即出现在"打开方式"菜单。
     private func runPeriodicDiskRefresh() async {
         while true {
             do {
                 try await Task.sleep(for: .seconds(120))
             } catch {
-                return // 任务被取消(视图销毁),退出循环
+                return
             }
             scheduleDiskRefresh()
+            // 退到后台不必重扫 /Applications:兄弟周期任务同样按 scenePhase 收口,
+            // 回前台后最多 120s 内会补上一次。
+            guard mirroredScenePhase == .active else { continue }
             openActionsModel.refresh()
         }
     }

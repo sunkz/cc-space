@@ -258,14 +258,14 @@ final class BranchSwitchRemotePresentationStateTests: XCTestCase {
 
 final class BranchListNormalizationTests: XCTestCase {
     func test_sortsDedupsAndTrims() {
-        let normalized = BranchListNormalization.remoteBranches(
+        let normalized = BranchListNormalization.normalized(
             [" release", "main", "feature/b", "main", "feature/a", " ", ""]
         )
         XCTAssertEqual(normalized, ["feature/a", "feature/b", "main", "release"])
     }
 
     func test_numericNamesUseNaturalOrdering() {
-        let normalized = BranchListNormalization.remoteBranches(
+        let normalized = BranchListNormalization.normalized(
             ["release/v10", "release/v9", "release/v2"]
         )
         // localizedStandardCompare 数字感知:v10 排在 v9 之后。
@@ -273,7 +273,7 @@ final class BranchListNormalizationTests: XCTestCase {
     }
 
     func test_emptyInputYieldsEmpty() {
-        XCTAssertTrue(BranchListNormalization.remoteBranches([]).isEmpty)
+        XCTAssertTrue(BranchListNormalization.normalized([]).isEmpty)
     }
 }
 

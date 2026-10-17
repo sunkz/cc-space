@@ -1,11 +1,7 @@
 import Foundation
 
 /// 独立窗口(分支比较 / 提交记录)共用的仓库数据加载器:View 不直接调 git。
-///
-/// 分支名单/远端跟踪分支/当前分支/默认分支的并发取数、分支比较 diff、提交列表分页,
-/// 连同「取消 + 代际号」防过期写回的编排都收在本类型——同一套代际模式此前在
-/// BranchCompareWindowView 与 CommitLogWindowView 里各写了一遍,现收敛为单一实现。
-/// 窗口经 `@StateObject` 持有本类型,只保留展示状态并在完成回调里落笔。
+/// 分支取数、diff、提交分页连同「取消 + 代际号」防过期写回的编排都收在本类型;窗口经 `@StateObject` 持有,只保留展示状态。
 @MainActor
 final class RepositoryWindowContext: ObservableObject {
     private let gitService: GitServicing
@@ -13,8 +9,7 @@ final class RepositoryWindowContext: ObservableObject {
     private var contextTask: Task<Void, Never>?
     private var diffTask: Task<Void, Never>?
     private var logTask: Task<Void, Never>?
-    /// 各加载通道的代际号:每次发起递增,旧任务写回前比对,
-    /// 防止「isCancelled 检查通过但落笔晚于新任务」造成旧结果覆盖新结果。
+    /// 各加载通道的代际号:每次发起递增,旧任务写回前比对,防止「isCancelled 通过但落笔晚于新任务」覆盖新结果。
     private var contextRequestID = 0
     private var diffRequestID = 0
     private var logRequestID = 0
@@ -33,8 +28,7 @@ final class RepositoryWindowContext: ObservableObject {
         logTask = nil
     }
 
-    /// 仅作废在途的 diff 加载(取消 + 递增代际),不动分支上下文加载。
-    /// 供「比较侧尚未就绪就触发 reloadDiff」的早退路径:早退也要作废旧任务,
+    /// 仅作废在途的 diff 加载(取消 + 递增代际),不动分支上下文:供「比较侧尚未就绪就触发 reloadDiff」的早退路径,
     /// 否则窄窗口内旧任务的迟到写回仍可能落笔。
     func invalidateDiffLoads() {
         diffTask?.cancel()
@@ -45,17 +39,14 @@ final class RepositoryWindowContext: ObservableObject {
     // MARK: - 分支上下文
 
     /// 一次分支上下文取数的快照,由窗口在完成回调里消费。
-    ///
-    /// `branches`/`remoteTrackingBranches`/`metadata` 为 nil 表示**这一项读取失败**
-    /// (超时/输出超限/进程起不来),空值是"仓库确实没有"。消费方必须按此区分:
-    /// 失败时保留上一轮结果,不能把一次超时渲染成"这个仓库一个分支都没有"。
+    /// 字段为 nil 表示**这一项读取失败**(超时/输出超限/进程起不来),空值是"仓库确实没有":
+    /// 失败时消费方必须保留上一轮结果,不能把一次超时渲染成"这个仓库一个分支都没有"。
     struct BranchContextSnapshot {
         let branches: [String]?
         let remoteTrackingBranches: [String]?
         let currentBranch: String?
         let defaultBranch: String?
-        /// 全部本地分支元数据;仅提交记录窗口需要,不需要时为 nil(省一次 for-each-ref 扫描)。
-        /// 需要但未取到(读取失败)同样是 nil——消费方保留上一轮元数据即可。
+        /// 全部本地分支元数据;仅提交记录窗口需要,不需要或读取失败时为 nil(不取 = 省一次 for-each-ref 扫描)。
         let metadata: [String: GitBranchMetadata]?
     }
 
@@ -85,8 +76,7 @@ final class RepositoryWindowContext: ObservableObject {
             let remote = await remoteTask
             let current = await currentTask
             let defaultBranch = await defaultTask
-            // isCancelled 检查与新任务发起之间仍可能隔着一次挂起:
-            // 落笔前再比对代际号,旧一代结果直接作废。
+            // isCancelled 检查与新任务发起之间仍可能隔着一次挂起:落笔前再比对代际号,旧一代结果直接作废。
             guard !Task.isCancelled, requestID == contextRequestID else { return }
             completion(BranchContextSnapshot(
                 branches: branches,
@@ -100,11 +90,8 @@ final class RepositoryWindowContext: ObservableObject {
 
     // MARK: - 分支比较 diff
 
-    /// diff 来源:与 Diff 窗口 payload 的 `Source` 同形,但由 Service 层自己定义
-    /// (payload 类型留在 Views,由 View 侧做映射,避免本层反向依赖 Views)。
-    ///
-    /// View 把自己的 payload source 映射成这里即可,`RepositoryWindowContext`
-    /// 反过来依赖 Views 的类型会构成层倒置。
+    /// diff 来源:与 Diff 窗口 payload 的 `Source` 同形,但由 Service 层自己定义——payload 类型留在 Views 由 View 侧映射,
+    /// 本层反向依赖 Views 的类型会构成层倒置。
     enum DiffSource: Sendable {
         case workingDirectory
         case commit(hash: String)
@@ -113,9 +100,7 @@ final class RepositoryWindowContext: ObservableObject {
     }
 
     /// 按来源加载文件级 diff:工作区 / 单提交 / 分支对比。
-    /// 三个 git 调用点此前散在 DiffWindowView 的 body 里,View 直接持有 GitServicing,
-    /// 违反 AGENTS.md 的依赖方向(View 不直接调 git);收进本类型后与
-    /// `loadCompareDiff`/提交列表共用同一入口、同一取消与代际约定。
+    /// 与 `loadCompareDiff`、提交列表共用同一入口、同一取消与代际约定(View 不直接调 git)。
     func loadDiff(directory: String, source: DiffSource) async throws -> [GitDiffEntry] {
         switch source {
         case .workingDirectory:
@@ -127,18 +112,11 @@ final class RepositoryWindowContext: ObservableObject {
         }
     }
 
-    /// 当前分支(供 View 决定比较侧与「展示所有行」的新侧来源)。
-    func currentBranch(directory: String) async -> String? {
-        await gitService.currentBranch(in: directory)
-    }
-
-    /// 单个提交的完整详情(提交记录窗口展开单行/全部展开共用)。
     func commitDetail(hash: String, directory: String) async -> GitCommitDetail? {
         await gitService.commitDetail(hash: hash, in: directory)
     }
 
-    /// 「展示所有行」的新侧全文:来源策略解析(head 是否等于当前分支 → 读磁盘还是 blob)、
-    /// currentBranch 探测与重 IO 全部收在 Service 层,View 只提供 entry 与来源。
+    /// 「展示所有行」的新侧全文:来源策略解析、currentBranch 探测与重 IO 全收在 Service 层,View 只提供 entry 与来源。
     func fullFileContent(
         entry: GitDiffEntry,
         directory: String,
@@ -200,8 +178,7 @@ final class RepositoryWindowContext: ObservableObject {
         case directoryMissing(String)
     }
 
-    /// 按分页参数加载一页提交列表(全量 / 仅未推送,可带关键词搜索)。
-    /// 关键词过滤与偏移都由 `commitLogPage` 下推给 git,本类只负责目录探测与代际防过期写回。
+    /// 按分页参数加载一页提交列表(全量 / 仅未推送,可带关键词搜索);过滤与偏移都由 `commitLogPage` 下推给 git。
     func loadCommits(
         request: CommitLogPageRequest,
         completion: @escaping @MainActor (CommitLogLoadOutcome) -> Void
@@ -211,11 +188,8 @@ final class RepositoryWindowContext: ObservableObject {
         let requestID = logRequestID
         let service = gitService
         logTask = Task {
-            // 目录缺失(工作区被外部删除等)是硬失败。代际已在入口递增:
-            // 即使早退,在途旧任务的写回也已被拦下。
-            // 探测走 Task.detached:外置盘/网盘的 stat 可达数百毫秒,本类是
-            // @MainActor,Task{} 会继承主线程、Task.detached 才真正离开
-            // (与项目内"fileExists 必须移出主线程"的既有约定对齐)。
+            // 目录缺失(工作区被外部删除等)是硬失败;代际已在入口递增,即使早退也拦下了在途旧任务的写回。
+            // 探测走 Task.detached:外置盘/网盘的 stat 可达数百毫秒,本类是 @MainActor,Task{} 会继承主线程。
             let directory = request.directory
             let directoryExists: Bool = await Task.detached(priority: .userInitiated) {
                 FileManager.default.fileExists(atPath: directory)
@@ -231,9 +205,8 @@ final class RepositoryWindowContext: ObservableObject {
         }
     }
 
-    /// diff 查询失败的用户文案:统一走 `UserFacingError`(取消/GitServiceError/系统域
-    /// 各分支都给中文文案,未本地化的英文 stderr 补中文标识);错误态标题「加载 diff
-    /// 失败」由 DiffViewerView 提供,这里只给成因,避免标题与文案重复。
+    /// diff 查询失败的用户文案:统一走 `UserFacingError`(取消/GitServiceError/系统域各分支都给中文,未本地化的英文 stderr 补中文标识);
+    /// 错误态标题「加载 diff 失败」由 DiffViewerView 提供,这里只给成因,避免标题与文案重复。
     static func localizedDiffFailureMessage(_ error: Error) -> String {
         UserFacingError.message(for: error)
     }

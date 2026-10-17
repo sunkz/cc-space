@@ -11,18 +11,14 @@ struct DiskRefreshStoreSnapshot: Equatable, Sendable {
     let repositories: [RepositoryConfig]
 }
 
-/// `DiskRefreshService.refresh` 的单飞守卫。
-///
-/// 标志不能放在 `DiskRefreshService` 自身:它是 `@MainActor struct`,且被
-/// `RootSplitView` 以计算属性构造——每次访问都是**新实例**,实例内的标志跨调用
-/// 不共享。故按 rootPath 键集中在这里,任何实例触发的刷新共用同一份在飞集合。
+/// `DiskRefreshService.refresh` 的单飞守卫。标志不能放在 `DiskRefreshService` 自身:它是 `@MainActor struct`、
+/// 被 `RootSplitView` 以计算属性构造,每次访问都是**新实例**,实例内标志跨调用不共享;故按 rootPath 键集中共用一份在飞集合。
 @MainActor
 private final class DiskRefreshSingleFlight {
     static let shared = DiskRefreshSingleFlight()
 
     private var inFlightRootPaths: Set<String> = []
 
-    /// 标记该根开始刷新;已在飞(或已标记)时返回 false。
     func begin(_ rootPath: String) -> Bool {
         inFlightRootPaths.insert(rootPath).inserted
     }
@@ -37,8 +33,7 @@ struct DiskRefreshComputationResult: Sendable {
     let repositoryResult: RepositoryDeduplicationResult
 }
 
-struct DiskRefreshOutcome: Sendable, Equatable {
-    /// 本轮从磁盘发现并纳入工作区列表的 Git 仓库数(手动拷入的目录)。
+struct DiskRefreshOutcome: Sendable {
     let importedRepositoryCount: Int
 }
 
@@ -49,11 +44,12 @@ struct DiskRefreshService {
     let workplaceStore: WorkplaceStore
     let repositoryStore: RepositoryStore
     private let refreshCalculator: RefreshCalculator
-    /// 读候选目录的 origin 地址用(GitServicing 是 Sendable,可在后台等待)。
     private let gitService: GitServicing
+    /// 发现阶段并发读取 origin 的上限(每路一个 git 进程)。
+    private static let maxConcurrentOriginProbes = 4
 
-    /// 快照不等价时的重试上限。活跃工作区里每次 pull/push 的预标瞬态都会让快照
-    /// 不等价，上限过低会让刷新被抖动耗尽而整体放弃（功能事实上不生效）。
+    /// 快照不等价时的重试上限。活跃工作区里每次 pull/push 的预标瞬态都会让快照不等价,
+    /// 上限过低会让刷新被抖动耗尽而整体放弃(功能事实上不生效)。
     static let snapshotRetryBudget = 8
 
     init(
@@ -70,10 +66,8 @@ struct DiskRefreshService {
 
     @discardableResult
     func refresh(rootPath: String) async -> DiskRefreshOutcome {
-        // 单飞守卫:同一数据根上的并发刷新只让第一轮生效,其余立即返回。
-        // `refresh` 内含重试循环与多处 await,重入会重复 apply/import(导入阶段还会
-        // 真实写盘)。生产唯一调用方 RootSplitView.scheduleDiskRefresh 已用 refreshTask
-        // 单飞,这里是纵深防御——新增调用方漏掉单飞时不再出现两轮并发落库。
+        // 单飞守卫:同一数据根上的并发刷新只让第一轮生效——`refresh` 内含重试循环与多处 await,重入会重复 apply/import(导入真实写盘)。
+        // 生产唯一调用方 RootSplitView.scheduleDiskRefresh 已用 refreshTask 单飞,这里是纵深防御。
         let gate = DiskRefreshSingleFlight.shared
         guard gate.begin(rootPath) else {
             diskRefreshLog.notice("event=refresh_skipped_in_flight")
@@ -90,25 +84,22 @@ struct DiskRefreshService {
             }
             retryCount += 1
             guard snapshot == currentSnapshot() else {
-                // 预算要足够宽松:活跃工作区里每次 pull/push 的预标瞬态都会让快照
-                // 不等价,预算 3 次时刷新几乎必然被"抖动"耗尽而整体放弃(功能事实上
-                // 不生效)。改为退避 + 更高上限,宁可多轮也不放弃刷新。
+                // 快照不等价多半只是 pull/push 的预标瞬态造成的抖动:退避重试,宁可多轮也不放弃刷新。
                 guard retryCount <= Self.snapshotRetryBudget else {
-                    // 放弃前必须留痕:此前静默 return,刷新被整体跳过而无人知晓。
+                    // 放弃前必须留痕,否则刷新被整体跳过而无人知晓。
                     diskRefreshLog.notice("event=refresh_abandoned reason=snapshot_keeps_changing retries=\(retryCount)")
                     return DiskRefreshOutcome(importedRepositoryCount: 0)
                 }
                 do {
                     try await Task.sleep(for: .milliseconds(100 * retryCount))
                 } catch {
-                    // 取消不是"重试仍不一致",直接退出,不要把取消信号吞掉。
+                    // 这里睡不被取消不等于"重试仍不一致":直接退出,不要把取消信号吞掉。
                     return DiskRefreshOutcome(importedRepositoryCount: 0)
                 }
                 continue
             }
 
-            // 刷新结果与去重硬删除(及其引用清理)单批原子提交,见
-            // RepositoryStore.commitDiskRefresh 的说明。
+            // 刷新结果与去重硬删除(及其引用清理)单批原子提交,见 RepositoryStore.commitDiskRefresh。
             do {
                 try repositoryStore.commitDiskRefresh(
                     workplaceResult: refreshResults.workplaceResult,
@@ -118,8 +109,7 @@ struct DiskRefreshService {
             } catch {
                 diskRefreshLog.error("event=refresh_apply_failed reason=\(error.localizedDescription, privacy: .public)")
             }
-            // 校正之后再做发现:上一步可能刚删掉目录已不存在的工作区记录,
-            // 发现阶段的工作区集合要以刷新后的状态为准。
+            // 校正之后再做发现:上一步可能刚删掉目录已不存在的工作区记录,发现集合要以刷新后的状态为准。
             let importedCount = await importDiscoveredRepositories()
             return DiskRefreshOutcome(importedRepositoryCount: importedCount)
         }
@@ -127,10 +117,7 @@ struct DiskRefreshService {
     }
 
     /// 把工作区目录里手动拷入、列表尚未记录的 Git 仓库纳入列表。
-    ///
-    /// 只有"候选枚举 + 逐个读 origin"这段在后台(每个候选一次 git 进程),
-    /// 计划生成与落盘回到主 actor,基于此刻的 Store 状态重算(见
-    /// RepositoryStore.commitImportedRepositories)。
+    /// 只有"候选枚举 + 逐个读 origin"在后台(每候选一次 git 进程);计划生成与落盘回主 actor,基于此刻 Store 状态重算。
     private func importDiscoveredRepositories() async -> Int {
         let snapshot = currentSnapshot()
         let lockedPathKeys = await RepositoryOperationLock.shared.inFlightPathKeys()
@@ -143,25 +130,30 @@ struct DiskRefreshService {
         }.value
         guard candidates.isEmpty == false else { return 0 }
 
-        var discovered: [DiscoveredGitRepository] = []
-        discovered.reserveCapacity(candidates.count)
-        for candidate in candidates {
-            guard Task.isCancelled == false else { return 0 }
+        // 每候选一个 `git remote get-url` 进程:串行时整段发现能把单飞闸门占到几十秒,
+        // 后续刷新一律被 refresh_skipped_in_flight 挡回。与分支快照同口径限并发;
+        // runLimitedTasks 按输入序号回填槽位,发现顺序不变。
+        let gitService = gitService
+        let probed: [DiscoveredGitRepository?] = await ConcurrencyUtilities.runLimitedTasks(
+            candidates,
+            maxConcurrentTasks: Self.maxConcurrentOriginProbes
+        ) { candidate in
+            guard Task.isCancelled == false else { return nil }
             guard let gitURL = await gitService.remoteURL(in: candidate.path) else {
-                // 无 origin 的纯本地仓库进不了仓库池(它以 gitURL 为唯一键),留痕跳过。
+                // 无 origin 的纯本地仓库进不了仓库池(池以 gitURL 为唯一键),留痕跳过。
                 diskRefreshLog.notice("event=external_repo_skipped reason=no_origin path=\(candidate.path)")
-                continue
+                return nil
             }
-            discovered.append(DiscoveredGitRepository(
+            return DiscoveredGitRepository(
                 workplaceID: candidate.workplaceID,
                 path: candidate.path,
                 folderName: candidate.folderName,
                 gitURL: gitURL
-            ))
+            )
         }
+        let discovered = probed.compactMap { $0 }
 
-        // 循环内守卫只看"下一个候选开始前";最后一个候选读远端期间才到达的
-        // 取消必须在这里也拦一道,否则取消语义下仍会提交导入。
+        // 循环内守卫只看"下一个候选开始前";最后一个候选读远端期间才到达的取消必须在这里再拦一道。
         guard Task.isCancelled == false else { return 0 }
 
         do {
@@ -191,11 +183,9 @@ struct DiskRefreshService {
     ) async -> DiskRefreshComputationResult {
         await Task.detached(priority: .utility) {
             // 取锁的 in-flight 快照:创建/改名/克隆进行中的路径要在豁免名单里跳过破坏性改写。
-            // 快照与磁盘扫描之间的窗口无害:拿快照之后才 acquire 的锁,其操作自身
-            // 也遵守"先持锁再改盘"的顺序,磁盘与记录的中间态对刷新不可见。
+            // 快照与磁盘扫描之间的窗口无害:之后才 acquire 的锁其操作自身也遵守"先持锁再改盘",中间态对刷新不可见。
             let lockedPathKeys = await RepositoryOperationLock.shared.inFlightPathKeys()
-            // 去重保留优先级要参考"谁在被使用":被任一工作区选中/置顶或仍有
-            // 同步态行的仓库必须优先保留,否则可能硬删掉正在用的那条而留下新重复项。
+            // 去重保留优先级要参考"谁在被使用":被任一工作区选中/置顶或仍有同步态行的仓库必须优先保留,否则可能硬删正在用的那条。
             var protectedRepositoryIDs: Set<UUID> = []
             for workplace in snapshot.workplace.workplaces {
                 protectedRepositoryIDs.formUnion(workplace.selectedRepositoryIDs)

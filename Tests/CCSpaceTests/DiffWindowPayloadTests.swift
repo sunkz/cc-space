@@ -21,28 +21,14 @@ final class DiffWindowPayloadTests: XCTestCase {
             makePayload(source: .commit(hash: "abc123")),
             makePayload(source: .commit(hash: "abc123"))
         )
-        XCTAssertEqual(
-            makePayload(source: .compare(base: "main", head: "feat")),
-            makePayload(source: .compare(base: "main", head: "feat"))
-        )
     }
 
     func test_differentSourcesOpenDifferentWindows() {
         let base = makePayload()
         XCTAssertNotEqual(base, makePayload(source: .commit(hash: "abc123")))
-        XCTAssertNotEqual(base, makePayload(source: .compare(base: "main", head: "feat")))
         XCTAssertNotEqual(
             makePayload(source: .commit(hash: "abc123")),
             makePayload(source: .commit(hash: "def456"))
-        )
-        // 对比来源的 head 不同(含 detached HEAD 的 nil)也视为不同窗口。
-        XCTAssertNotEqual(
-            makePayload(source: .compare(base: "main", head: "feat")),
-            makePayload(source: .compare(base: "main", head: nil))
-        )
-        XCTAssertNotEqual(
-            makePayload(source: .compare(base: "main", head: "feat")),
-            makePayload(source: .compare(base: "develop", head: "feat"))
         )
     }
 
@@ -53,9 +39,7 @@ final class DiffWindowPayloadTests: XCTestCase {
     func test_codableRoundTripPreservesSource() {
         let cases = [
             DiffWindowPayload.Source.workingDirectory,
-            .commit(hash: "abc123"),
-            .compare(base: "main", head: "feat"),
-            .compare(base: "main", head: nil)
+            .commit(hash: "abc123")
         ]
         for source in cases {
             let payload = makePayload(source: source)

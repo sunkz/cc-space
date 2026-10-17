@@ -63,12 +63,6 @@ struct WorkplaceFormFieldsSection: View {
     }
 }
 
-/// 创建/编辑弹窗仓库列表的共享度量。列表**不再内滚、也不封顶**：全部行随弹窗
-/// 外层 ScrollView 一起展开,所以这里只剩行距一个常量。
-enum FormListMetrics {
-    static let rowSpacing: CGFloat = 6
-}
-
 struct WorkplaceRepositorySelectionSection: View {
     let repositories: [WorkplaceSelectableRepository]
     let selectedIDs: Set<UUID>
@@ -109,7 +103,7 @@ struct WorkplaceRepositorySelectionSection: View {
             } else {
                 // 逐行卡片(行=CCSpaceInteractiveCard,行距 6,无外层描边容器):
                 // 全部行直接展开,不再限高内滚——长列表由弹窗外层 ScrollView 承接。
-                LazyVStack(spacing: FormListMetrics.rowSpacing) {
+                LazyVStack(spacing: RepositoryListLayout.rowSpacing) {
                     ForEach(displayed) { repository in
                         WorkplaceSelectableRepositoryRow(
                             repository: repository,

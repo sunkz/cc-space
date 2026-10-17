@@ -19,8 +19,6 @@ struct WorkplaceOperationProgress: Sendable {
     let completedCount: Int
     let totalCount: Int
     let activeRepositoryNames: [String]
-    /// 本步骤的开始时刻:单仓克隆最长 600 秒才超时落败,没有进行时间,
-    /// 用户无法区分"卡在网络上"和"正常大仓库还在跑"。
     let startedAt: Date
 
     init(
@@ -42,8 +40,8 @@ struct WorkplaceOperationProgress: Sendable {
 }
 
 extension WorkplaceOperationProgress: Equatable {
-    /// `startedAt` 刻意不参与相等判定:它是同一步骤内不变的计时起点,
-    /// 若参与比较,每次 emit 都会因时间差被判为"进度变了"(UI 抖动 + 测试不可重现)。
+    /// `startedAt` 刻意不参与相等判定:它每次 emit 都在变,参与比较会让同一步骤被反复判为
+    /// "进度变了"(UI 抖动 + 测试不可重现)。
     static func == (lhs: WorkplaceOperationProgress, rhs: WorkplaceOperationProgress) -> Bool {
         lhs.step == rhs.step
             && lhs.completedCount == rhs.completedCount
@@ -56,7 +54,6 @@ actor WorkplaceOperationProgressTracker {
     private let step: WorkplaceOperationProgressStep
     private let totalCount: Int
     private let progressHandler: WorkplaceOperationProgressHandler?
-    /// 步骤开始时刻,整个步骤内不变(编辑流程每个阶段各建一个 tracker,计时按阶段起算)。
     private let startedAt = Date()
     private var completedCount = 0
     private var activeRepositoryNames: [String] = []
@@ -79,9 +76,7 @@ actor WorkplaceOperationProgressTracker {
 
     func didFinish(repositoryName: String) async {
         guard totalCount > 0 else { return }
-        // 只有真正从进行中列表移除(即该名称确实被 start 过)才计数:
-        // 未 start 就 finish、或对同一名称重复 finish 的孤儿调用不能递增
-        // completedCount,否则进度会被提前推到 100%,掩盖还在进行的操作。
+        // 只有真正 start 过的名称才计数:未 start 或重复 finish 的孤儿调用会提前把进度推到 100%,掩盖在跑的操作。
         guard let index = activeRepositoryNames.firstIndex(of: repositoryName) else {
             progressTrackerLog.notice(
                 "event=progress_did_finish_orphan repository_name=\(repositoryName, privacy: .public)"

@@ -1189,7 +1189,6 @@ final class GitServiceTests: XCTestCase {
 
     func test_errorMessage_divergentBranchesIsLocalized() {
         let error = GitServiceError.commandFailed(
-            exitCode: 128,
             stderr: "fatal: Need to specify how to reconcile divergent branches."
         )
         XCTAssertTrue(error.localizedDescription.contains("分叉"))

@@ -1,10 +1,9 @@
 import Foundation
 
-/// Diff patch 中单行的展示模型:带行号与着色分类,供 Diff 查看器渲染。
 struct DiffPatchLine: Equatable {
     enum Kind: Equatable {
-        /// `@@ -1,3 +1,4 @@` hunk 起始行,携带可选的函数上下文。
-        case hunkHeader(context: String?)
+        /// `@@ -1,3 +1,4 @@` hunk 起始行;原文(含尾部函数上下文)整体在 `text` 里展示。
+        case hunkHeader
         case added
         case removed
         case context
@@ -19,14 +18,11 @@ struct DiffPatchLine: Equatable {
     let newLineNumber: Int?
 }
 
-/// 把 unified diff 的 patch 文本解析为可渲染的行模型。
-///
 /// 跳过首个 hunk 之前的 `diff --git` / `index` / 模式与重命名声明等元数据行,
 /// 根据 `@@` hunk 头维护两侧行号计数。
 enum DiffPatchLineParser {
     /// 只可能出现在首个 `@@` 之前的 diff 头行前缀(git 的元数据区)。
-    /// 漏掉一类(如 `new file mode`、`similarity index`)会让这行落入上下文分支,
-    /// 带着 0/0 行号被渲染成一行内容。
+    /// 漏掉一类(如 `new file mode`、`similarity index`)会让这行落入上下文分支,带着 0/0 行号被渲染成一行内容。
     static let headerMetadataPrefixes: [String] = [
         "diff --git ",
         "index ",
@@ -57,10 +53,8 @@ enum DiffPatchLineParser {
         var lines: [DiffPatchLine] = []
         var oldLineNumber = 0
         var newLineNumber = 0
-        // 是否已进入首个 hunk。元数据行只可能出现在首个 `@@` 之前;进入 hunk 后,
-        // 删除行内容以 `- ` 开头(如邮件签名分隔符)时 patch 行恰为 `--- xxx`、
-        // 新增行内容以 `+ ` 开头时为 `+++ xxx`——若仍按前缀过滤,
-        // 会把内容行整行丢弃并使后续行号漂移。
+        // 是否已进入首个 hunk:元数据行只可能出现在首个 `@@` 之前。进入后,删除行内容以 `- ` 开头时
+        // patch 行恰为 `--- xxx`(新增同理为 `+++ xxx`)——仍按前缀过滤会把内容行整行丢弃并使后续行号漂移。
         var hasEnteredHunk = false
 
         for raw in rawLines {
@@ -76,7 +70,7 @@ enum DiffPatchLineParser {
                 oldLineNumber = hunk.oldStart
                 newLineNumber = hunk.newStart
                 lines.append(DiffPatchLine(
-                    kind: .hunkHeader(context: hunk.context),
+                    kind: .hunkHeader,
                     text: raw,
                     oldLineNumber: nil,
                     newLineNumber: nil
@@ -118,26 +112,22 @@ enum DiffPatchLineParser {
         return lines
     }
 
-    /// 解析 `@@ -a,b +c,d @@ context` 形式的 hunk 头。
-    private static func parseHunkHeader(_ line: String) -> (oldStart: Int, newStart: Int, context: String?) {
+    private static func parseHunkHeader(_ line: String) -> (oldStart: Int, newStart: Int) {
         guard let pattern = hunkPattern,
               let match = pattern.firstMatch(in: line, range: NSRange(line.startIndex..., in: line))
         else {
-            return (0, 0, nil)
+            return (0, 0)
         }
         func group(_ index: Int) -> String? {
             guard let range = Range(match.range(at: index), in: line) else { return nil }
             return String(line[range])
         }
-        let context = (group(3) ?? "").trimmingCharacters(in: .whitespaces)
         return (
             Int(group(1) ?? "") ?? 0,
-            Int(group(2) ?? "") ?? 0,
-            context.isEmpty ? nil : context
+            Int(group(2) ?? "") ?? 0
         )
     }
 
-    /// 解析 hunk 头两侧的起始行号(`@@ -a,b +c,d @@` 中的 a 与 c);非 hunk 头返回 nil。
     static func hunkStarts(_ line: String) -> (old: Int, new: Int)? {
         guard let pattern = hunkPattern,
               let match = pattern.firstMatch(in: line, range: NSRange(line.startIndex..., in: line))
@@ -151,24 +141,19 @@ enum DiffPatchLineParser {
     }
 }
 
-/// 双栏(左右)对比模式下的一行。
 struct DiffSplitRow: Equatable {
     enum Content: Equatable {
-        /// 整行横跨左右两栏的 hunk 头。
         case hunkHeader(DiffPatchLine)
-        /// 整行横跨的说明行(如 `\ No newline at end of file`)。
         case note(DiffPatchLine)
-        /// 左右配对:左为旧侧、右为新侧;上下文行两侧相同,变更块配对后不足的一侧为 nil。
+        /// 左为旧侧、右为新侧;上下文行两侧相同,变更块配对后不足的一侧为 nil。
         case pair(left: DiffPatchLine?, right: DiffPatchLine?)
     }
 
     let content: Content
 }
 
-/// 把单栏行序列按变更块配对为双栏行序列。
-///
-/// 连续的 removed/added 行视为一个变更块,按出现顺序两两配对成行,
-/// 不足的一侧留空;上下文行两侧重复展示。
+/// 连续的 removed/added 行视为一个变更块,按出现顺序两两配对成行,不足的一侧留空;
+/// 上下文行两侧重复展示。
 enum DiffSplitRowBuilder {
     static func rows(from lines: [DiffPatchLine]) -> [DiffSplitRow] {
         var rows: [DiffSplitRow] = []
@@ -206,9 +191,8 @@ enum DiffSplitRowBuilder {
                 flush()
                 rows.append(DiffSplitRow(content: .hunkHeader(line)))
             case .note:
-                // git 对"无尾换行文件改末行"的输出是 `-旧` / `\ No newline` / `+新` /
-                // `\ No newline` 交替,说明行夹在两侧变更之间:此时 flush 会把本应
-                // 配对的一行拆成左右各半空行,所以先攒着,由后续变更行继续配对。
+                // git 对"无尾换行文件改末行"输出 `-旧` / `\ No newline` / `+新` / `\ No newline` 交替:
+                // 此时 flush 会把本应配对的一行拆成左右各半空行,所以先攒着,由后续变更行继续配对。
                 if pendingRemoved.isEmpty, pendingAdded.isEmpty {
                     rows.append(DiffSplitRow(content: .note(line)))
                 } else {
@@ -221,26 +205,20 @@ enum DiffSplitRowBuilder {
     }
 }
 
-/// Diff 查看器空态文案:按成因区分,避免本窗口提交成功后误显示"没有改动"。
+/// 按成因区分空态,避免本窗口提交成功后误显示"没有改动"。
 struct DiffViewerEmptyState: Equatable {
     let title: String
     let subtitle: String
 
-    /// 比较类空态(分支对比等双侧来源):两侧内容一致才没有差异。
     static let noChanges = DiffViewerEmptyState(title: "没有改动", subtitle: "两侧内容完全一致")
-    /// 单侧来源空态(工作区未提交改动):没有待展示的改动,不存在"两侧比较"语义。
+    /// 单侧来源(工作区未提交改动):不存在"两侧比较"语义。
     static let noPendingChanges = DiffViewerEmptyState(title: "没有改动", subtitle: "没有待展示的改动")
-    /// 单提交来源空态:该提交本身没有可展示的改动(如纯合并提交)。
+    /// 单提交来源:该提交本身没有可展示的改动(如纯合并提交)。
     static let noCommitChanges = DiffViewerEmptyState(title: "没有改动", subtitle: "该提交没有可展示的改动")
-    /// 本窗口刚提交成功,全部改动已入库。
     static let committed = DiffViewerEmptyState(title: "提交成功", subtitle: "改动已全部提交")
 }
 
-/// 依据 diff 来源与本窗口操作历史决定空态文案。
 enum DiffWindowEmptyStateResolver {
-    /// 仅工作区改动来源且刚在本窗口提交成功时展示"提交成功";
-    /// 其余按来源区分:单侧来源(工作区改动/单提交)说"没有待展示的改动",
-    /// 比较类来源(分支对比)才说"两侧内容完全一致"。
     static func resolve(source: DiffWindowPayload.Source, didCommit: Bool) -> DiffViewerEmptyState {
         if case .workingDirectory = source, didCommit {
             return .committed
@@ -250,17 +228,12 @@ enum DiffWindowEmptyStateResolver {
             return .noPendingChanges
         case .commit:
             return .noCommitChanges
-        case .compare:
-            return .noChanges
         }
     }
 }
 
-/// Diff 列表折叠/展开状态的键控。
-///
-/// 不能用 `GitDiffEntry.id`:它掺了 patch 的 hashValue,聚焦刷新后内容一变旧键即作废,
-/// 用户特意折叠的文件会全部重新展开。这里按「文件路径 + 同路径出现序号」生成稳定键,
-/// 序号用于区分重命名时同批出现的同路径条目(它们的路径可能相同)。
+/// 折叠/展开状态按「文件路径 + 同路径出现序号」键控:不能用 `GitDiffEntry.id`——它掺了 patch 的
+/// hashValue,内容一变旧键即作废,用户特意折叠的文件会全部重新展开;序号区分重命名时同批出现的同路径条目。
 enum DiffExpansionKeys {
     static func make(for diffs: [GitDiffEntry]) -> [String] {
         var occurrences: [String: Int] = [:]
@@ -274,12 +247,10 @@ enum DiffExpansionKeys {
 
 /// 工作区 diff 中未跟踪文件的展示上限与提示。
 ///
-/// `GitService.diffWorkingDirectory` 只为前 `limit` 个未跟踪文件生成 patch,而窗口底部
-/// 的提交走 `git add --all`(全部改动一起提交):展示范围并不等于提交范围,
+/// Service 只为前 `limit` 个未跟踪文件生成 patch,而提交走 `git add --all`:展示范围 ≠ 提交范围,
 /// 不说明的话用户会以为列表就是将要提交的内容。
 enum DiffWindowUntrackedDisplay {
-    /// 取自 Service 的同一常量:这里抄一份数值的话,Service 改了上限,
-    /// 界面上的"最多展示前 N 个"就成了谎报。
+    /// 取自 Service 的同一常量:抄一份数值的话,Service 改了上限,界面上的"最多展示前 N 个"就成了谎报。
     static let limit = GitService.untrackedDisplayLimit
 
     /// 未跟踪文件都以"新增"条目出现,新增数触顶即视为可能被截断;
@@ -291,7 +262,7 @@ enum DiffWindowUntrackedDisplay {
     }
 }
 
-/// 单文件"丢弃改动"确认弹窗的文案:按变更类型区分描述,统一强调不可恢复。
+/// 单文件"丢弃改动"确认文案:按变更类型区分描述,统一强调不可恢复。
 enum DiscardFileConfirmation {
     static func title(for entry: GitDiffEntry) -> String {
         "丢弃 \(entry.fileName) 的改动"

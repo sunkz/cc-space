@@ -2,9 +2,8 @@ import AppKit
 import Foundation
 
 
-/// 分支列表的"已选置顶"稳定排序:被选中的按原相对顺序排在前,其余紧随其后。
-/// MR 目标分支面板用它把已添加的分支挪到首屏,同时保证点选/取消都不会让其他行乱跳
-/// (两组内部各自稳定,只有被操作那一行在两组之间移动)。
+/// 分支列表"已选置顶"稳定排序:被选中的按原相对顺序排在前,其余紧随其后——两组内部各自稳定,
+/// 只有被操作那一行在两组之间移动,点选/取消不会让其他行乱跳。
 enum BranchSelectionOrder {
     static func selectedFirst(_ branches: [String], selected: [String]) -> [String] {
         let selectedSet = Set(selected)
@@ -14,8 +13,7 @@ enum BranchSelectionOrder {
     }
 }
 
-/// 分支按"最近活动"排序:最后提交时间新的在前。
-/// 元数据未加载/无时间的分支保持原顺序(字母序)排在最后——
+/// 分支按"最近活动"排序:最后提交时间新的在前;无时间的保持原顺序(字母序)排在最后——
 /// 弹窗首帧(元数据未到)与字母序一致,数据到达后才换序,不会闪跳。
 enum BranchActivityOrder {
     static func sorted(
@@ -45,8 +43,7 @@ enum BranchActivityOrder {
 
 enum WorkplaceSystemActions {
     static func openTerminal(_ terminal: ExternalEditor, at path: String) throws {
-        // 与 openInEditor 同一口径:归一化 + 存在性校验,否则空串/失效路径会让 Terminal
-        // 静默打开默认目录,用户以为打开了工作区。
+        // 与 openInEditor 同一口径:归一化 + 存在性校验,否则空串/失效路径会让 Terminal 静默打开默认目录。
         let normalizedPath = LocalPathSafety.normalizedPath(path)
         guard normalizedPath.isEmpty == false,
               FileManager.default.fileExists(atPath: normalizedPath) else {
@@ -60,8 +57,7 @@ enum WorkplaceSystemActions {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         process.arguments = ["-a", terminal.applicationURL.path, normalizedPath]
-        // /usr/bin/open 的告警/错误不面向用户:不接管就会继承父进程 fd(打包成 app 时
-        // 指向不可写位置),口径与 openInEditor 一致。
+        // /usr/bin/open 的告警/错误不面向用户:不接管就会继承父进程 fd(打包成 app 时指向不可写位置)。
         process.standardError = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
         try process.run()
@@ -89,7 +85,6 @@ struct WorkplaceDetailPresentationState {
     let canRefreshAllRepositories: Bool
     let canSyncAllRepositories: Bool
     let canPushAllRepositories: Bool
-    let canMergeDefaultBranchIntoCurrent: Bool
     let canSwitchRepositoriesToDefaultBranch: Bool
     let canSwitchRepositoriesToWorkBranch: Bool
     let canOpenDirectory: Bool
@@ -98,7 +93,6 @@ struct WorkplaceDetailPresentationState {
     let refreshHelp: String
     let syncHelp: String
     let pushHelp: String
-    let mergeDefaultBranchHelp: String
     let switchDefaultBranchHelp: String
     let switchWorkBranchHelp: String
     let deleteHelp: String
@@ -117,7 +111,6 @@ struct WorkplaceDetailPresentationState {
         canRefreshAllRepositories = actionState.hasLocalRepositories && !isActionLocked
         canSyncAllRepositories = actionState.hasLocalRepositories && !isActionLocked
         canPushAllRepositories = actionState.hasLocalRepositories && !isActionLocked
-        canMergeDefaultBranchIntoCurrent = actionState.hasLocalRepositories && !isActionLocked
         canSwitchRepositoriesToDefaultBranch = actionState.hasLocalRepositories && !isActionLocked
         canSwitchRepositoriesToWorkBranch =
             actionState.hasLocalRepositories &&
@@ -131,7 +124,6 @@ struct WorkplaceDetailPresentationState {
             : "重新读取所有仓库的本地 Git 状态，并纳入目录里新拷入的仓库"
         syncHelp = isActionLocked ? "工作区操作进行中" : "Pull 所有仓库：从远端拉取最新代码并合并到当前分支"
         pushHelp = isActionLocked ? "工作区操作进行中" : "Push 所有仓库：将未推送的提交推送到远端"
-        mergeDefaultBranchHelp = isActionLocked ? "工作区操作进行中" : "合并所有仓库的默认分支到当前分支（等同于 git merge main）"
         switchDefaultBranchHelp = isActionLocked ? "工作区操作进行中" : "切到默认分支：将所有仓库切到各自配置的默认分支（如 main/master）"
         switchWorkBranchHelp =
             isActionLocked
@@ -143,15 +135,12 @@ struct WorkplaceDetailPresentationState {
     }
 }
 
-/// 详情页长驻任务读取的「本地目录」镜像。
-///
-/// 视图结构体是值类型:轮询/分支加载这类长驻闭包捕获的是首帧拷贝,拷贝上的
-/// `syncStates` 永远是启动瞬间的快照;镜像存 @State(外部存储),闭包里读到的是
-/// 当前值。镜像内容由本纯函数从最新的 syncStates 求值,便于单测。
+/// 详情页长驻任务读取的「本地目录」镜像:视图结构体是值类型,轮询/分支加载这类长驻闭包捕获的是首帧拷贝,
+/// 拷贝上的 `syncStates` 是冻结快照;镜像存 @State(外部存储),内容由本纯函数从最新 syncStates 求值。
 struct WorkplaceDetailLocalDirectoryMirror: Equatable {
     /// 含本地目录的仓库状态:分支加载只取这些。
     let localDirectoryStates: [RepositorySyncState]
-    /// 是否存在任一本地仓库:为空时轮询心跳与分支快照整体跳过。
+    /// 为空时轮询心跳与分支快照整体跳过。
     let hasAnyLocalDirectory: Bool
 
     init(syncStates: [RepositorySyncState]) {
@@ -166,9 +155,8 @@ struct WorkplaceDeleteConfirmationState: Equatable {
     let message: String
     let confirmLabel: String
 
-    /// `directoryPath` 为触发时刻的磁盘探测结果(existingDirectoryPath),
-    /// 不在 init 里做 stat:本状态此前被 body 内的 .alert 直接消费,
-    /// 一次渲染一次 fileExists 卡主线程,现在由调用方在按钮动作里探测一次。
+    /// `directoryPath` 为触发时刻的磁盘探测结果,不在 init 里做 stat:本状态被 body 内的 `.alert` 直接消费,
+    /// 现算等于一次渲染一次主线程 fileExists;由调用方在按钮动作里探测一次。
     init(
         workplace: Workplace,
         directoryPath: String?
@@ -193,8 +181,7 @@ struct WorkplaceRepositoryDeleteConfirmationState: Equatable {
     let message: String
     let confirmLabel: String
 
-    /// 同 WorkplaceDeleteConfirmationState:`directoryPath` 由调用方在
-    /// 触发时刻探测后传入,init 保持纯内存构造。
+    /// 同 WorkplaceDeleteConfirmationState:`directoryPath` 由调用方在触发时刻探测后传入,init 保持纯内存构造。
     init(
         repositoryName: String,
         localPath: String,
@@ -231,13 +218,11 @@ struct WorkplaceRepositoryAbortConfirmationState: Equatable {
 
 struct WorkplaceRepositoryBranchPillState: Equatable {
     let title: String
-    let quickHelp: String
     let isDefault: Bool
 
     init?(
         currentBranch: String?,
-        defaultBranch: String?,
-        hasAvailableBranches: Bool
+        defaultBranch: String?
     ) {
         let normalizedCurrentBranch = currentBranch?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -247,12 +232,11 @@ struct WorkplaceRepositoryBranchPillState: Equatable {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         isDefault = normalizedCurrentBranch == normalizedDefaultBranch
         title = normalizedCurrentBranch
-        quickHelp = hasAvailableBranches ? "当前分支" : "当前分支，暂无可切换的本地分支"
     }
 }
 
-/// 远端跟踪引用与裸分支名的换算。面板统一展示裸分支名,而对比模式的"远端"数据
-/// 来自 `refs/remotes`(本身就是 `origin/x` 这样的引用名),两者在这里划清界限。
+/// 远端跟踪引用与裸分支名的换算:面板统一展示裸分支名,而对比模式的"远端"数据来自
+/// `refs/remotes`(本身就是 `origin/x` 形式的引用名),两者在这里划清界限。
 enum BranchRemoteRef {
     /// `origin/feature/x` → `feature/x`:只去首段 remote 名,分支名自带的 "/" 保留;
     /// 不含 "/"、或去完前缀为空(`origin/`)的输入原样返回——宁可多显示也不留空行。
@@ -272,8 +256,7 @@ enum BranchRemoteRef {
         return Set(counts.compactMap { $0.value > 1 ? $0.key : nil })
     }
 
-    /// 行展示名:只在"分支对比 + 远端页签"(`showsBareRemoteNames`)下去前缀显示裸名,
-    /// 裸名在这批行里撞车时返回 nil,由调用方回退显示完整跟踪引用。
+    /// 行展示名:只在"分支对比 + 远端页签"(`showsBareRemoteNames`)下去前缀显示裸名,裸名在这批行里撞车时返回 nil;
     /// 其余场景同样返回 nil——那表示"显示行自身值",不是"显示空"。
     static func displayBranch(
         ofTrackingRef ref: String,
@@ -289,11 +272,8 @@ enum BranchRemoteRef {
 struct BranchSwitchRemotePresentationState: Equatable {
     let remoteBranchNames: [String]
 
-    /// 远端分支名单的展示辅助。本地已有的不剔除——远端页签如实反映远端有什么,
-    /// 本地已有的那条点击即切换本地分支。这里只负责归一与去重。
-    /// `remoteBranches` 为 nil(尚未加载)时结果为空,由调用方结合加载态展示。
-    /// 输入须已在加载时归一排序(见 `BranchListNormalization`);这里只做轻量去重,
-    /// 不再排序——上千分支的本地化排序放进每次 body 求值会卡死主线程。
+    /// 远端名单只做归一与去重(本地已有的不剔除,那条点击即切换)。输入须已在加载时归一排序(见 `BranchListNormalization`),
+    /// 这里不再排序——上千分支的本地化排序放进每次 body 求值会卡死主线程。
     init(remoteBranches: [String]?) {
         guard let remoteBranches else {
             remoteBranchNames = []
@@ -306,8 +286,6 @@ struct BranchSwitchRemotePresentationState: Equatable {
     }
 }
 
-/// 分支对比列表的展示状态:按关键词过滤;列表高度固定(与切换分支弹窗同一套
-/// 尺寸恒定策略,切页签/搜索不跳动);高度常量与切换分支弹窗一致。
 struct CompareBranchListPresentationState: Equatable {
     let filteredBranches: [String]
     let emptyTitle: String
@@ -333,14 +311,12 @@ struct CompareBranchListPresentationState: Equatable {
     }
 }
 
-/// 分支切换 popover 的页签来源。
 enum BranchSwitchListSource: Equatable {
     case local
     case remote
 }
 
-/// 分支搜索匹配:子串命中,或查询词是分支名的子序列(跳字也算)。
-/// 习惯打分支名尾段缩写(如 "fck" 命中 "feature/checkout"),
+/// 分支搜索匹配:子串命中,或查询词是分支名的子序列(如 "fck" 命中 "feature/checkout");
 /// 子序列规则在常规分支数量级下开销可忽略,故不加长度阈值。
 enum BranchSearch {
     static func matches(_ branch: String, query: String) -> Bool {
@@ -359,17 +335,14 @@ enum BranchSearch {
     }
 }
 
-/// 分支切换 popover 列表的展示状态:按来源(本地分支 / 远端独有分支)与关键词过滤。
-/// 列表高度为固定值(与分支数、页签、搜索词均无关):弹窗尺寸恒定,
-/// 切页签/搜索/远端加载都不跳动;超出部分在列表内滚动,空态/少量分支时底部留白。
+/// 分支切换 popover 列表:按来源(本地 / 远端独有)与关键词过滤。
+/// 列表高度固定(与分支数、页签、搜索词均无关),弹窗尺寸恒定,超出在列表内滚动、空态时底部留白。
 struct BranchSwitchListPresentationState: Equatable {
     let filteredBranches: [String]
     let emptyTitle: String
     let emptySubtitle: String
 
-    static let rowHeight: CGFloat = 30
-    /// 固定列表高度:恰好 5 行(rowHeight 30 × 5),超出在列表内滚动;
-    /// 连同页签与新建输入行,popover 整体保持紧凑恒定。
+    /// 固定列表高度:恰好 5 行 × 30pt;连同页签与新建输入行,popover 整体紧凑恒定。
     static let fixedListHeight: CGFloat = 150
 
     init(
@@ -384,13 +357,11 @@ struct BranchSwitchListPresentationState: Equatable {
         case .local:
             candidates = localBranches
         case .remote:
-            // 远端名单须已归一排序(BranchListNormalization),此处直接使用。
-            // 展示一律用裸名:分支面板里不加 origin/ 前缀,
-            // 本地/远端靠页签区分。
+            // 名单须已归一排序(BranchListNormalization),此处直接使用;展示一律用裸名,
+            // 分支面板里不加 origin/ 前缀,本地/远端靠页签区分。
             candidates = remoteBranchNames ?? []
         }
-        // 仍容忍用户把 origin/ 打进搜索词:剥掉前缀,让 "origin/checkout" 与
-        // "checkout" 命中同一分支。
+        // 仍容忍用户把 origin/ 打进搜索词:剥掉前缀,让 "origin/checkout" 与 "checkout" 命中同一分支。
         var matchQuery = query
         if source == .remote, matchQuery.hasPrefix("origin/") {
             matchQuery = String(matchQuery.dropFirst("origin/".count))
@@ -419,13 +390,8 @@ struct BranchSwitchListPresentationState: Equatable {
     }
 }
 
-/// 溢出菜单/右键菜单尾段的分组渲染顺序:网页动作(仅未克隆时头部独立组)
-/// → 本地动作组 → 删除分隔线 → 删除。
-/// 顺序并入纯值,由视图按数组渲染(ForEach)而不是靠 ViewBuilder 里的物理摆放:
-/// 已克隆仓库的网页动作由本地动作组内的插槽渲染(分支比较之后、与 Stash 块
-/// 分开),.webActions 头部组仅未克隆(本地组缺席)时兜底渲染——菜单里恒出现
-/// 一次,不会重复。测试断言的是这层纯值顺序语义;视图层 case 与函数体的
-/// 对应关系、ForEach 的摆放不在纯值断言的覆盖范围内,靠 review 保证(项目惯例不测渲染)。
+/// 溢出/右键菜单尾段的分组渲染顺序,由视图按数组 ForEach 渲染而不是靠 ViewBuilder 里的物理摆放(顺序可被纯值测试断言):
+/// 已克隆仓库的网页动作由本地动作组内的插槽渲染,.webActions 头部组仅未克隆(本地组缺席)时兜底——菜单里恒出现一次。
 enum WorkplaceRepositoryRowMenuGroup: Hashable {
     case webActions
     case localActions
@@ -439,19 +405,15 @@ struct WorkplaceRepositoryRowPresentationState {
     let canPullLatest: Bool
     let canPushToRemote: Bool
     let canOpenLocalActions: Bool
-    /// 在浏览器打开仓库:只依赖配置的远端地址,不要求本地目录存在,
-    /// 未克隆的仓库同样要在菜单里保留这条唯一直达远端网页的入口。
+    /// 只依赖配置的远端地址,不要求本地目录存在:未克隆仓库也要保留这条唯一直达远端网页的入口。
     let canOpenRepositoryWeb: Bool
     let canDeleteRepository: Bool
     let canCreateMergeRequest: Bool
     let canSwitchBranch: Bool
     let canStashChanges: Bool
     let canViewChanges: Bool
-    /// 存在冲突文件且操作可执行时,才展示"中止合并/变基"入口。
     let canAbortInterruptedOperation: Bool
     let visibleErrorMessage: String?
-    /// 菜单尾段的分组渲染顺序(见 WorkplaceRepositoryRowMenuGroup):
-    /// 视图按此数组渲染,顺序即分组语义,可被纯值测试断言。
     let menuGroups: [WorkplaceRepositoryRowMenuGroup]
 
     init(
@@ -479,20 +441,16 @@ struct WorkplaceRepositoryRowPresentationState {
         canPushToRemote = canOpenLocalActions && !actionsDisabled
         canDeleteRepository = allowsDeleteRepository && !actionsDisabled
         canCreateMergeRequest = canOpenLocalActions && !actionsDisabled
-        // 各动作独立从自身条件推导,不做链式别名:此前
-        // `canSwitchBranch = canCreateMergeRequest`、`canViewChanges = canStashChanges`
-        // 把语义无关的动作绑死——冲突态下 Stash 被 git 拒绝本应禁用 Stash,
-        // 却连带禁掉了"查看改动",而冲突时恰恰最需要看 diff。
+        // 各动作独立从自身条件推导,不做链式别名:语义无关的动作会因一次条件调整被连带禁用
+        // (冲突态下 Stash 被 git 拒绝本应只禁用 Stash,链式别名会连带禁掉"查看改动",而冲突时恰恰最需要看 diff)。
         canSwitchBranch = canOpenLocalActions && !actionsDisabled
-        // 状态未知(nil)时先禁用,快照加载完成后自动恢复;干净工作区无需 Stash。
-        // 冲突未解决时 git 拒绝 stash,冲突态下同样禁用入口。
+        // 状态未知(nil)时先禁用,快照加载完成后自动恢复;干净工作区无需 Stash,冲突未解决时 git 拒绝 stash。
         canStashChanges =
             canOpenLocalActions &&
             !actionsDisabled &&
             hasUncommittedChanges == true &&
             hasConflicts != true
-        // "查看改动"同理:没有未提交改动时无可查看的 diff,直接置灰;
-        // 但冲突文件本身就是"未提交改动",查看 diff 在冲突态必须可用。
+        // 没有未提交改动就无可查看的 diff;但冲突文件本身就是未提交改动,冲突态下"查看改动"必须可用。
         canViewChanges =
             canOpenLocalActions &&
             !actionsDisabled &&
@@ -506,17 +464,13 @@ struct WorkplaceRepositoryRowPresentationState {
             syncState.status == .failed && !trimmedError.isEmpty
             ? trimmedError
             : nil
-        // 删除分隔线的出现口径沿用原 showsPrimaryActionMenuItems:重试/拉取/
-        // 本地动作/网页动作任一可见才画线,避免删除前留一段悬空线。
+        // 删除分隔线只在任一主动作可见时画线,避免删除前留一段悬空线。
         let showsPrimaryActionMenuItems =
             (syncState.status == .failed && hasRetryRepository) ||
             (syncState.status == .success && hasPullRepository && syncState.hasLocalDirectory) ||
             canOpenLocalActions ||
             canOpenRepositoryWeb
         var groups: [WorkplaceRepositoryRowMenuGroup] = []
-        // 网页动作只依赖配置的远端地址,不要求本地目录存在:已克隆时由本地组
-        // 内插槽(分支比较后)渲染,头部组不再重复;未克隆时本地组缺席,头部
-        // 独立组兜底——保证菜单里恒出现一次。
         if canOpenRepositoryWeb, !canOpenLocalActions { groups.append(.webActions) }
         if canOpenLocalActions { groups.append(.localActions) }
         if showsPrimaryActionMenuItems { groups.append(.primaryDivider) }
@@ -709,7 +663,7 @@ enum WorkplaceDetailFeedbackFactory {
     }
 
     static func switchAllToDefaultBranch(
-        result: WorkplaceBulkBranchSwitchResult
+        result: WorkplaceBatchOperationResult
     ) -> CCSpaceFeedback {
         var feedback = batchSwitchBranches(
             result: result,
@@ -723,7 +677,7 @@ enum WorkplaceDetailFeedbackFactory {
 
     static func switchAllToWorkBranch(
         branch: String,
-        result: WorkplaceBulkBranchSwitchResult
+        result: WorkplaceBatchOperationResult
     ) -> CCSpaceFeedback {
         var feedback = batchSwitchBranches(
             result: result,
@@ -731,52 +685,6 @@ enum WorkplaceDetailFeedbackFactory {
             mixedMessage: "切换到工作分支 \(branch) 完成，\(result.successCount) 个成功，\(result.failedCount) 个失败",
             failureMessage: "切换到工作分支 \(branch) 失败，\(result.failedCount) 个仓库失败"
         )
-        feedback.details = failedNamesDetails(result.failedNames)
-        return feedback
-    }
-
-    static func mergeDefaultBranchIntoCurrent(
-        result: WorkplaceBulkBranchSwitchResult
-    ) -> CCSpaceFeedback {
-        var feedback: CCSpaceFeedback
-        if result.failedCount > 0 && (result.successCount > 0 || result.skippedCount > 0 || result.cancelledCount > 0) {
-            feedback = CCSpaceFeedback(
-                style: .warning,
-                message: "合并默认分支完成，\(result.successCount) 个成功，\(result.skippedCount) 个跳过，\(result.failedCount) 个失败"
-                    + cancelledSuffix(result.cancelledCount)
-            )
-        } else if result.failedCount > 0 {
-            feedback = CCSpaceFeedback(
-                style: .error,
-                message: "合并默认分支失败，\(result.failedCount) 个仓库失败" + cancelledSuffix(result.cancelledCount)
-            )
-        } else if result.successCount > 0 && result.skippedCount > 0 {
-            feedback = CCSpaceFeedback(
-                style: .success,
-                message: "合并默认分支完成，\(result.successCount) 个成功，\(result.skippedCount) 个跳过"
-                    + cancelledSuffix(result.cancelledCount)
-            )
-        } else if result.skippedCount > 0 && result.cancelledCount > 0 {
-            // 取消与业务跳过分开表述,不再把取消混进"已跳过"。
-            feedback = CCSpaceFeedback(
-                style: .info,
-                message: "已跳过 \(result.skippedCount) 个默认分支仓库，\(result.cancelledCount) 个仓库被取消"
-            )
-        } else if result.skippedCount > 0 {
-            feedback = CCSpaceFeedback(
-                style: .info,
-                message: "已跳过 \(result.skippedCount) 个默认分支仓库"
-            )
-        } else if result.successCount == 0 && result.cancelledCount > 0 {
-            feedback = CCSpaceFeedback(
-                style: .info,
-                message: "批量合并已取消（\(result.cancelledCount) 个仓库未执行）"
-            )
-        } else {
-            feedback = CCSpaceFeedbackFactory.actionSuccess(
-                "已将默认分支代码合并到 \(result.successCount) 个仓库" + cancelledSuffix(result.cancelledCount)
-            )
-        }
         feedback.details = failedNamesDetails(result.failedNames)
         return feedback
     }
@@ -796,7 +704,7 @@ enum WorkplaceDetailFeedbackFactory {
     }
 
     static func pushAll(
-        result: RepositoryPushResult
+        result: WorkplaceBatchOperationResult
     ) -> CCSpaceFeedback {
         var feedback: CCSpaceFeedback
         if result.failedCount > 0 && result.successCount > 0 {
@@ -827,7 +735,7 @@ enum WorkplaceDetailFeedbackFactory {
                 message: "已推送 \(result.successCount) 个仓库" + cancelledSuffix(result.cancelledCount)
             )
         } else if result.skippedCount > 0 && result.cancelledCount > 0 {
-            // 取消与业务跳过分开表述,不再把"全部被取消"说成"没有需要推送的仓库"。
+            // 取消与业务跳过口径不同,不能把"全部被取消"说成"没有需要推送的仓库"。
             feedback = CCSpaceFeedback(
                 style: .info,
                 message: "已跳过 \(result.skippedCount) 个仓库，\(result.cancelledCount) 个仓库被取消"
@@ -855,7 +763,7 @@ enum WorkplaceDetailFeedbackFactory {
     }
 
     private static func batchSwitchBranches(
-        result: WorkplaceBulkBranchSwitchResult,
+        result: WorkplaceBatchOperationResult,
         successMessage: String,
         mixedMessage: String,
         failureMessage: String
@@ -875,7 +783,7 @@ enum WorkplaceDetailFeedbackFactory {
         }
         if result.successCount == 0 && result.skippedCount > 0 {
             if result.cancelledCount > 0 {
-                // 跳过与取消混在一起时,取消部分要单列出来。
+                // 取消部分要单列,不能并入"跳过"表述。
                 return CCSpaceFeedback(
                     style: .info,
                     message: "已跳过 \(result.skippedCount) 个仓库，\(result.cancelledCount) 个仓库被取消"
@@ -909,8 +817,7 @@ enum WorkplaceDetailFeedbackFactory {
 }
 
 /// 目录存在性探测:路径去空白后非空且在盘上是目录时返回该路径,否则 nil。
-/// 注意:这是磁盘 stat,绝不能放进 body 求值路径——调用点必须收敛到
-/// 用户动作(如删除按钮)触发的一刻。
+/// 这是磁盘 stat,绝不能放进 body 求值路径——调用点必须收敛到用户动作(如删除按钮)触发的一刻。
 func existingDirectoryPath(_ path: String) -> String? {
     let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
     guard trimmedPath.isEmpty == false else { return nil }
@@ -944,18 +851,15 @@ enum WorkplaceRepositorySorting {
 }
 
 enum BranchPullOutcomeFormatter {
-    /// Renders non-trivial entries of `outcome.otherBranchOutcomes`.
-    /// Returns nil when there is nothing worth showing (all `.alreadyUpToDate` or empty).
-    /// `currentBranchOutcome` is intentionally NOT listed here — the repo-level status
-    /// already reflects it via top-level success/failure counters and `failedNames`.
+    /// 只渲染非平凡条目(全 `.alreadyUpToDate` 或为空时返回 nil)。
+    /// `currentBranchOutcome` 有意不列:仓库级状态已由顶层成功/失败计数与 `failedNames` 反映。
     static func detailsForSingleRepository(_ outcome: GitPullAllBranchesOutcome) -> String? {
         let lines = nonTrivialLines(outcome.otherBranchOutcomes)
         guard lines.isEmpty == false else { return nil }
         return (["其他分支："] + lines.map { "  " + $0 }).joined(separator: "\n")
     }
 
-    /// Renders multi-repo details: each repo whose otherBranchOutcomes has non-trivial entries
-    /// becomes a "<repo>:" block. Repos with only trivial entries are omitted entirely.
+    /// 多仓汇总:只列出含非平凡条目的仓库,其余整块省略。
     static func detailsForBulk(_ summaries: [RepositoryBranchPullOutcomeSummary]) -> String? {
         let blocks: [String] = summaries.compactMap { summary in
             let lines = nonTrivialLines(summary.outcome.otherBranchOutcomes)

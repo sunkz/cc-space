@@ -79,7 +79,6 @@ struct CloneConcurrencyGitServiceSpy: GitServicing {
     func remoteURL(in directory: String) async -> String? { nil }
     func checkoutBranch(_ branch: String, in directory: String) async throws {}
     func createLocalBranch(_ branch: String, in directory: String) async throws {}
-    func remoteBranchExists(branch: String, remoteURL: String) async -> Bool { false }
     func mergeDefaultBranchIntoCurrent(in directory: String) async throws -> GitMergeDefaultBranchOutcome { .merged }
     func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] { [] }
     func remoteBranches(for remoteURL: String) async -> [String]? { [] }
@@ -123,7 +122,6 @@ struct PullConcurrencyGitServiceSpy: GitServicing {
     func remoteURL(in directory: String) async -> String? { nil }
     func checkoutBranch(_ branch: String, in directory: String) async throws {}
     func createLocalBranch(_ branch: String, in directory: String) async throws {}
-    func remoteBranchExists(branch: String, remoteURL: String) async -> Bool { false }
     func mergeDefaultBranchIntoCurrent(in directory: String) async throws -> GitMergeDefaultBranchOutcome { .merged }
     func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] { [] }
     func remoteBranches(for remoteURL: String) async -> [String]? { [] }
@@ -209,7 +207,6 @@ struct GitServiceStub: GitServicing {
         }
     }
 
-    func remoteBranchExists(branch: String, remoteURL: String) async -> Bool { false }
 
 
     func mergeDefaultBranchIntoCurrent(in directory: String) async throws -> GitMergeDefaultBranchOutcome {
@@ -409,7 +406,7 @@ final class SyncCoordinatorTests: XCTestCase {
             state.status = .success
             state.hasLocalDirectory = true
             state.localPath = localPath
-            store.updateSyncState(state)
+            store.updateSyncStates([state])
         }
 
         let gitService = PullConcurrencyGitServiceSpy()
@@ -479,7 +476,7 @@ final class SyncCoordinatorTests: XCTestCase {
                 withIntermediateDirectories: true,
                 attributes: nil
             )
-            store.updateSyncState(state)
+            store.updateSyncStates([state])
         }
 
         let coordinator = SyncCoordinator(
@@ -561,7 +558,7 @@ final class SyncCoordinatorTests: XCTestCase {
             state.status = .success
             state.hasLocalDirectory = true
             state.localPath = localPath
-            store.updateSyncState(state)
+            store.updateSyncStates([state])
         }
 
         let cancelSpy = PullConcurrencyGitServiceSpy()
@@ -627,7 +624,7 @@ final class SyncCoordinatorTests: XCTestCase {
             withIntermediateDirectories: true,
             attributes: nil
         )
-        store.updateSyncState(clonedState)
+        store.updateSyncStates([clonedState])
 
         let coordinator = SyncCoordinator(
             gitService: GitServiceStub(behavior: .success),
@@ -675,7 +672,7 @@ final class SyncCoordinatorTests: XCTestCase {
             withIntermediateDirectories: true,
             attributes: nil
         )
-        store.updateSyncState(clonedState)
+        store.updateSyncStates([clonedState])
 
         let coordinator = SyncCoordinator(
             gitService: GitServiceStub(behavior: .fail),
@@ -724,7 +721,7 @@ final class SyncCoordinatorTests: XCTestCase {
             withIntermediateDirectories: true,
             attributes: nil
         )
-        store.updateSyncState(clonedState)
+        store.updateSyncStates([clonedState])
 
         let gitService = GitServiceStub(
             behavior: .success,
@@ -780,7 +777,7 @@ final class SyncCoordinatorTests: XCTestCase {
             withIntermediateDirectories: true,
             attributes: nil
         )
-        store.updateSyncState(clonedState)
+        store.updateSyncStates([clonedState])
 
         let gitService = GitServiceStub(
             behavior: .success,
@@ -841,7 +838,7 @@ final class SyncCoordinatorTests: XCTestCase {
             withIntermediateDirectories: true,
             attributes: nil
         )
-        store.updateSyncState(state2)
+        store.updateSyncStates([state2])
 
         let coordinator = SyncCoordinator(
             gitService: GitServiceStub(behavior: .success),
@@ -895,7 +892,7 @@ final class SyncCoordinatorTests: XCTestCase {
             withIntermediateDirectories: true,
             attributes: nil
         )
-        store.updateSyncState(state)
+        store.updateSyncStates([state])
 
         let gitService = GitServiceStub(
             behavior: .success,
@@ -959,7 +956,7 @@ final class SyncCoordinatorTests: XCTestCase {
         state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = "There is no tracking information for the current branch."
-        store.updateSyncState(state)
+        store.updateSyncStates([state])
 
         let gitService = GitServiceStub(
             behavior: .success,
@@ -1105,7 +1102,6 @@ struct PullAllBranchesGitServiceStub: GitServicing {
     func remoteURL(in directory: String) async -> String? { nil }
     func checkoutBranch(_ branch: String, in directory: String) async throws {}
     func createLocalBranch(_ branch: String, in directory: String) async throws {}
-    func remoteBranchExists(branch: String, remoteURL: String) async -> Bool { false }
     func mergeDefaultBranchIntoCurrent(in directory: String) async throws -> GitMergeDefaultBranchOutcome { .merged }
     func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] { [] }
     func remoteBranches(for remoteURL: String) async -> [String]? { [] }

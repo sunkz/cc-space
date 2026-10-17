@@ -43,7 +43,7 @@ struct WorkplaceRepositoryRowView: View {
     @Environment(\.openWindow) private var openWindow
     @State private var showingDeleteConfirmation = false
     /// 删除确认弹窗内容:在删除入口触发时刻做一次目录探测后写入。
-    /// 不能按 body 求值现算——此前 .alert 参数直接读计算属性,每帧一次主线程 stat。
+    /// 不能按 body 求值现算——.alert 参数直接读计算属性,每帧一次主线程 stat。
     @State private var deleteConfirmation: WorkplaceRepositoryDeleteConfirmationState?
     @State private var isHovered = false
     @State private var showingBranchMenu = false
@@ -54,7 +54,6 @@ struct WorkplaceRepositoryRowView: View {
     @State private var remoteBranchesTask: Task<Void, Never>?
     /// 远端分支加载代际号:关闭取消与迟到回写只作用于当前代际,防旧任务打断新任务。
     @State private var remoteBranchesGeneration = 0
-    /// 分支面板行内角标数据(最后提交时间 / 领先落后),弹窗打开时加载。
     @State private var branchMetadata: [String: GitBranchMetadata] = [:]
     @State private var branchMetadataTask: Task<Void, Never>?
     /// 与 remoteBranchesGeneration 同款代际号:`Task.isCancelled` 通过后、落笔前,
@@ -70,7 +69,7 @@ struct WorkplaceRepositoryRowView: View {
     @State private var showingConflictList = false
     @State private var showingAbortConfirmation = false
     @State private var isErrorExpanded = false
-    /// 删除分支的确认候选。确认弹窗由行承载而非分支 popover 内(见下方 alert 注释)。
+    /// 删除分支的确认候选;确认弹窗由行承载(transient popover 装不下 alert,见 BranchDeleteConfirmationModifier)。
     @State private var branchDeleteCandidate: BranchDeleteCandidate?
 
     private var presentationState: WorkplaceRepositoryRowPresentationState {
@@ -86,17 +85,14 @@ struct WorkplaceRepositoryRowView: View {
         )
     }
 
-    /// 行内是否处于冲突态(状态快照已知)。
     private var hasConflicts: Bool {
         branchStatus?.hasConflicts ?? false
     }
 
-    /// "中止…"菜单项与确认弹窗共用的文案状态。
     private var abortConfirmationState: WorkplaceRepositoryAbortConfirmationState {
         WorkplaceRepositoryAbortConfirmationState(operation: branchStatus?.interruptedOperation)
     }
 
-    /// "Stash 改动"菜单的 hover 提示;按不可用原因区分说明。
     private var stashMenuHelp: String {
         if actionsDisabled {
             return "仓库操作进行中，暂不可 Stash"
@@ -109,7 +105,6 @@ struct WorkplaceRepositoryRowView: View {
             : "当前没有未提交改动，无需 Stash"
     }
 
-    /// "查看改动"菜单的 hover 提示;按不可用原因区分说明。
     private var viewChangesMenuHelp: String {
         if actionsDisabled {
             return "仓库操作进行中，暂不可查看"
@@ -122,25 +117,19 @@ struct WorkplaceRepositoryRowView: View {
             : "当前没有未提交改动"
     }
 
-    /// 「领先 N 个」pill 的点击动作;不可推送(操作进行中等)时返回 nil,pill 退化为纯展示。
     private var pushPillAction: (() -> Void)? {
         presentationState.canPushToRemote ? { onPush() } : nil
     }
 
-    /// 「落后 N 个」pill 的点击动作;不可拉取时返回 nil,pill 退化为纯展示。
-    /// 与工具栏 Pull 按钮同一套可用性守卫与动作。
     private var pullPillAction: (() -> Void)? {
         guard presentationState.canPullLatest, let pullRepository else { return nil }
         return { onPull(pullRepository) }
     }
 
-    /// 分支面板 popover 是否可打开:面板除本地分支外还有远端分支与新建分支入口,
-    /// 只要有切换权限且存在本地分支即可。
     private var branchMenuDisabled: Bool {
         !presentationState.canSwitchBranch || availableBranches.isEmpty
     }
 
-    /// 分支名 pill 的 hover 提示；禁用时说明不可切换的原因。
     private var branchMenuHelp: String {
         if !presentationState.canSwitchBranch {
             return state.hasLocalDirectory ? "仓库操作进行中，暂不可切换分支" : "仓库尚未克隆，暂不可切换分支"
@@ -154,13 +143,12 @@ struct WorkplaceRepositoryRowView: View {
     private var branchPillState: WorkplaceRepositoryBranchPillState? {
         WorkplaceRepositoryBranchPillState(
             currentBranch: currentBranch,
-            defaultBranch: repository?.defaultBranch,
-            hasAvailableBranches: availableBranches.isEmpty == false
+            defaultBranch: repository?.defaultBranch
         )
     }
 
     var body: some View {
-        // 行内展示状态在 body 顶部求值一次,沿渲染路径复用(与详情页同款模式)。
+        // 行内展示状态在 body 顶部求值一次,沿渲染路径复用(presentationState 每次访问都重算)。
         // 命名 rowState:存储属性 state 已被 RepositorySyncState 占用,不能遮蔽。
         let rowState = presentationState
         return CCSpaceInteractiveCard(selected: false) {
@@ -187,9 +175,8 @@ struct WorkplaceRepositoryRowView: View {
                     }
                     .buttonStyle(.plain)
                     .opacity(isPinned || isHovered ? 1 : 0)
-                    // opacity-0 只隐藏视觉:命中区与无障碍元素还在。不可见时一并关掉,
-                    // 否则会点空白误触置顶、VoiceOver 读出屏幕上不存在的按钮;
-                    // 置顶入口在溢出菜单与右键菜单里常驻(actionMenuContent),可达性不受影响。
+                    // opacity-0 只隐藏视觉:命中区与无障碍元素还在,不可见时一并关掉,
+                    // 否则会点空白误触置顶、VoiceOver 读出屏幕上不存在的按钮(置顶入口在溢出/右键菜单常驻)。
                     .allowsHitTesting(isPinned || isHovered)
                     .accessibilityHidden(isPinned || isHovered == false)
                     .accessibilityLabel(isPinned ? "取消置顶" : "置顶仓库")
@@ -199,9 +186,7 @@ struct WorkplaceRepositoryRowView: View {
                             .font(.body.weight(.medium))
                             .lineLimit(1)
                             .fixedSize(horizontal: false, vertical: true)
-                            // 双击手势只挂在仓库名上,不再罩住整张卡片:
-                            // 此前整卡的双倍 tap 会与行内按钮(Pull/提交记录/打开方式…)
-                            // 的手势竞争,双击按钮时可能顺带弹出分支面板。
+                            // 双击手势只挂仓库名:整卡双 tap 会与行内按钮手势竞争,双击按钮可能顺带弹分支面板。
                             .onTapGesture(count: 2) {
                                 guard branchMenuDisabled == false else { return }
                                 showingBranchMenu = true
@@ -235,19 +220,16 @@ struct WorkplaceRepositoryRowView: View {
                                         onSwitchBranch(branch)
                                     },
                                     onCreateBranch: { branch, base in
-                                        // 同 onSwitchBranch:直关已发生,兑底同步后派发。
                                         showingBranchMenu = false
                                         onCreateBranch(branch, base)
                                     },
-                                    // 删除分支保持弹窗打开:操作完成后列表随分支快照刷新,
-                                    // 被删分支从列表消失(与 Stash 列表行为一致)。
+                                    // 删除分支保持弹窗打开:操作完成后列表随分支快照刷新,被删分支从列表消失。
                                     onDeleteBranch: onDeleteBranch,
                                     onDeleteRemoteBranch: onDeleteRemoteBranch,
                                     // repository 为 nil(配置已被删/未纳管)时传 nil 回调:
                                     // 面板按"回调为 nil"隐藏 MR 按钮——画出来却点了没反应比不画更糟。
                                     onCreateMergeRequestForBranch: repository == nil ? nil : { targetBranch in
                                         guard let repository else { return }
-                                        // 直关已由面板内容完成,此处 binding 写入仅兜底同步。
                                         showingBranchMenu = false
                                         onCreateMergeRequestForBranch(repository, targetBranch)
                                     },
@@ -264,8 +246,7 @@ struct WorkplaceRepositoryRowView: View {
                                         remoteBranchesTask = nil
                                         // 代际作废:旧任务的迟到回写不再触碰加载态/名单。
                                         remoteBranchesGeneration += 1
-                                        // 取消加载后复位加载态:否则再次打开弹窗时
-                                        // isLoadingRemoteBranches 卡在 true,列表永远显示加载中。
+                                        // 取消后必须复位加载态:否则再次打开弹窗时 isLoadingRemoteBranches 卡在 true。
                                         isLoadingRemoteBranches = false
                                     }
                                 )
@@ -326,10 +307,8 @@ struct WorkplaceRepositoryRowView: View {
                                     } label: {
                                         Image(systemName: "arrow.up.right.square")
                                     }
-                                    // borderlessButton 的 Menu 由 NSButton 渲染标签,会无视
-                                    // .foregroundStyle(.secondary) 而呈现黑色,与单目标分支时的
-                                    // Button 形态(浅灰)不一致;buttonStyle(.plain) 下标签由
-                                    // SwiftUI 渲染,颜色/字号与 ccspaceIconActionButton 对齐
+                                    // borderlessButton 的 Menu 由 NSButton 渲染标签,无视 .foregroundStyle(.secondary) 呈黑色;
+                                    // .plain 下标签交回 SwiftUI 渲染,颜色/字号与单目标 Button(ccspaceIconActionButton)对齐。
                                     .buttonStyle(.plain)
                                     .menuIndicator(.hidden)
                                     .controlSize(.small)
@@ -404,7 +383,7 @@ struct WorkplaceRepositoryRowView: View {
                         }
 
                         Menu {
-                            // 与右键菜单同理:macOS 26 默认不渲染 SF Symbol 图标。
+                            // macOS 26 默认不渲染 Label 的 SF Symbol 图标,显式要求 titleAndIcon(与右键菜单同款)。
                             actionMenuContent(rowState: rowState)
                                 .labelStyle(.titleAndIcon)
                         } label: {
@@ -432,7 +411,6 @@ struct WorkplaceRepositoryRowView: View {
                 }
             }
         }
-        // 双击打开分支面板的手势挂在仓库名上(见 displayName),不挂整张卡片。
         .onHover { isHovered = $0 }
         .contextMenu {
             // macOS 26 右键菜单默认不渲染 Label 的 SF Symbol 图标,显式要求标题+图标。
@@ -462,8 +440,7 @@ struct WorkplaceRepositoryRowView: View {
         } message: {
             Text(abortConfirmationState.message)
         }
-        // 抽成 modifier:整个 body 已很长,再内联一个带 switch 的 alert 会让
-        // 类型检查超时("unable to type-check this expression in reasonable time")。
+        // 带 switch 的 alert 内联进长 body 会类型检查超时,抽成 modifier。
         .modifier(
             BranchDeleteConfirmationModifier(
                 candidate: $branchDeleteCandidate,
@@ -487,8 +464,7 @@ struct WorkplaceRepositoryRowView: View {
                 }
             )
         }
-        // 确认弹窗同样挂在行上而不是 popover 内——理由与分支删除确认一致:
-        // transient popover 会被 alert 的焦点转移连带关闭。
+        // 确认弹窗挂行而非 popover:transient popover 会被 alert 的焦点转移连带关闭(与分支删除确认同理)。
         .alert(
             stashDropConfirmationTitle,
             isPresented: stashDropConfirmationBinding
@@ -512,11 +488,11 @@ struct WorkplaceRepositoryRowView: View {
                 if showingStashList {
                     loadStashList()
                 }
-                // 删除远端分支等联网操作完成后,分支面板若停在远端页签则重载,让被删分支消失。
+                // 删除远端分支等联网操作完成后,分支面板若停在远端页签则重载。
                 if showingBranchMenu, remoteBranches != nil {
                     loadRemoteBranches()
                 }
-                // 切分支/合并完成后角标数据(领先落后/时间)已变化,弹窗开着就一并刷新。
+                // 切分支/合并完成后角标数据已变化,弹窗开着就一并刷新。
                 if showingBranchMenu {
                     loadBranchMetadata()
                 }
@@ -549,12 +525,10 @@ struct WorkplaceRepositoryRowView: View {
         )
     }
 
-    /// 菜单收起动画结束后再弹 popover:过早呈现会被系统丢弃。
-    /// 延迟任务持句柄,可在视图消失时取消,避免对已销毁行的迟到状态写入。
+    /// 菜单收起动画结束后再弹 popover:过早呈现会被系统丢弃;句柄可在视图消失时取消,避免迟到写回。
     private func presentPopoverAfterMenuDismissal(_ present: @escaping @MainActor () -> Void) {
         popoverPresentationTask?.cancel()
-        // @MainActor:延迟回来后写 @State(popoverPresentationTask)并调 present();
-        // present 本就以 @MainActor 传入,任务不标主执行器则自相矛盾。
+        // 任务必须标 @MainActor:延迟回来后要写 @State 并调 present(present 本就以 @MainActor 传入)。
         popoverPresentationTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(150))
             guard !Task.isCancelled else { return }
@@ -563,7 +537,6 @@ struct WorkplaceRepositoryRowView: View {
         }
     }
 
-    /// 打开提交记录独立窗口(与 Diff 窗口同模式,浏览与操作在窗口内自持)。
     private func openCommitLogWindow() {
         openWindow(value: CommitLogWindowPayload(
             repositoryName: displayName,
@@ -571,7 +544,6 @@ struct WorkplaceRepositoryRowView: View {
         ))
     }
 
-    /// 打开分支比较独立窗口:初始为"默认分支 → 当前分支",两侧均可再切换。
     private func openBranchCompareWindow() {
         openWindow(value: BranchCompareWindowPayload(
             repositoryName: displayName,
@@ -581,11 +553,7 @@ struct WorkplaceRepositoryRowView: View {
         ))
     }
 
-    /// popover 打开时按需加载远端分支;关闭时取消。
-    /// 远端分支名单加载:缓存优先 + 后台刷新(stale-while-revalidate)。
-    /// 上一次的名单保留展示,后台 ls-remote 刷新,回来后原位替换——
-    /// 此前每次打开弹窗都清空重拉,远端页签要么白屏等网络、要么加载态
-    /// 与列表互相顶,网络慢时体验为"特别慢且没有加载动画"。
+    /// 远端分支名单加载:缓存优先 + 后台刷新(stale-while-revalidate),旧名单保留展示,ls-remote 回来后原位替换。
     /// 首次(无缓存)才显示整块加载态;刷新中的指示在 header 的刷新按钮位置。
     private func loadRemoteBranches() {
         guard presentationState.canSwitchBranch else { return }
@@ -593,7 +561,6 @@ struct WorkplaceRepositoryRowView: View {
         remoteBranchesTask?.cancel()
         remoteBranchesTask = nil
         remoteBranchesGeneration += 1
-        // 不清空旧名单:有缓存就先展示旧数据,刷新回来后原位替换(见函数注释)。
         isLoadingRemoteBranches = true
         let generation = remoteBranchesGeneration
         let localPath = state.localPath
@@ -602,10 +569,8 @@ struct WorkplaceRepositoryRowView: View {
         remoteBranchesTask = Task {
             let branches = await infoService.remoteBranchSuggestions(localPath: localPath, configuredURL: configuredURL)
             guard !Task.isCancelled else {
-                // 被取消也要复位加载态:isLoadingRemoteBranches 已置 true,
-                // 不复位会让下次打开的弹窗卡在加载指示上。
-                // 但只在本任务仍是当前代际时复位:旧任务迟到清理若把新任务
-                // 刚置的 true 打回 false,远端页签会短暂显示"空列表+重试"。
+                // 被取消也要复位加载态,否则下次弹窗卡在加载指示;
+                // 但只在本任务仍是当前代际时复位:旧任务迟到清理会打回新任务刚置的 true。
                 await MainActor.run {
                     if generation == remoteBranchesGeneration {
                         isLoadingRemoteBranches = false
@@ -613,16 +578,12 @@ struct WorkplaceRepositoryRowView: View {
                 }
                 return
             }
-            // 归一(去重+本地化排序)在取数回来后做一次,且下沉 Task.detached:
-            // View 整类型被推断为 @MainActor,这里的 Task 继承主执行器,上千分支的
-            // 排序留在主线程会卡住 UI(设置页 MR 面板同一口径)。
-            // branches 为 nil = 本次探测失败(区别于 [] 的"远端确无分支"):
-            // 沿用旧名单,失败只由加载态收口体现,不把 stale-while-revalidate
-            // 的缓存一次网络抖动打成空列表。
+            // 归一(去重+排序)下沉 Task.detached:View 推断为 @MainActor,此 Task 继承主执行器,
+            // 上千分支排序留在主线程会卡 UI。branches 为 nil = 探测失败(区别于 [] 的"确无分支"):沿用旧名单。
             var normalized: [String]?
             if let branches {
                 normalized = await Task.detached(priority: .userInitiated) {
-                    BranchListNormalization.remoteBranches(branches)
+                    BranchListNormalization.normalized(branches)
                 }.value
             }
             await MainActor.run {
@@ -635,7 +596,7 @@ struct WorkplaceRepositoryRowView: View {
         }
     }
 
-    /// popover 打开时按需加载分支元数据(时间/领先落后角标);失败静默,行内不展示角标即可。
+    /// 加载分支元数据(角标);失败静默,行内不展示角标即可。
     private func loadBranchMetadata() {
         branchMetadataTask?.cancel()
         branchMetadataGeneration += 1
@@ -679,7 +640,6 @@ struct WorkplaceRepositoryRowView: View {
         }
     }
 
-    /// 在独立窗口中打开工作区未提交改动的 diff。
     private func presentWorkingDirectoryDiff() {
         openDiffWindow(
             title: "未提交改动",
@@ -703,15 +663,12 @@ struct WorkplaceRepositoryRowView: View {
             Button {
                 onCreateMergeRequest(repository, branch)
             } label: {
-                // 默认分支不加星标(分支列表一律裸名,
-                // 纯文字菜单里为它留一列图标只会多占缩进)。
                 Text(branch == currentBranch ? "\(branch)（当前分支）" : branch)
             }
         }
     }
 
-    /// 菜单内容(溢出菜单与右键菜单共用)是展示状态的最重消费者,
-    /// 由调用方(body)求值一次后传入,不在内部逐项重建 presentationState。
+    /// 菜单(溢出与右键共用)是展示状态的最重消费者:presentationState 由 body 求值一次后传入,不逐项重建。
     /// 参数命名 rowState:函数内仍需访问存储属性 state(RepositorySyncState),不能遮蔽。
     @ViewBuilder
     private func actionMenuContent(
@@ -750,8 +707,6 @@ struct WorkplaceRepositoryRowView: View {
             }
             .disabled(!rowState.canPullLatest)
         }
-        // 头部 .webActions 组仅未克隆(本地组缺席)时兜底渲染网页动作;已克隆时
-        // 由 localActionMenuItems 函数体内的插槽渲染(分支比较之后)。
         ForEach(rowState.menuGroups, id: \.self) { group in
             switch group {
             case .webActions:
@@ -857,8 +812,6 @@ struct WorkplaceRepositoryRowView: View {
             Label("分支比较", systemImage: "arrow.left.arrow.right")
         }
         .ccspaceQuickHelp("打开分支比较窗口：默认分支与当前分支的差异")
-        // 网页动作在本地组内的插槽:仅已克隆仓库渲染(排在分支比较之后);
-        // 未克隆时本地组缺席,由菜单头部的独立 .webActions 组兜底,不会丢失。
         if rowState.canOpenLocalActions {
             webActionMenuItem(rowState: rowState)
         }
@@ -900,9 +853,8 @@ struct WorkplaceRepositoryRowView: View {
     private func webActionMenuItem(
         rowState: WorkplaceRepositoryRowPresentationState
     ) -> some View {
-        // 打开仓库主页只依赖仓库配置(不要求本地目录存在):未克隆时是菜单里
-        // 唯一直达远端网页的入口(头部 .webActions 组兜底);已克隆时由本地组内
-        // 插槽调用本函数,排在分支比较之后、Stash 块之前。两处互斥,恒出现一次。
+        // 打开仓库主页只依赖仓库配置(不要求本地目录):未克隆走头部 .webActions 组兜底,
+        // 已克隆走本地组内插槽(分支比较之后)。两处互斥,恒出现一次。
         if rowState.canOpenRepositoryWeb, let repository {
             Button {
                 onOpenRepositoryWeb(repository)
@@ -918,7 +870,7 @@ struct WorkplaceRepositoryRowView: View {
         rowState: WorkplaceRepositoryRowPresentationState
     ) -> some View {
         Button(role: .destructive) {
-            // 目录探测收敛到触发时刻,每次点击只 stat 一次,body 路径零 IO。
+            // 目录探测收敛到触发时刻:body 路径零 IO(见 deleteConfirmation 注释)。
             deleteConfirmation = WorkplaceRepositoryDeleteConfirmationState(
                 repositoryName: displayName,
                 localPath: state.localPath,
@@ -935,11 +887,9 @@ struct WorkplaceRepositoryRowView: View {
 struct RepositoryBranchPill: View {
     let title: String
     let isDefault: Bool
-    /// 左侧分支图标开关:标题栏胶囊场景(提交记录/分支比较)分支名已自说明,
-    /// 图标会让文字与左圆弧的间隙明显大于右侧,由调用方关闭。
+    /// 标题栏胶囊场景分支名已自说明,图标会让文字与左圆弧间隙明显大于右侧,由调用方关闭。
     let showsIcon: Bool
-    /// 尺寸档:仓库行用 `.prominent`(字/图标/内边距整体放大一档),
-    /// 标题栏与设置页保持 `.compact` 原规格——几处版式各自定稿过,不连带变化。
+    /// 仓库行用 .prominent,标题栏与设置页保持 .compact:几处版式各自独立,改其一不连带其余。
     enum Size {
         case compact
         case prominent
@@ -1090,8 +1040,7 @@ struct RepositoryBranchStatusSummary {
         if let branchStatus {
             var pills: [RepositoryBranchStatePillModel] = []
             if branchStatus.hasConflicts {
-                // 冲突是"未提交"的子集且更紧急:此时不再展示"未提交" pill,避免两个
-                // 都可点但语义重叠的入口并列。
+                // 冲突是"未提交"的子集且更紧急:此时不再展示"未提交" pill,避免两个可点的重叠入口并列。
                 pills.append(.init(
                     title: "冲突 \(branchStatus.conflictCount) 个",
                     tint: .red,
@@ -1144,9 +1093,8 @@ struct RepositoryBranchStatusSummary {
             return [.init(title: "未克隆", tint: .secondary, quickHelp: "仓库尚未克隆到本地")]
         case .failed:
             return [.init(title: "异常", tint: .red, quickHelp: "上次操作失败，可尝试重试")]
-        case .success:
-            return [.init(title: "状态未知", tint: .secondary, quickHelp: nil)]
-        case .cloning, .pulling, .switching, .removing:
+        case .success, .cloning, .pulling, .switching, .removing:
+            // 进行中由 body 的 activityTitle 分支承接,success 且无快照走 shimmer;此处不出 pill。
             return []
         }
     }
@@ -1270,12 +1218,8 @@ private extension SyncStatus {
     }
 }
 
-/// 删除分支确认弹窗,由**行**承载而不是分支 popover 内部:
-/// popover 是 transient behavior,alert 弹出时的焦点切换会把 popover 连带关闭,
-/// alert 随之消失,甚至出现"点了取消但删除仍被执行"的窗口期。删除分支不可恢复,
-/// 确认必须挂在稳定的宿主视图上(与 Stash 删除确认、中断操作确认一致)。
-/// internal 并供 BranchSwitchPopoverView 的无宿主回退路径复用:
-/// 此前 popover 内部维护着逐行复制的同款 alert,两处行为被迫人工同步。
+/// 删除分支确认弹窗,由**行**承载而不是分支 popover 内部:transient popover 会被 alert 弹出的
+/// 焦点切换连带关闭,删除分支不可恢复——确认必须挂在稳定宿主上(与 Stash/中断操作确认一致)。
 struct BranchDeleteConfirmationModifier: ViewModifier {
     @Binding var candidate: BranchDeleteCandidate?
     let onDeleteBranch: (String, String?) -> Void

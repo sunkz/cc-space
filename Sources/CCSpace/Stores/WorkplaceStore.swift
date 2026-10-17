@@ -25,8 +25,8 @@ enum WorkplaceStoreError: LocalizedError, Equatable {
     case duplicatePath
     case pathAlreadyExistsOnDisk
     case workplaceNotFound
-    /// 删除场景专用:目录已删成功后,记录恰在此前被磁盘刷新等并发路径移除——
-    /// 删除目标其实已达成,不能沿用 workplaceNotFound 的"更改未保存"文案误导用户。
+    /// 删除场景专用:目录已删成功后记录恰在此前被并发路径移除——目标已达成,不能沿用
+    /// workplaceNotFound 的"更改未保存"文案误导用户。
     case workplaceAlreadyRemoved
 
     var errorDescription: String? {
@@ -57,28 +57,20 @@ final class WorkplaceStore: ObservableObject {
     @Published private(set) var syncStates: [RepositorySyncState]
     private let fileStore: JSONFileStore
 
-    /// 跨 Store 原子提交(RemoveRepository/updateRootPath)的运行时前提校验入口:
-    /// 正确性依赖两个 Store 共用同一数据目录,注入分叉时在提交前拦截而非静默错写。
+    /// 跨 Store 原子提交(removeRepository / updateRootPath)的前提校验入口:正确性依赖两个 Store
+    /// 共用同一数据目录,注入分叉时在提交前拦截而非静默错写。
     var rootDirectoryForCrossStoreCheck: URL { fileStore.rootDirectory }
     private var debouncedSyncStatesWriteTask: Task<Void, Never>?
     private let syncStatesDebounceInterval: Duration
-    /// 写盘失败的重试次数(sync-states 防抖写专用):成功或用户下一次
-    /// sync-states 变更归零,封顶见 `maxFlushRetryCount`。
-    /// 刻意只在 sync-states 自身写成功时归零——workplaces 单文件写成功与
-    /// sync-states 的写失败无关,共用一个预算会让"交替写两类数据"把重试永远重置、永不收敛。
-    /// private(set) 仅为测试可读(断言重试有界)。
+    /// sync-states 防抖写的重试预算:只在 sync-states 自身写成功时归零——workplaces 单文件写成功与它无关,
+    /// 共用一个预算会让"交替写两类数据"把重试永远重置、永不收敛。
     private(set) var flushRetryCount = 0
     /// 重试上限:超过即放弃,避免"固定间隔同步写 + 一条 error 日志"永不收敛。
     static let maxFlushRetryCount = 5
-    /// 重试基础间隔(秒),退避按 base×次数 线性增长(5s→10s→15s…);默认 5,
-    /// 仅测试注入更小值以缩短等待。
     private let flushRetryBaseSeconds: Int
 
-    /// 本次启动是否有持久化文件损坏并被重置为默认值。
-    ///
-    /// 置空本身是兜底,但下游的启动对账(pruneReferencesToRepositories 等)会把
-    /// "空集合"当成真实状态去清理其它文件里的关联数据,造成单个文件损坏级联
-    /// 清空另外两个健康文件。调用方应在任一 Store 处于恢复态时跳过破坏性对账。
+    /// 本次启动是否有持久化文件损坏并被重置为默认值。置空本身是兜底,但下游启动对账会把"空集合"当成
+    /// 真实状态去清理其它文件的关联数据 → 单文件损坏级联清空另外两个健康文件;恢复态须跳过破坏性对账。
     private(set) var didRecoverFromCorruptFile = false
 
     init(
@@ -89,12 +81,8 @@ final class WorkplaceStore: ObservableObject {
         self.fileStore = fileStore
         self.syncStatesDebounceInterval = syncStatesDebounceInterval
         self.flushRetryBaseSeconds = flushRetryBaseSeconds
-        // 逐元素抢救成功(而非"整个文件连 JSON 结构都不合法")时置位,init 末尾据此
-        // 立即把抢救出的子集回写磁盘。理由:`preserveCorruptFile` 会把原文件改名拿走,
-        // 若此时只把子集放进内存而不落盘,且本会话没有其它写盘动作(启动对账在恢复态
-        // 被显式跳过),文件就保持缺失——下次启动 `loadIfPresent` 见文件不存在直接返回
-        // 空列表、且 `didRecoverFromCorruptFile` 为 false,用户看到工作区/仓库凭空少一批
-        // 记录,连横幅都没有。回写让磁盘与内存一致,恢复态可被如实呈现。
+        // 抢救出的子集必须立即回写(preserveCorruptFile 已把原文件改名拿走):只留内存而本会话再无写盘时文件
+        // 保持缺失,下次启动直接返回空列表、didRecoverFromCorruptFile 也是 false,用户看不到任何异常提示。
         var salvagedSubsetNeedsRewrite = false
         do {
             self.workplaces = WorkplaceStore.deduplicatedWorkplaces(
@@ -149,44 +137,34 @@ final class WorkplaceStore: ObservableObject {
         }
     }
 
-    /// 按 `id`(workplaceID-repositoryID 组合键)去重,保留首个——与磁盘刷新的去重语义一致。
-    ///
-    /// sync-states.json 可能被旧版本 bug、手工编辑或逐元素容错解码引入重复行;
-    /// 下游按 id 构建字典时,`Dictionary(uniqueKeysWithValues:)` 遇到重复键会直接
-    /// precondition 失败 trap(启动必经路径,用户无自救)。加载时先收敛。
+    /// 按 `id`(workplaceID-repositoryID 组合键)去重保留首条。加载入口必须收敛:sync-states.json 可能因
+    /// 手工编辑或容错解码混入重复行,而下游按 id 建 `Dictionary(uniqueKeysWithValues:)` 遇重复键会 trap。
     nonisolated static func deduplicatedSyncStates(_ states: [RepositorySyncState]) -> [RepositorySyncState] {
         var seenKeys = Set<String>()
         return states.filter { seenKeys.insert($0.id).inserted }
     }
 
-    /// 按 `id` 去重保留首条(与 `deduplicatedSyncStates` 同理):手工编辑或容错
-    /// 抢救可能引入重复 id,首条占位会让 `mutateWorkplace` 的索引定位只命中第一条,
-    /// 第二条永不可达,且按 id 对位的回写/并发合并会把两行当成同一工作区。
+    /// 按 `id` 去重保留首条(同理):重复 id 会让 `mutateWorkplace` 只命中首条、第二条永不可达,
+    /// 且按 id 对位的回写/并发合并会把两行当成同一工作区。
     nonisolated static func deduplicatedWorkplaces(_ workplaces: [Workplace]) -> [Workplace] {
         var seenIDs = Set<UUID>()
         return workplaces.filter { seenIDs.insert($0.id).inserted }
     }
 
-    /// 启动时用文件系统事实校正 `hasLocalDirectory`。
-    ///
-    /// 该字段早期是"每次访问读盘"的计算属性,改成持久化 Bool 后老数据里没有这个 key,
-    /// 解码一律得到 false;而 false 会禁用详情页的刷新/打开/批量操作等一批入口。
-    /// 此前修正只依赖磁盘刷新,根目录不可用(网盘/外置盘未挂载)或启动后立刻切后台时
-    /// 可能一直不触发,表现为"仓库一直显示未克隆、按钮全灰"。这里在启动独立校正一次。
+    /// 启动时用文件系统事实校正 `hasLocalDirectory`:老数据没有这个 key、解码一律得到 false,而 false 会禁用
+    /// 详情页的刷新/打开/批量操作入口;只靠磁盘刷新时,根目录未挂载等场景可能一直不触发,故启动独立校正一次。
     func reconcileHasLocalDirectoryFlags() async {
-        // await 前固定快照,探测与回写都以同一份为准:存在性探测会挂起,
-        // 期间并发写入可能增删行,若按索引对位(await 前的行号套 await 后的数组)
-        // 会把 A 仓库的存在性写到 B 上并落盘。回写按稳定 id 匹配当前最新状态。
+        // await 前固定快照,回写按稳定 id 匹配当前最新状态:探测会挂起,期间并发写入可能增删行,
+        // 若按 await 前的行号套 await 后的数组,会把 A 仓库的存在性写到 B 上并落盘。
         let snapshot = syncStates
         let paths = snapshot.map(\.localPath)
         guard paths.isEmpty == false else { return }
-        // 根目录可能在网盘/外置盘上,存在性探测可能阻塞,移出主线程。
+        // 根目录可能在网盘/外置盘上,存在性探测会阻塞主线程,移出主线程。
         let exists = await Task.detached(priority: .utility) {
             paths.map { FileManager.default.fileExists(atPath: $0) }
         }.value
-        // 不用 uniqueKeysWithValues:sync-states.json 一旦混入重复组合键就会
-        // precondition 失败 trap(启动 .task 每次必跑,用户无自救)。循环构建,
-        // 重复键后者覆盖前者即可(同 updateRepositories 的导入防坑)。
+        // 不用 uniqueKeysWithValues:混入重复组合键就 precondition trap(启动 .task 每次必跑,用户无自救);
+        // 循环构建、重复键后者覆盖前者即可。
         var reconciledFlagsById = [String: Bool](minimumCapacity: snapshot.count)
         for (state, existsFlag) in zip(snapshot, exists) {
             reconciledFlagsById[state.id] = existsFlag
@@ -202,8 +180,7 @@ final class WorkplaceStore: ObservableObject {
         }
         guard correctedCount > 0 else { return }
         workplaceStoreLog.notice("event=has_local_directory_reconciled corrected=\(correctedCount, privacy: .public)")
-        // 内存按 key 增量合并,并发的其它行不会被这份快照覆盖;
-        // 注意落盘本身仍是整体替换(防抖写盘写全量 sync-states.json),由 flush 兜底。
+        // 内存按 key 增量合并,并发的其它行不会被这份快照覆盖;落盘仍是整体替换(防抖写全量),由 flush 兜底。
         updateSyncStates(updated)
     }
 
@@ -247,25 +224,18 @@ final class WorkplaceStore: ObservableObject {
         }
     }
 
-    /// 内存先行、同步写盘:写盘成功才改内存,失败直接抛给调用方回滚。
-    /// 已知代价:每次写都是一次同步磁盘 I/O,数据目录在外置盘/网盘上时可能阻塞
-    /// 主线程数秒。刻意保持同步语义——跨 Store 原子提交、防抖与失败重试都依赖
-    /// "写盘与状态更新在同一主线程上顺序发生",改成后台队列会牵动失败回滚时序。
+    /// 内存先行、同步写盘:写盘成功才改内存,失败直接抛给调用方回滚。刻意保持同步语义——跨 Store 原子
+    /// 提交、防抖与失败重试都依赖"写盘与状态更新在同一主线程顺序发生",改到后台队列会牵动失败回滚时序。
     private func persistWorkplaces(_ newWorkplaces: [Workplace]) throws {
         try fileStore.save(newWorkplaces, as: "workplaces.json")
         workplaces = newWorkplaces
-        // 不重置 flushRetryCount:那是 sync-states 防抖写的重试预算,
-        // 与本文件的写成功与否无关(见属性注释)。
+        // 不重置 flushRetryCount:那是 sync-states 防抖写的重试预算,与本文件的写成功与否无关。
     }
 
-    /// 防抖持久化:内存立即生效,写盘延后合并。
-    /// 注意:此路径**不抛错**——内存赋值与延后写盘都不会失败;唯一的失败点是
-    /// 延后的写盘,已由 `flushSyncStates` 记录 `flush_sync_states_failed` 日志兜底,
-    /// 不存在静默丢失。因此 replaceSyncStates/updateSyncState(s)/setSyncStatus 均
-    /// 不再声明 throws(签名诚实)。
+    /// 防抖持久化:内存立即生效,写盘延后合并。此路径**不抛错**——唯一失败点是延后的写盘,已由
+    /// `flushSyncStates` 记录 `flush_sync_states_failed` 兜底,不存在静默丢失,故调用方不必声明 throws。
     private func persistSyncStates(_ newSyncStates: [RepositorySyncState]) {
         syncStates = newSyncStates
-        // 用户变更:失败重试的退避从头计起。
         flushRetryCount = 0
         scheduleDebouncedSyncStatesPersist()
     }
@@ -299,10 +269,8 @@ final class WorkplaceStore: ObservableObject {
         }
     }
 
-    /// 写盘失败(磁盘满/权限异常)后按 base×次数 退避重试(5s→10s→15s…),
-    /// 最多 `maxFlushRetryCount` 次,超限放弃:不重试则内存与文件无限期背离,
-    /// 崩溃即丢这段时间的全部状态变更;但无限重试同样是每 5s 一次同步写加一条
-    /// error 日志、永不收敛。重试成功或用户下一次变更会把计数归零重新开始。
+    /// 写盘失败(磁盘满/权限异常)后按 base×次数 退避重试(5s→10s→15s…),最多 `maxFlushRetryCount` 次:
+    /// 不重试则内存与文件无限期背离、崩溃即丢掉这段时间的全部变更,无限重试则每 5s 一次同步写永不收敛。
     private func scheduleFlushRetry() {
         guard debouncedSyncStatesWriteTask == nil else { return }
         guard flushRetryCount < Self.maxFlushRetryCount else {
@@ -331,11 +299,8 @@ final class WorkplaceStore: ObservableObject {
         applyPersistedState(workplaces: newWorkplaces, syncStates: newSyncStates)
     }
 
-    /// 预生成 workplaces/sync-states 两份文档(不写盘)。
-    /// 供跨 Store 的原子提交组合使用:调用方(如 RepositoryStore.removeRepository、
-    /// SettingsStore.updateRootPath)把这些文档和自己的文档合并后一次
-    /// `JSONFileStore.save(documents)` 落盘,失败整体回滚,避免多文件两阶段写的中间态。
-    /// 注意:要求双方共用同一个数据目录(生产环境由 RootSplitView 注入同一 fileStore)。
+    /// 预生成 workplaces/sync-states 两份文档(不写盘),供跨 Store 的原子提交组合使用:调用方
+    /// (RepositoryStore.removeRepository、SettingsStore.updateRootPath)合并后一次落盘,失败整体回滚。
     func persistenceDocuments(
         workplaces newWorkplaces: [Workplace],
         syncStates newSyncStates: [RepositorySyncState]
@@ -346,8 +311,7 @@ final class WorkplaceStore: ObservableObject {
         ]
     }
 
-    /// 文档已由调用方原子提交成功后,把状态应用到内存(取消待执行的防抖写盘,
-    /// 防止旧快照稍后覆盖新状态)。与 `persistenceDocuments` 配对使用。
+    /// 文档已由调用方原子提交成功后应用到内存,并取消待执行的防抖写盘(否则旧快照稍后会覆盖新状态)。
     func applyPersistedState(
         workplaces newWorkplaces: [Workplace],
         syncStates newSyncStates: [RepositorySyncState]
@@ -435,80 +399,9 @@ final class WorkplaceStore: ObservableObject {
         return workplace
     }
 
-    /// 更新工作区选中的仓库集合。
-    /// `repositories` 必须显式传入(不给默认值):缺省空数组会静默跳过
-    /// 新勾选仓库的 sync state 生成,造成"选了但没有状态"的隐性数据缺失。
-    func updateRepositories(
-        for workplaceID: UUID,
-        selectedRepositoryIDs: [UUID],
-        repositories: [RepositoryConfig]
-    ) throws {
-        // 记录找不到不能静默 return:勾选的仓库集合没生效必须让调用方知道。
-        guard let index = workplaces.firstIndex(where: { $0.id == workplaceID }) else {
-            throw WorkplaceStoreError.workplaceNotFound
-        }
-        let selectedSet = Set(selectedRepositoryIDs)
-        let workplacePath = workplaces[index].path
 
-        var updatedWorkplaces = workplaces
-        updatedWorkplaces[index].selectedRepositoryIDs = selectedRepositoryIDs
-        updatedWorkplaces[index].updatedAt = .now
-        updatedWorkplaces[index].pinnedRepositoryIDs = Self.sanitizedPinnedIDs(
-            updatedWorkplaces[index].pinnedRepositoryIDs,
-            against: selectedRepositoryIDs
-        )
-
-        var updatedSyncStates = syncStates.filter {
-            $0.workplaceID != workplaceID || selectedSet.contains($0.repositoryID)
-        }
-
-        let existingSyncStateRepoIDs = Set(
-            syncStates.filter { $0.workplaceID == workplaceID }.map(\.repositoryID)
-        )
-        let newlyAddedIDs = selectedSet.subtracting(existingSyncStateRepoIDs)
-        if !newlyAddedIDs.isEmpty {
-            // 导入的备份 JSON 理论上可能含重复 id,uniqueKeysWithValues 会直接 trap;
-            // 循环构建时后者覆盖前者即可。
-            var reposByID = Dictionary<UUID, RepositoryConfig>(minimumCapacity: repositories.count)
-            for repository in repositories {
-                reposByID[repository.id] = repository
-            }
-            for repoID in newlyAddedIDs {
-                // 仓库名来自用户配置,必须经 LocalPathSafety 校验后拼路径;
-                // 校验失败(如名称含路径分隔符)或配置缺失时跳过,不做绕过安全防线的裸拼接。
-                // 跳过必须留痕(对齐 updateSyncState 的策略):否则"选了但无状态行"无从排查。
-                guard let repoName = reposByID[repoID]?.repoName else {
-                    workplaceStoreLog.error(
-                        "event=sync_state_skipped reason=repository_config_missing workplace_id=\(workplaceID, privacy: .public) repository_id=\(repoID, privacy: .public)"
-                    )
-                    continue
-                }
-                guard let localPath = try? Self.repositoryPath(
-                    workplacePath: workplacePath,
-                    repositoryName: repoName
-                ) else {
-                    workplaceStoreLog.error(
-                        "event=sync_state_skipped reason=invalid_repository_name workplace_id=\(workplaceID, privacy: .public) repository_id=\(repoID, privacy: .public)"
-                    )
-                    continue
-                }
-                updatedSyncStates.append(RepositorySyncState(
-                    workplaceID: workplaceID,
-                    repositoryID: repoID,
-                    status: .idle,
-                    localPath: localPath,
-                    lastError: nil,
-                    lastSyncedAt: nil
-                ))
-            }
-        }
-
-        try persist(workplaces: updatedWorkplaces, syncStates: updatedSyncStates)
-    }
-
-    /// 启动期对账:为"工作区已选中但 sync state 丢失"的仓库补建 idle 状态
-    /// (如 sync-states.json 曾损坏被重置),避免工作区永久不可用。
-    /// 仓库配置缺失或名称校验失败时跳过该仓库,留待用户编辑时生成。
+    /// 启动期对账:为"工作区已选中但 sync state 丢失"的仓库补建 idle 状态(如 sync-states.json 曾损坏被
+    /// 重置),避免工作区永久不可用;仓库配置缺失或名称非法时跳过该仓库,留待用户编辑时生成。
     func backfillMissingSyncStates(repositories: [RepositoryConfig]) throws {
         var reposByID = Dictionary<UUID, RepositoryConfig>(minimumCapacity: repositories.count)
         for repository in repositories {
@@ -522,8 +415,8 @@ final class WorkplaceStore: ObservableObject {
                 syncStates.filter { $0.workplaceID == workplace.id }.map(\.repositoryID)
             )
             for repositoryID in workplace.selectedRepositoryIDs where existingRepoIDs.contains(repositoryID) == false {
-                // 跳过必须留痕(对齐 updateSyncState 的策略):启动对账静默吞掉
-                // 配置缺失/名称非法的仓库会让"选中但无状态行"在现场无从排查。
+                // 跳过必须留痕(对齐 updateSyncState 的策略):启动对账静默吞掉配置缺失/名称非法的仓库,
+                // "选中但无状态行"在现场就无从排查。
                 guard let repository = reposByID[repositoryID] else {
                     workplaceStoreLog.error(
                         "event=sync_state_backfill_skipped reason=repository_config_missing workplace_id=\(workplace.id, privacy: .public) repository_id=\(repositoryID, privacy: .public)"
@@ -554,15 +447,11 @@ final class WorkplaceStore: ObservableObject {
         try persistSyncStatesImmediately(updatedSyncStates)
     }
 
-    /// 启动期对账:清理孤儿引用
-    /// (跨 Store 两阶段持久化的中间失败窗口会留下:仓库已删,但工作区
-    /// 的 selectedRepositoryIDs / pinnedRepositoryIDs / sync states 还引用着它)。
-    /// 同时清理 workplaceID 已不在 workplaces 集合内的 sync state——
-    /// 此类记录没有任何 UI 入口,不清理会在 sync-states.json 里永久累积。
+    /// 启动期对账:清理孤儿引用(跨 Store 两阶段持久化的中间失败窗口会留下"仓库已删、工作区仍引用它"),
+    /// 同时清理 workplaceID 已不在集合内的 sync state——这类记录没有 UI 入口,不清理会在文件里永久累积。
     func pruneReferencesToRepositories(validRepositoryIDs: Set<UUID>) throws {
-        // 守卫:传入的有效集合为空、但内存里明明还引用着仓库时,说明是上游数据异常
-        // (持久化损坏 / 加载失败)而非"用户真的把仓库都删了"。此时直接放弃,避免把
-        // 健康的工作区关联数据一并清空。
+        // 有效集合为空但内存仍引用着仓库 ⇒ 上游数据异常(损坏/加载失败),不是"用户删光了仓库":
+        // 此时直接放弃,避免把健康的工作区关联数据一并清空。
         let referencedIDs = Set(workplaces.flatMap(\ .selectedRepositoryIDs))
             .union(Set(workplaces.flatMap(\ .pinnedRepositoryIDs)))
             .union(Set(syncStates.map(\ .repositoryID)))
@@ -666,18 +555,15 @@ final class WorkplaceStore: ObservableObject {
         }
 
         var updatedWorkplaces = workplaces
-        // **字段所有权**:编辑流程只拥有 name/path/selectedRepositoryIDs/branch。
-        // 其余字段一律取 Store 里的当前值,而不是调用方入口快照带回来的旧值——
-        // 改名+克隆要等数分钟,期间用户在侧栏置顶/归档、行上勾选仓库置顶都会整条写盘,
-        // 这里若整条覆盖回入口快照,那些操作被静默抹掉且没有任何痕迹可查。
+        // **字段所有权**:编辑流程只拥有 name/path/selectedRepositoryIDs/branch,其余取 Store 当前值。
+        // 改名+克隆要等数分钟,期间用户的置顶/归档若被整条覆盖回入口快照,会被静默抹掉且无痕迹可查。
         let current = workplaces[index]
         var sanitizedWorkplace = workplace
         sanitizedWorkplace.isPinned = current.isPinned
         sanitizedWorkplace.isArchived = current.isArchived
         sanitizedWorkplace.pinnedRepositoryIDs = current.pinnedRepositoryIDs
         sanitizedWorkplace.createdAt = current.createdAt
-        // 置顶清单按**本轮最终勾选**重新收敛:编辑可能摘除了某个仓库,
-        // 保留项里指向已取消勾选仓库的 id 必须跟着摘掉。
+        // 置顶清单按本轮最终勾选收敛:编辑可能摘除了某个仓库,指向它的 id 要跟着摘掉。
         sanitizedWorkplace.pinnedRepositoryIDs = Self.sanitizedPinnedIDs(
             sanitizedWorkplace.pinnedRepositoryIDs,
             against: sanitizedWorkplace.selectedRepositoryIDs
@@ -690,29 +576,6 @@ final class WorkplaceStore: ObservableObject {
         try persist(workplaces: updatedWorkplaces, syncStates: updatedSyncStates)
     }
 
-    /// 单行更新:行仍在则覆盖;行在 await 窗口内被去重/prune 掉但工作区仍在且仓库
-    /// 仍被选中,则补录(与 `updateSyncStates` 的补录语义一致),否则克隆/pull 的
-    /// 结果会永不落库。工作区记录已不存在时不补录(孤儿行没有任何 UI 入口),
-    /// 只留痕——本方法与批量版本一样不抛错(持久化走防抖写盘,不失败)。
-    func updateSyncState(_ state: RepositorySyncState) {
-        var updatedSyncStates = syncStates
-        if let index = updatedSyncStates.firstIndex(where: {
-            $0.workplaceID == state.workplaceID && $0.repositoryID == state.repositoryID
-        }) {
-            updatedSyncStates[index] = state
-            persistSyncStates(updatedSyncStates)
-            return
-        }
-        guard let workplace = workplaces.first(where: { $0.id == state.workplaceID }),
-              workplace.selectedRepositoryIDs.contains(state.repositoryID) else {
-            workplaceStoreLog.error(
-                "event=update_sync_state_dropped reason=workplace_missing workplace_id=\(state.workplaceID, privacy: .public) repository_id=\(state.repositoryID, privacy: .public)"
-            )
-            return
-        }
-        updatedSyncStates.append(state)
-        persistSyncStates(updatedSyncStates)
-    }
 
     func updateSyncStates(_ states: [RepositorySyncState]) {
         guard states.isEmpty == false else { return }
@@ -727,10 +590,8 @@ final class WorkplaceStore: ObservableObject {
                 updatedSyncStates[index] = state
                 continue
             }
-            // 未知 key 不能静默跳过:克隆完成走增量更新时,若该仓库的 state 行
-            // 在 await 期间被去重/prune 掉,静默跳过会让克隆结果不落库,
-            // UI 上该仓库永远没有状态行。仅补录仍属于当前选中仓库的行,
-            // 避免把已被移出工作区的仓库状态"复活"。
+            // 未知 key 不能静默跳过:该行若在 await 期间被去重/prune 掉,跳过会让克隆结果不落库、UI 永远
+            // 没有状态行。只补录仍属当前选中仓库的行,避免把已移出工作区的仓库状态"复活"。
             guard let workplace = workplaces.first(where: { $0.id == state.workplaceID }),
                   workplace.selectedRepositoryIDs.contains(state.repositoryID) else {
                 continue
@@ -757,14 +618,8 @@ final class WorkplaceStore: ObservableObject {
         persistSyncStates(updatedSyncStates)
     }
 
-    /// 清理"失败但本地目录仍在"的展示态(实际状态已在外部被修复,如在命令行处理完冲突)。
-    ///
-    /// 存在性探测可能落在网盘/外置盘上,单次 `fileExists` 就能阻塞数秒到数分钟,
-    /// 必须移出主线程(同 `reconcileHasLocalDirectoryFlags`)。探测结果按稳定 id
-    /// 回填到 await 之后的当前最新状态,不按 await 前的行号对位——探测挂起期间
-    /// 并发写入可能增删行。
-    /// 保持同步签名(调用方 RootSplitView 的回调是同步闭包):内部起 Task 承载
-    /// 探测与回填,本方法立即返回,不在主线程等待任何磁盘 I/O。
+    /// 清理"失败但本地目录仍在"的展示态(实际状态已在外部修复,如在命令行处理完冲突)。存在性探测可能落在
+    /// 网盘/外置盘上、单次 `fileExists` 就能阻塞数分钟,故移出主线程;签名保持同步(调用方回调是同步闭包)。
     func clearFailedStatusesWhereDirectoryExists(workplaceID: UUID) {
         let candidates = syncStates.filter { state in
             state.workplaceID == workplaceID && state.status == .failed
@@ -772,12 +627,8 @@ final class WorkplaceStore: ObservableObject {
         guard candidates.isEmpty == false else { return }
         let candidateIDs = candidates.map(\.id)
         let paths = candidates.map(\.localPath)
-        // 指纹:探测 Task 挂起期间,同一行可能又产生新的 .failed(新 lastError /
-        // 新 lastSyncedAt)。过期的探测结果只配清掉"探测时刻"的那份失败,
-        // 落库前按 id 比对指纹,不一致的行跳过清理,避免把新失败误打成 .success。
-        // 构建为 let 供 @Sendable Task 闭包按值捕获。指纹取 "lastError|
-        // lastSyncedAt 毫秒"拼接串作键——元组不 conform Equatable,直接比较编不过;
-        // 时间戳毫秒级+错误全文,碰撞可忽略。
+        // 指纹:探测 Task 挂起期间同一行可能又产生新的 .failed,过期结果只配清掉"探测时刻"那份失败;
+        // 落库前按 id 比对指纹(元组不 conform Equatable,故用拼接串),不一致的行跳过、避免误打成 .success。
         let fingerprintsByID = Dictionary<String, String>(
             candidates.map { state in
                 (state.id, "\(state.lastError ?? "|")\(state.lastSyncedAt.map { String(Int($0.timeIntervalSince1970 * 1000)) } ?? "nil")")
@@ -814,9 +665,8 @@ final class WorkplaceStore: ObservableObject {
         }
     }
 
-    /// 计算"删除某仓库所有工作区关联"后的目标状态(不写盘);无变化时返回 nil。
-    /// 供 RepositoryStore.removeRepository 把 repositories.json 与工作区文档
-    /// 合并为一次原子提交,消除两阶段写的中间失败窗口。
+    /// 计算"删除某仓库全部工作区关联"后的目标状态(不写盘),无变化返回 nil;供 RepositoryStore
+    /// removeRepository 把 repositories.json 与工作区文档合并成一次原子提交,消除两阶段写的中间失败窗口。
     func stateAfterRemovingRepositoryAssociations(
         repositoryID: UUID
     ) -> (workplaces: [Workplace], syncStates: [RepositorySyncState])? {
@@ -844,10 +694,8 @@ final class WorkplaceStore: ObservableObject {
     }
 
     func deleteWorkplace(_ workplaceID: UUID) throws {
-        // 对齐 removeRepository:不存在的 id 不触发两文件全量落盘,
-        // 也不把"删除成功"的假象传给调用方。
-        // 文案用 workplaceAlreadyRemoved:删除路径走到这里时目录通常已删除成功,
-        // 记录被并发移除意味着目标已达成,"更改未保存"是误导。
+        // 对齐 removeRepository:不存在的 id 不触发两文件全量落盘,也不把"删除成功"的假象传给调用方。
+        // 文案用 workplaceAlreadyRemoved:走到这里时目录通常已删除成功,记录被并发移除即目标已达成。
         guard workplaces.contains(where: { $0.id == workplaceID }) else {
             throw WorkplaceStoreError.workplaceAlreadyRemoved
         }
@@ -856,11 +704,8 @@ final class WorkplaceStore: ObservableObject {
         try persist(workplaces: updatedWorkplaces, syncStates: updatedSyncStates)
     }
 
-    /// 计算换根后的目标状态与迁移条数(不写盘);无需迁移时返回 nil。
-    /// 供 SettingsStore.updateRootPath 把 settings.json 与工作区文档合并为
-    /// 一次原子提交:换根"先迁记录再改设置"两步分开写盘,中间失败会留下
-    /// "记录指向新根而设置仍是旧根"的不一致,下次磁盘刷新会把部分工作区
-    /// 判为 missing 永久删除。
+    /// 计算换根后的目标状态与迁移条数(不写盘),无需迁移返回 nil;供 SettingsStore.updateRootPath 与
+    /// settings.json 一次原子提交——分开写盘失败会留下"记录指新根、设置仍是旧根",磁盘刷新据此永久删除。
     func rebasePlan(
         fromRoot oldRoot: String,
         toRoot newRoot: String
@@ -872,9 +717,8 @@ final class WorkplaceStore: ObservableObject {
               normalizedOldRoot != normalizedNewRoot else { return nil }
 
         var rebasedWorkplaces = workplaces
-        // 旧路径 → 新路径,只含真正被迁移的工作区。同步态跟随所属工作区迁移,
-        // 而不是各自对旧根求相对路径,否则嵌套根时已在新根下的工作区
-        // 其同步态会被二次嵌套。
+        // 同步态跟随所属工作区迁移(旧路径→新路径),而不是各自对旧根求相对路径:
+        // 否则嵌套根时已在新根下的工作区,其同步态会被二次嵌套。
         var rebasedPaths: [UUID: (oldPath: String, newPath: String)] = [:]
         for index in rebasedWorkplaces.indices {
             let currentPath = Self.normalizedPath(rebasedWorkplaces[index].path)
@@ -905,12 +749,8 @@ final class WorkplaceStore: ObservableObject {
         let normalizedPath = Self.normalizedPath(path)
         guard LocalPathSafety.isWithinDirectory(normalizedPath, rootPath: root) else { return nil }
         guard normalizedPath != root else { return nil }
-        // isWithinDirectory 解析 symlink + 大小写不敏感,可能"解析后"同前缀而原始串不同;
-        // 词法截取前必须确认原始串本身(大小写不敏感)以 root/ 开头,否则截取为空串或错位路径。
-        // 用 range(of:options:) 在原始串上定位前缀、按 range 截取:不能用
-        // lowercased().hasPrefix + dropFirst(root.count + 1)——lowercased() 对个别 Unicode
-        // (如 U+0130 "İ")会折叠出更多字符数,拿折叠串算出的偏移去截原始串必然错位;
-        // range 直接给出原始串中的真实边界。
+        // isWithinDirectory 解析 symlink 且大小写不敏感,可能"解析后"同前缀而原始串不同,故词法截取前必须
+        // 确认原始串以 root/ 开头;不能用 lowercased().hasPrefix + dropFirst——个别 Unicode(如 U+0130)
         guard let prefixRange = normalizedPath.range(
             of: root + "/",
             options: [.caseInsensitive]
@@ -918,9 +758,8 @@ final class WorkplaceStore: ObservableObject {
         return String(normalizedPath[prefixRange.upperBound...])
     }
 
-    /// 仅测试直接调用的落库入口。生产路径一律走 `RepositoryStore.commitDiskRefresh`
-    /// (workplaces/sync-states 与 repositories 单批原子提交);本方法只写前两份文档,
-    /// 单独使用会在两次写之间留出被并发整体覆写的窗口。新增生产调用点前请改走原子提交。
+    /// 仅测试直接调用的落库入口:本方法只写 workplaces/sync-states 两份文档,单独使用会在两次写之间留出
+    /// 被并发整体覆写的窗口;生产路径一律走 `RepositoryStore.commitDiskRefresh`(三份文档单批原子提交)。
     func applyDiskRefreshResult(_ result: WorkplaceDiskRefreshResult) {
         guard result.changed else { return }
         do {
@@ -933,13 +772,8 @@ final class WorkplaceStore: ObservableObject {
         }
     }
 
-    /// 用磁盘事实校正 workplaces/syncStates 的展示态(纯函数,便于测试)。
-    ///
-    /// - Parameter lockedPathKeys: `RepositoryOperationLock.inFlightPathKeys()` 的快照
-    ///   (canonical key)。命中豁免的路径**不做任何破坏性改写**:创建/改名/克隆/删除等
-    ///   长操作期间,"记录存在、目录暂缺"是正常中间态(记录先落库、目录后创建,或整树
-    ///   移动中),按这一刻的陈旧磁盘视图删除记录会造成不可逆的数据脱节——刷新结果
-    ///   等值重试机制也救不回来。
+    /// 用磁盘事实校正展示态(纯函数)。lockedPathKeys 是 `RepositoryOperationLock.inFlightPathKeys()` 快照:
+    /// 命中的路径**不做破坏性改写**——长操作期间"记录存在、目录暂缺"是正常中间态,按陈旧磁盘视图删记录不可逆。
     nonisolated static func diskRefreshResult(
         workplaces: [Workplace],
         syncStates: [RepositorySyncState],
@@ -959,26 +793,16 @@ final class WorkplaceStore: ObservableObject {
         var refreshedSyncStates = syncStates
         var changed = false
 
-        // Remove workplaces whose folders no longer exist
-        // (持锁/有瞬态进行中状态的长操作豁免:见函数注释)
-        // 全缺普查必须在"在飞豁免剔除之前":此前先剔除再比较总数,只要恰好有
-        // 1 个工作区在飞,根目录整体不可达(NAS 弹出等)时 allMissing 判定失效,
-        // 其余全部记录被当用户主动删除整库清掉——豁免是给误删兜底的,不能反过来
-        // 击穿兜底。
-        // 删除候选用逐记录 fileExists 探测,而非只看根目录一层的枚举集合:
-        // contentsOfDirectory 只枚举根下一级,嵌套在子目录下的工作区(换根 rebase
-        // 会产生多级路径)恒不在枚举集合里,旧实现会把"磁盘上明明还在"的工作区
-        // 当成用户删除而连记录带 sync states 一并清掉。探测失败(路径不可达)与
-        // 枚举为空同样落入候选,由 allMissing 兜底保住。
+        // 摘除目录已不存在的记录(持锁/瞬态进行中的长操作豁免:见函数注释)。全缺普查必须在剔除在飞豁免
+        // 之前:先剔再比总数的话,只要恰好有 1 个工作区在飞,根目录整体不可达时 allMissing 判定就失效。
         let fm = FileManager.default
-        // 删除候选与"全缺"兜底的分母都必须先按 rootPath 收敛。兜底防的是"根目录整体
-        // 不可达/换根"这类局部事件:根外的记录一旦也进分母,只要根外恰好还有任何一条
-        // 在盘上(换根后用户新建一个工作区即是此形态),`候选数 == 总数` 就不成立、
-        // 兜底整体失效,一次刷新就会把根下全部旧记录连同 sync states 永久删除。
-        // 根外记录不属于本轮根目录的普查范围,交由其所在根的刷新处理。
+        // 删除候选与"全缺"兜底的分母都先按 rootPath 收敛:根外记录一旦进分母,只要根外还有任何一条在盘上,
+        // `候选数 == 总数` 就不成立、兜底整体失效,一次刷新会把根下全部旧记录连 sync states 永久删除。
         let workplacesUnderRoot = refreshedWorkplaces.filter { workplace in
             LocalPathSafety.isWithinDirectory(workplace.path, rootPath: trimmedRoot)
         }
+        // 逐记录 fileExists 探测,而不是枚举根目录一层:contentsOfDirectory 只到下一级,换根 rebase 产生的
+        // 嵌套工作区恒不在枚举集合里,会被"磁盘上明明还在"却当成用户删除而连记录带 sync states 一起清掉。
         let deletableCandidates = workplacesUnderRoot.filter { workplace in
             fm.fileExists(atPath: workplace.path) == false
         }
@@ -989,9 +813,8 @@ final class WorkplaceStore: ObservableObject {
                 lockedPathKeys: lockedPathKeys
             ) == false
         }
-        // Safety: when *every* workplace is missing at once, that is far more likely a
-        // configuration change (root path switched) or an unavailable volume than N deliberate
-        // deletions. Skip the cleanup so one refresh can never wipe the whole library.
+        // 根目录下的工作区同时全部缺失 ⇒ 更像换根/卷不可用,而不是用户删光了 N 个:
+        // 跳过清理,一次刷新就不可能清空整个仓库库。
         let allMissing = !workplacesUnderRoot.isEmpty
             && deletableCandidates.count == workplacesUnderRoot.count
         let removedIDs = allMissing ? Set<UUID>() : Set(deletableMissing.map(\.id))
@@ -1001,13 +824,10 @@ final class WorkplaceStore: ObservableObject {
             changed = true
         }
 
-        // Scan each workplace for git repos on disk
         for i in refreshedWorkplaces.indices {
             let workplace = refreshedWorkplaces[i]
-            // Deduplicate existing sync states by folder name.
-            // keeper 优先取"组内被选中"的那行(否则取组内第一行):留哪行若完全由数组
-            // 顺序决定,后出现的恰是用户刚选中的新配置时,新行会被删、新配置被反选中,
-            // 陈旧行反而留下。只移除非 keeper 行,keeper 的选中/置顶状态不动。
+            // 按目录名去重 sync states:keeper 优先取组内"被选中"的那行(否则取第一行)。留哪行若全由数组顺序
+            // 决定,后出现的恰是用户刚选中的新配置时新行会被删、陈旧行反而留下;只移除非 keeper 行。
             var indicesByFolderName: [String: [Int]] = [:]
             for (idx, state) in refreshedSyncStates.enumerated() where state.workplaceID == workplace.id {
                 let name = URL(fileURLWithPath: state.localPath).lastPathComponent
@@ -1034,16 +854,14 @@ final class WorkplaceStore: ObservableObject {
                 refreshedSyncStates.remove(at: idx)
             }
 
-            // Keep missing repositories in the workplace so the UI can still surface retry actions.
+            // 磁盘上缺失的仓库仍留在工作区里,UI 才能给出重试入口。
             for stateIndex in refreshedSyncStates.indices where
                 refreshedSyncStates[stateIndex].workplaceID == workplace.id
             {
                 let exists = fm.fileExists(atPath: refreshedSyncStates[stateIndex].localPath)
                 if !exists {
-                    // 瞬态进行中状态(.cloning/.pulling/.switching/.removing)只可能由
-                    // 本进程内活跃操作写入:此刻目录"缺失"多半是操作还没落位(或正在
-                    // 整树移动),不是用户删了仓库——按陈旧磁盘视图改写会把进行中的行
-                    // 打成"本地仓库缺失"的假失败。持锁路径同理豁免(见函数注释)。
+                    // 瞬态(.cloning/.pulling/.switching/.removing)只由本进程活跃操作写入:此刻目录"缺失"多半是
+                    // 操作还没落位(或正在整树移动),按陈旧磁盘视图改写会把进行中的行打成"本地仓库缺失"的假失败。
                     let state = refreshedSyncStates[stateIndex]
                     if Self.isTransientSyncStatus(state.status)
                         || lockedPathKeys.contains(LocalPathSafety.canonicalLockKey(for: state.localPath))
@@ -1070,81 +888,6 @@ final class WorkplaceStore: ObservableObject {
         )
     }
 
-    func renameWorkplace(id: UUID, newName: String) throws {
-        let trimmedName = try Self.validatedWorkplaceName(newName)
-
-        // 记录找不到不能静默 return:改名没生效必须让调用方知道
-        // (FS 层错误仍走下面各自的 throw,不在此列)。
-        guard let index = workplaces.firstIndex(where: { $0.id == id }) else {
-            throw WorkplaceStoreError.workplaceNotFound
-        }
-        let oldPath = workplaces[index].path
-        let parentPath = (oldPath as NSString).deletingLastPathComponent
-        let newPath = try Self.workplacePath(
-            rootPath: parentPath,
-            name: trimmedName
-        )
-
-        let normalizedNewPath = Self.normalizedPath(newPath)
-        // 重复目录检查按大小写归一比较(口径同 WorkplaceEditService.saveWorkplaceEdit):
-        // 默认卷大小写不敏感,仅大小写不同的"改名"实际指向同一目录,
-        // 严格相等会把这种合法操作误报为"与其它工作区重名"。
-        let lowercasedNewPath = normalizedNewPath.lowercased()
-        guard !workplaces.contains(where: {
-            $0.id != id && Self.normalizedPath($0.path).lowercased() == lowercasedNewPath
-        }) else {
-            throw WorkplaceStoreError.duplicatePath
-        }
-        // 存在性检查同样按大小写归一口径:默认卷大小写不敏感,仅大小写不同的改名会因
-        // fileExists 恒为真而误报"路径已存在"(与上方重名检查、WorkplaceEditService 同源)。
-        let normalizedOldPath = Self.normalizedPath(oldPath)
-        guard normalizedNewPath.lowercased() == normalizedOldPath.lowercased() ||
-                FileManager.default.fileExists(atPath: newPath) == false else {
-            throw WorkplaceStoreError.pathAlreadyExistsOnDisk
-        }
-
-        // 1. Filesystem rename (most likely to fail)
-        try FileManager.default.moveItem(atPath: oldPath, toPath: newPath)
-
-        // 2. Compute new state, persist, then apply to in-memory
-        //    This ensures in-memory stays consistent if save fails
-        var updatedWorkplaces = workplaces
-        updatedWorkplaces[index].name = trimmedName
-        updatedWorkplaces[index].path = newPath
-        updatedWorkplaces[index].updatedAt = .now
-
-        var updatedSyncStates = syncStates
-        // 复用 `relativePath` 同款判定(与 rebasePlan 对齐),不再裸用大小写敏感的
-        // hasPrefix + dropFirst 改写:那会把与 relativePath 判定不一致的 localPath
-        // 静默留在旧路径上,且截位数问题与 relativePath 同源。
-        let normalizedOldRoot = normalizedOldPath
-        for i in updatedSyncStates.indices where updatedSyncStates[i].workplaceID == id {
-            guard let remaining = Self.relativePath(
-                of: updatedSyncStates[i].localPath,
-                within: normalizedOldRoot
-            ) else { continue }
-            updatedSyncStates[i].localPath = newPath + "/" + remaining
-        }
-
-        do {
-            try persist(
-                workplaces: updatedWorkplaces,
-                syncStates: updatedSyncStates
-            )
-        } catch {
-            // Roll back filesystem rename before rethrowing
-            do {
-                try FileManager.default.moveItem(atPath: newPath, toPath: oldPath)
-            } catch let rollbackError {
-                // reason 公开以读出回滚失败原因;from/to 是完整路径,保持默认 private(含用户主目录名)。
-                workplaceStoreLog.fault("event=rename_rollback_failed from=\(newPath) to=\(oldPath) reason=\(rollbackError.localizedDescription, privacy: .public)")
-                // Filesystem has new name but persist failed — best-effort persist to avoid data loss
-                try? persistWorkplaces(updatedWorkplaces)
-                persistSyncStates(updatedSyncStates)
-            }
-            throw error
-        }
-    }
 
     nonisolated static func snapshot(
         workplaces: [Workplace],
@@ -1156,12 +899,8 @@ final class WorkplaceStore: ObservableObject {
         )
     }
 
-    /// 该同步状态是否属于"本进程内正在进行的长操作"(瞬态)。
-    /// 瞬态只由活跃操作写入,重启解码时已归位为 .idle(见 RepositorySyncState.init(from:)),
-    /// 因此瞬态可以安全地当作"进行中"信号使用。
-    ///
-    /// internal:`SyncCoordinator` 的 pull 预标要用同一判据避让别家操作在途的行,
-    /// 两处各写一份 switch 会随新状态加入而漂移(口径不一致 = 谁都不认的瞬态)。
+    /// 瞬态只由本进程活跃操作写入(重启解码已归位 .idle),因此可以安全当作"进行中"信号。
+    /// internal:SyncCoordinator 的 pull 预标要用同一判据,两处各写一份 switch 会随新状态加入而漂移。
     nonisolated static func isTransientSyncStatus(_ status: SyncStatus) -> Bool {
         switch status {
         case .cloning, .pulling, .switching, .removing:
@@ -1171,12 +910,8 @@ final class WorkplaceStore: ObservableObject {
         }
     }
 
-    /// 工作区级豁免:目录本身持锁,或其任一仓库路径持锁/处于瞬态(说明创建、改名、
-    /// 补克隆等长操作正在进行),本次磁盘刷新就不得因"目录暂缺"删除该工作区记录。
-    ///
-    /// 锁快照为空**不能**否定豁免:瞬态只由本进程内活跃操作写入(重启解码已归位
-    /// .idle),长操作在两次持锁段之间(如整树移动完成与下一个仓库级锁之间)存在
-    /// 无锁 await 窗口,此时瞬态行是唯一可靠的"进行中"信号,必须照样豁免。
+    /// 工作区级豁免:目录本身持锁,或其任一仓库路径持锁/处于瞬态,本次刷新就不得因"目录暂缺"删除该记录。
+    /// 锁快照为空**不能**否定豁免:长操作在两次持锁段之间存在无锁 await 窗口,瞬态行是唯一可靠进行中标记。
     nonisolated private static func isWorkplaceOperationInFlight(
         _ workplace: Workplace,
         syncStates: [RepositorySyncState],

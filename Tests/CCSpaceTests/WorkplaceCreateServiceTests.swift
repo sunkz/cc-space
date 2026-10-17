@@ -44,7 +44,6 @@ private actor WorkplaceCreateGitServiceSpy: GitServicing {
         checkoutCalls.append((branch: branch, directory: directory))
     }
 
-    func remoteBranchExists(branch: String, remoteURL: String) async -> Bool { false }
 
 
     func mergeDefaultBranchIntoCurrent(in directory: String) async throws -> GitMergeDefaultBranchOutcome {

@@ -14,27 +14,12 @@ enum LocalPathSafetyError: LocalizedError, Equatable {
     }
 }
 
-/// 本地路径安全防线:路径组件校验、受管路径 containment 检查与锁互斥 key 规范化。
-///
-/// ## TOCTOU 边界(重要)
-/// 本类型提供的全部校验与规范化都是**时点快照**:校验通过的瞬间,文件系统状态
-/// 并未被冻结——路径上的符号链接随后可能被替换、目录可能被改名/删除/重建,
-/// 其他进程也可能并发改写。校验通过不构成任何持续性保证。
-/// 敏感消费方(删除、移动、覆盖写等破坏性文件系统操作)必须在**紧邻破坏性操作
-/// 执行前**重新校验(re-validate immediately before the destructive operation),
-/// 不能依赖更早时点(如配置加载、UI 提交时)的校验结论。
+/// TOCTOU 边界:本类型全部校验与规范化都是**时点快照**——通过的瞬间文件系统状态并未被冻结,符号链接随后
+/// 可能被替换、目录可能被改名/删除/重建;破坏性操作(删除、移动、覆盖写)必须紧邻执行前重新校验。
 enum LocalPathSafety {
-    /// 锁互斥用的规范化 key:去前导空白 + 标准化 + 解析符号链接 + 统一小写。
-    ///
-    /// `RepositoryOperationLock` 此前以**未归一化的原始字符串**为 key:trailing slash、
-    /// 大小写、symlink 别名都会让同一物理目录拿到两把"不同"的锁,互斥保证被绕过,
-    /// 与 `isWithinDirectory` 刻意做 symlink/大小写归一化的立场自相矛盾。
-    /// 设计取向是**宁可过度加锁不可漏锁**:在大小写敏感卷上把不同目录折成同一 key
-    /// 只会串行化两个操作(慢一点),而漏锁会让并发 git 写操作交错损坏仓库。
-    ///
-    /// TOCTOU:结果取决于调用瞬间的磁盘状态(symlink 解析、缺失尾部重建),
-    /// 同一字符串在磁盘形态变化前后可能得到不同 key——因此锁的 acquire/release
-    /// 不得各自独立推导(见 `RepositoryOperationLock` 的 raw→key 映射)。
+    /// 锁互斥 key:去前导空白 + 标准化 + 解析符号链接 + 统一小写;取向**宁可过度加锁不可漏锁**
+    /// (原始串作 key 时 trailing slash/大小写/symlink 别名会让同一物理目录拿到两把锁,互斥被绕过)。
+    /// key 取决于调用瞬间的磁盘状态,acquire/release 不得各自独立推导(见 `RepositoryOperationLock` 的 raw→key 映射)。
     static func canonicalLockKey(for path: String) -> String {
         let normalized = normalizedPath(path)
         guard normalized.isEmpty == false else { return normalized }
@@ -42,20 +27,15 @@ enum LocalPathSafety {
     }
 
     static func normalizedPath(_ path: String) -> String {
-        // trim 结果只用于"是否为空"的判断;真实路径原样传递——
-        // 目录名本身可以合法地以空格结尾(如误建的 "mydir "),trim 会把它改写成另一个路径。
-        // 仅去掉**前导**空白:前导空白会让相对/绝对路径判定出错(整串被当相对路径拼接 cwd),
-        // 而"以空格开头且紧随绝对路径"的输入几乎必然是用户粘贴时的杂质。
+        // trim 结果只用于"是否为空"的判断,真实路径原样传递:目录名可合法以空格结尾,trim 会改写成另一个路径。
+        // 仅去掉**前导**空白:前导空白会让整串被当作相对路径拼接 cwd,而"空格开头+绝对路径"几乎都是粘贴杂质。
         let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmedPath.isEmpty == false else { return "" }
-        // NUL 字节:进 argv 会在 C 字符串桥接处 fatalError 崩进程(macOS 文件名唯一
-        // 的非法字节,出现在路径里几乎必然来自被手工篡改的 JSON 配置)。按"非法路径"
-        // 归一为空串,让所有调用点现有的 isEmpty 防御统一转为拒绝。
+        // NUL 字节进 argv 会在 C 字符串桥接处 fatalError 崩进程(几乎必然来自被手工篡改的 JSON 配置);
+        // 按"非法路径"归一为空串,让所有调用点现有的 isEmpty 防御统一转为拒绝。
         guard trimmedPath.contains("\0") == false else { return "" }
-        // 相对路径一律拒绝:锚点是**本进程的当前工作目录**,对 GUI app 是未定义值,
-        // 且可能随环境漂移——同一份配置在两次启动归一成不同路径,锁 key 也随之变化,
-        // containment 判定形同虚设。生产路径全部来自绝对化的面板选择/拼接,非法输入
-        // 走空串由既有 isEmpty 防御统一转拒绝。
+        // 相对路径一律拒绝:锚点是**本进程的当前工作目录**,对 GUI app 是未定义值且可能随环境漂移——
+        // 同一份配置两次启动归一成不同路径,锁 key 随之变化,containment 判定形同虚设。
         guard trimmedPath.hasPrefix("/") else { return "" }
         let leadingTrimmed = String(path.drop(while: { $0 == " " || $0 == "\t" || $0.isNewline }))
         return URL(fileURLWithPath: leadingTrimmed).standardizedFileURL.path
@@ -79,10 +59,7 @@ enum LocalPathSafety {
         return trimmedComponent
     }
 
-    /// 拼接受管子路径并校验 containment。
-    ///
-    /// TOCTOU:返回值只代表校验时刻的结论;随后对返回路径做破坏性操作前,
-    /// 敏感消费方必须重新校验(符号链接可能在期间被替换、目录可能被改名)。
+    /// TOCTOU:返回值只代表校验时刻;随后对返回路径做破坏性操作前必须重新校验(符号链接可能在期间被替换)。
     static func childPath(
         in parentPath: String,
         component: String,
@@ -106,10 +83,8 @@ enum LocalPathSafety {
         return childPath
     }
 
-    /// 校验 `path` 位于 `rootPath` 之内(受管路径 containment 检查)。
-    ///
-    /// TOCTOU:通过仅代表校验瞬间的磁盘状态;在删除/移动等破坏性操作前必须
-    /// 紧邻操作重新调用本方法,中间的符号链接替换或目录改名会使旧结论失效。
+    /// TOCTOU:通过仅代表校验瞬间的磁盘状态,中途的符号链接替换或目录改名会使旧结论失效;
+    /// 删除/移动等破坏性操作前必须紧邻操作重新调用本方法。
     static func validateManagedPath(
         _ path: String,
         within rootPath: String
@@ -119,12 +94,8 @@ enum LocalPathSafety {
         }
     }
 
-    /// 严格包含判定:`path` 必须位于 `rootPath` **之下**,不把"等于根"算作根内。
-    ///
-    /// 破坏性操作(递归删除、整树移动)必须用本判定而不是 `isWithinDirectory`:
-    /// 后者把"同一目录"也判为受管(创建子路径时才是想要的语义),但一旦记录路径被
-    /// 手工编辑/损坏成恰好等于受管根,`rm -rf <root>` 就会把整棵受管根(含其它工作区)
-    /// 一并删掉。本代码库对篡改 JSON 已有防护(NUL 字节等),这是同一威胁模型的缺口。
+    /// 严格包含:不把"等于根"算作根内。破坏性操作(递归删除、整树移动)必须用本判定而非 `isWithinDirectory`,
+    /// 否则记录路径被手工编辑成恰好等于受管根时,`rm -rf <root>` 会把整棵受管根(含其它工作区)一并删掉。
     static func isStrictlyWithinDirectory(
         _ path: String,
         rootPath: String
@@ -138,14 +109,12 @@ enum LocalPathSafety {
         }
         let resolvedChild = resolvedRealPath(of: normalizedChildPath)
         let resolvedRoot = resolvedRealPath(of: normalizedRootPath)
-        // 大小写归一并排除:isWithinDirectory 走大小写不敏感分支放行时,两者本就
-        // 指向同一目录,不能算"严格包含"。
+        // 大小写归一并排除:isWithinDirectory 走大小写不敏感分支放行时,两者本就指向同一目录,不算严格包含。
         return resolvedChild != resolvedRoot
             && resolvedChild.lowercased() != resolvedRoot.lowercased()
     }
 
-    /// 破坏性操作的 containment 校验入口:`path` 必须**严格位于** `rootPath` 之下。
-    /// TOCTOU 契约同 `validateManagedPath`(紧邻操作前重新调用)。
+    /// 破坏性操作的 containment 校验入口:`path` 必须**严格位于** `rootPath` 之下;TOCTOU 契约同 `validateManagedPath`。
     static func validateStrictlyContainedPath(
         _ path: String,
         within rootPath: String
@@ -155,10 +124,8 @@ enum LocalPathSafety {
         }
     }
 
-    /// containment 判定入口:两端先做归一化 + 符号链接解析,再比较词法前缀。
-    ///
-    /// TOCTOU:解析出的"真实位置"随磁盘状态变化,结论只在调用时刻成立,
-    /// 不冻结文件系统;破坏性操作前须重新校验(见类型级 TOCTOU 注释)。
+    /// containment 判定入口:两端先归一化 + 解析符号链接,再比较词法前缀。
+    /// TOCTOU:解析出的"真实位置"随磁盘状态变化,结论只在调用时刻成立;破坏性操作前须重新校验。
     static func isWithinDirectory(
         _ path: String,
         rootPath: String
@@ -169,36 +136,25 @@ enum LocalPathSafety {
               normalizedRootPath.isEmpty == false else {
             return false
         }
-        // 悬空符号链接(链接在、目标不在)必须直接判越界:resolvingSymlinksInPath
-        // 解析不了它(实测原样返回),它会被当成"不存在的尾部"词法拼回、按"根内"放行;
-        // 待外部进程把目标落地,克隆/删除就物理落在根外。锁不排斥外部进程,
-        // 锁内复检也拦不住这一形态——唯一稳妥处置是 fail-closed。
+        // 悬空符号链接(链接在、目标不在)必须直接判越界:resolvingSymlinksInPath 解析不了它(实测原样返回),
+        // 它会被当成"不存在的尾部"词法拼回、按"根内"放行,待外部进程把目标落地后克隆/删除就物理落在根外。
         guard hasDanglingSymlink(in: normalizedChildPath) == false else { return false }
-        // 纵深防御:纯词法前缀比较挡不住"中间符号链接"逃逸——
-        // 工作区根内若有指向根外的 symlink 目录,其下的"受管路径"词法上合法、物理上在根外。
-        // 因此对参与比较的两端先解析符号链接,再比较。
+        // 纵深防御:纯词法前缀比较挡不住"中间符号链接"逃逸(根内指向根外的 symlink 目录),故两端都先解析符号链接。
         let resolvedChild = resolvedRealPath(of: normalizedChildPath)
         let resolvedRoot = resolvedRealPath(of: normalizedRootPath)
         return isPathPrefix(resolvedRoot, of: resolvedChild)
     }
 
-    /// 前缀比较:默认**严格区分大小写**。
-    ///
-    /// macOS 默认卷大小写不敏感,仅大小写不同的两个路径指向同一目录,严格比较会把
-    /// 合法受管路径误判为越界;但无条件放宽在**大小写敏感卷**上是 fail-open:
-    /// 受管根 `/A/ws` 会把物理上无关的兄弟目录 `/a/ws/x` 判为"在根内",
-    /// 删除/pull 于是直接作用在未受管目录上。因此先严格比较,只有确认所在卷
-    /// 不支持大小写敏感文件名(或无法判定)时才放宽。
+    /// 前缀比较默认**严格区分大小写**:无条件放宽在大小写敏感卷上 fail-open(受管根 `/A/ws` 会把物理无关的
+    /// 兄弟目录 `/a/ws/x` 判为"根内",删除/pull 直接作用在未受管目录上);只有确认卷不支持大小写敏感文件名才放宽。
     private static func isPathPrefix(_ prefix: String, of path: String) -> Bool {
         if path == prefix { return true }
         if path.hasPrefix(prefix + "/") { return true }
         return hasCaseInsensitivePathPrefix(prefix, path) && volumeMayBeCaseInsensitive(atPath: prefix)
     }
 
-    /// 路径的任一**已存在**组件是否为悬空符号链接(链接本身在、其目标 stat 不到)。
-    ///
-    /// 判定必须用 lstat:`fileExists` 跟随链接,悬空链接反而报"不存在",于是被
-    /// `resolvedRealPath` 当成缺失尾部原样词法拼回,containment 因此误判"根内"。
+    /// 路径任一**已存在**组件是否为悬空符号链接。判定必须用 lstat:`fileExists` 跟随链接,悬空链接反而报
+    /// "不存在",于是被 `resolvedRealPath` 当成缺失尾部原样词法拼回,containment 因此误判"根内"。
     static func hasDanglingSymlink(in path: String) -> Bool {
         var prefix = "/"
         let components = URL(fileURLWithPath: path).pathComponents.filter { $0 != "/" }
@@ -222,9 +178,8 @@ enum LocalPathSafety {
         return loweredPath == loweredPrefix || loweredPath.hasPrefix(loweredPrefix + "/")
     }
 
-    /// 该路径所在卷是否**可能**大小写不敏感(即不支持大小写敏感文件名)。
-    /// 无法判定时按"可能"处理:卷属性查询失败属环境异常,沿用既有放宽行为,
-    /// 避免把默认卷(占绝大多数)上的合法受管路径误判越界。
+    /// 该路径所在卷是否**可能**大小写不敏感。查询失败时**有意按"可能"处理**(fail-open):属环境异常,
+    /// 沿用既有放宽,避免把默认卷上的合法受管路径误判越界。
     private static func volumeMayBeCaseInsensitive(atPath path: String) -> Bool {
         let values = try? URL(fileURLWithPath: path)
             .resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey])
@@ -232,9 +187,8 @@ enum LocalPathSafety {
         return supportsCaseSensitive == false
     }
 
-    /// 解析路径的真实位置:URL.resolvingSymlinksInPath 只在**整条路径都存在**时
-    /// 才解析符号链接(新建工作区/文件尚未落盘时原样返回),因此逐级向上找到
-    /// 最长存在的祖先做解析,再把不存在的尾部组件原样拼回。
+    /// `URL.resolvingSymlinksInPath` 只在**整条路径都存在**时才解析符号链接(尚未落盘时原样返回),
+    /// 因此逐级向上找最长存在的祖先做解析,再把不存在的尾部组件原样拼回。
     private static func resolvedRealPath(of path: String) -> String {
         let fileManager = FileManager.default
         var missingComponents: [String] = []
@@ -242,7 +196,6 @@ enum LocalPathSafety {
         while fileManager.fileExists(atPath: current) == false {
             let currentURL = URL(fileURLWithPath: current)
             let lastComponent = currentURL.lastPathComponent
-            // 已到根目录,无法继续上溯。
             guard lastComponent != "/", currentURL.pathComponents.count > 1 else { break }
             missingComponents.insert(lastComponent, at: 0)
             current = currentURL.deletingLastPathComponent().path

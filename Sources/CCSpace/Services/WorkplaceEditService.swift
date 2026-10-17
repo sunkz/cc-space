@@ -11,9 +11,8 @@ private struct WorkplaceEditBranchRollback {
     let branch: String
 }
 
-/// 克隆任务体"真正开始执行"时登记的目标路径集合。
-/// cloneRepositories 的任务体不在 MainActor 上,用 actor 承载以便回调安全写入;
-/// 回滚只删除这里的路径——预期清单里"从未开始克隆"的目录可能是用户既有同名目录。
+/// 只登记"克隆真正开始执行"的目标路径:回滚仅删这里——未启动的预期路径可能是用户既有同名目录。
+/// 用 actor 承载,因任务体不在 MainActor 上。
 private actor StartedClonePathsBox {
     private var paths: [String] = []
 
@@ -26,12 +25,9 @@ private actor StartedClonePathsBox {
     }
 }
 
-/// 编辑工作区过程中的本地目录还原失败。
-/// 携带暂存路径,便于在 UI 上告知用户去哪里取回未还原的仓库目录。
 enum WorkplaceEditServiceError: LocalizedError {
     case stagedItemRestoreFailed(path: String, reason: String)
-    /// 回滚时把仓库切回原分支失败。原始错误多为 git 英文原文/系统描述,
-    /// 统一包一层中文再上抛,日志与调用方拿到的都是可读文案。
+    /// 原始错误多为 git 英文/系统描述,统一包中文再上抛。
     case branchRollbackFailed(branch: String, reason: String)
     /// 改名被嵌套工作区挡住:整棵树会被移走,子工作区的路径不会随之重映射。
     case nestedWorkplaceBlocksRename(nestedName: String)
@@ -66,10 +62,8 @@ struct WorkplaceEditService {
         guard let originalWorkplace = workplaceStore.workplaces.first(where: { $0.id == workplaceID }) else {
             throw WorkplaceStoreError.workplaceNotFound
         }
-        // 勾选清单按**当前仓库池**过滤后再参与差异计算:对话框打开期间池里可能删掉了
-        // 某个仓库(removeRepository 会摘引用),把对话框里的旧 id 原样写回等于
-        // 亲手复活一个悬空引用——之后没有任何 UI 入口能清掉它,行也会一直显示"仓库缺失"。
-        // 过滤放在差异计算之前,保证 removed/added 集合与最终写入的清单是同一口径。
+        // 勾选清单按**当前仓库池**过滤后再算差异:旧 id 原样写回等于复活悬空引用(池可能已 removeRepository),
+        // 之后没有 UI 入口能清掉;过滤必须在差异计算之前。
         let liveRepositoryIDs = Set(repositoryStore.repositories.map(\.id))
         let selectedRepositoryIDs = selectedRepositoryIDs.filter { liveRepositoryIDs.contains($0) }
         guard selectedRepositoryIDs.isEmpty == false else { throw WorkplaceStoreError.noRepositoriesSelected }
@@ -82,7 +76,7 @@ struct WorkplaceEditService {
         let removedRepositoryIDs = currentSelectedIDs.subtracting(nextSelectedIDs)
         let addedRepositoryIDs = nextSelectedIDs.subtracting(currentSelectedIDs)
         let originalStates = workplaceStore.syncStates.filter { $0.workplaceID == workplaceID }
-        // 与其他处一致:循环构建字典,重复 id 时后者覆盖前者而非 trap。
+        // 循环构建字典:重复 id 时后者覆盖前者,不用会 trap 的 Dictionary(uniqueKeysWithValues:)。
         var repositoryNamesByID = Dictionary<UUID, String>(minimumCapacity: repositoryStore.repositories.count)
         for repository in repositoryStore.repositories {
             repositoryNamesByID[repository.id] = repository.repoName
@@ -94,8 +88,7 @@ struct WorkplaceEditService {
             name: validatedName
         )
 
-        // 大小写归一比较(口径同 WorkplaceStore.renameWorkplace):默认卷大小写不敏感,
-        // 仅大小写不同的改名实际指向同一目录,严格字符串比较会误报"与其它工作区重名"。
+        // 大小写归一比较:默认卷大小写不敏感,仅大小写不同的改名指向同一目录,严格比较会误报重名。
         let normalizedNewPath = WorkplaceStore.normalizedPath(newPath)
         let lowercasedNewPath = normalizedNewPath.lowercased()
         guard !workplaceStore.workplaces.contains(where: {
@@ -104,14 +97,12 @@ struct WorkplaceEditService {
         }) else {
             throw WorkplaceStoreError.duplicatePath
         }
-        // 存在性探测挪到主线程之外:目标路径可能在网盘/外置盘上,单次 stat 也能
-        // 阻塞主线程数秒(口径同 WorkplaceStore.reconcileHasLocalDirectoryFlags)。
+        // 存在性探测挪到主线程之外:目标路径可能在网盘/外置盘上,单次 stat 也能阻塞主线程数秒。
         let targetExistsOnDisk: Bool = await Task.detached(priority: .userInitiated) {
             FileManager.default.fileExists(atPath: newPath)
         }.value
-        // 与上方重名检查同口径用大小写归一比较:默认卷大小写不敏感,"仅大小写不同"的
-        // 改名实际指向同一目录,此时 `fileExists(atPath: newPath)` 恒为真,严格相等比较
-        // 会把合法改名误报成"路径已存在"(且让下面 pathsDifferIgnoringCase 分支永不可达)。
+        // 与上方重名检查同口径:默认卷上"仅大小写不同"的改名指向同一目录,`fileExists` 恒为真,
+        // 严格相等会把合法改名误报成"路径已存在"(并让下面 pathsDifferIgnoringCase 分支永不可达)。
         let normalizedOldPath = WorkplaceStore.normalizedPath(oldPath)
         guard normalizedNewPath.lowercased() == normalizedOldPath.lowercased() ||
                 targetExistsOnDisk == false else {
@@ -119,13 +110,8 @@ struct WorkplaceEditService {
         }
         try ensureManagedSyncStates(originalStates, within: oldPath)
 
-        // 改名会把整棵 oldPath 移走:若树内还住着**其它工作区**(项目显式支持嵌套工作区,
-        // A 内可有 A/B),子工作区记录的 localPath 不会随移动重映射,移动后它们指向已不存在
-        // 的旧路径,重启时磁盘刷新会按"目录缺失"把子工作区整条记录删掉(不可恢复)。
-        // 在触碰磁盘之前先 fail-closed,让用户先处理子工作区。
-        // 改名判定用大小写归一路径:isWithinDirectory 把"同一目录"也判为受管(前缀含相等),
-        // 仅大小写不同的改名在默认卷上会把工作区自己当嵌套子工作区而误报拦截。
-        // 是否真正执行 move 仍按原始字符串(记录路径字符串的规范化改名也是有效编辑)。
+        // 改名会移走整棵 oldPath:树内若住着其它工作区,其 localPath 不会随移动重映射,磁盘刷新会按
+        // "目录缺失"整条删掉子工作区(不可恢复)——触碰磁盘前先 fail-closed。containment 用大小写归一路径。
         let renamed = newPath != oldPath
         let pathsDifferIgnoringCase =
             normalizedNewPath.lowercased() != normalizedOldPath.lowercased()
@@ -136,15 +122,9 @@ struct WorkplaceEditService {
             throw WorkplaceEditServiceError.nestedWorkplaceBlocksRename(nestedName: nested.name)
         }
 
-        // ── 磁盘刷新豁免(瞬态标记,必须先于任何磁盘改动)─────────────────────
-        // 从此刻起直到 applyWorkplaceEdit 落库,记录仍指向 oldPath,而磁盘上的目录
-        // 可能已被整树改名/暂存移出。期间并发的定时磁盘刷新若按这一刻的陈旧磁盘
-        // 视图判断,会把"记录在、目录不在"的工作区整条删除(含全部 sync states),
-        // 且不可恢复。防线:先把本工作区全部状态行置为瞬态(被移出→.removing,
-        // 保留→.switching)。diskRefreshResult 对含瞬态行的工作区一律豁免删除
-        // (isWorkplaceOperationInFlight),对瞬态行本身豁免"缺失→假失败"改写。
-        // 失败/回滚路径用 originalStates 原样恢复;成功路径由 applyWorkplaceEdit
-        // 整体覆盖,瞬态不会外泄。瞬态在重启解码时归位 .idle,崩溃也不遗留。
+        // ── 磁盘刷新豁免(必须先于任何磁盘改动)─────────────────────────────
+        // 被移出→.removing、保留→.switching 全置瞬态:此刻记录仍指 oldPath 而目录可能已整树移走,
+        // diskRefreshResult 对含瞬态行的工作区豁免删除(isWorkplaceOperationInFlight),回滚用 originalStates 还原。
         workplaceStore.setSyncStatus(.removing, for: workplaceID, repositoryIDs: removedRepositoryIDs)
         workplaceStore.setSyncStatus(.switching, for: workplaceID, repositoryIDs: nextSelectedIDs)
 
@@ -152,20 +132,15 @@ struct WorkplaceEditService {
             .appendingPathComponent("cc-space-edit-\(UUID().uuidString)", isDirectory: true)
         var stagedRemovals: [(originalPath: String, stagedPath: String)] = []
         var clonedStates: [RepositorySyncState] = []
-        // 预期克隆目标路径清单:用于回滚时把全部潜在目标罩进锁(锁 key 是精确匹配)。
-        // 但**删除**必须只按"克隆已启动"清单(startedClonePathsBox)执行:清单里
-        // 从未开始克隆的路径在工作区已有同名用户目录时会被误删(旧缺陷)。
+        // 预期克隆目标路径清单只用于罩锁(锁 key 精确匹配);删除范围另取"克隆已启动"清单。
         var cloneTargetPaths: [String] = []
         let startedClonePathsBox = StartedClonePathsBox()
         var branchRollbacks: [WorkplaceEditBranchRollback] = []
 
         do {
             if renamed {
-                // 目录移动同样要与仓库级写操作互斥:锁 key 精确匹配,须把
-                // 旧/新目录本身与两侧全部仓库路径一起罩住。跨卷移动会退化为
-                // "复制整树+删除原树",与并发 git 写入交错会拷出不一致的仓库副本。
-                // 与 deleteWorkplace 同一口径:还要罩住**树内其它工作区**的状态行路径
-                // (嵌套场景已在前面拦截,这里按磁盘现状兜底,漏锁的代价是仓库被写坏)。
+                // 目录移动要与仓库级写操作互斥:锁 key 精确匹配,须罩住旧/新目录本身、两侧全部仓库路径,
+                // 并按磁盘现状罩住树内其它工作区的状态行路径(漏锁的代价是仓库被写坏;跨卷 move 退化为复制+删除)。
                 var renameLockPaths = [oldPath, newPath]
                 renameLockPaths.append(contentsOf: originalStates.map(\.localPath))
                 renameLockPaths.append(
@@ -182,8 +157,7 @@ struct WorkplaceEditService {
                         ? candidate.localPath
                         : nil
                 })
-                // 整棵工作区目录的移动在跨卷时会退化为"复制+删除",可能耗时很久,
-                // 移出主线程执行,避免冻结 UI。
+                // 整棵工作区目录的移动(跨卷时退化为"复制+删除")可能耗时很久,必须移出主线程。
                 try await RepositoryOperationLock.shared.withLockPaths(renameLockPaths) {
                     try await Self.moveItemOffMainThread(fromPath: oldPath, toPath: newPath)
                 }
@@ -263,8 +237,8 @@ struct WorkplaceEditService {
                             with: branchProgressTracker,
                             repositoryName: repositoryName
                         ) {
-                            // 与后台定时 pull/push 互斥,避免对同一工作树交错执行写操作。
-                            // 闭包内只做 git 操作,切出的原分支带出来再记录,避免捕获 MainActor 状态。
+                            // 与后台定时 pull/push 互斥,避免对同一工作树交错写;闭包内只做 git 操作,
+                            // 切出的原分支带出来再记录,避免捕获 MainActor 状态。
                             let previousBranch: String? = try await RepositoryOperationLock.shared
                                 .withLock(path: state.localPath) { () async throws -> String? in
                                     let currentBranch = await gitService.currentBranch(in: state.localPath)
@@ -301,10 +275,8 @@ struct WorkplaceEditService {
             if addedRepositoryIDs.isEmpty == false {
                 let addedRepositories = repositoryStore.repositories.filter { addedRepositoryIDs.contains($0.id) }
                 if addedRepositories.isEmpty == false {
-                    // 与后台定时 pull/push 互斥,避免克隆过程中对同一目录交错执行写操作。
-                    // 锁 key 是精确匹配,只锁工作区根路径罩不住仓库级写操作,
-                    // 必须把目录自身与每条待克隆的仓库目标路径一起加锁。
-                    // 闭包内只捕获 Sendable 的值(不可变副本),避免捕获 MainActor 隔离状态。
+                    // 克隆要与后台定时 pull/push 互斥:锁 key 精确匹配,只锁工作区根罩不住仓库级写操作,
+                    // 必须连同每条待克隆的目标路径一起加锁;闭包非 MainActor,只可捕获 Sendable 值副本。
                     let workplaceForClone = updatedWorkplace
                     var expectedClonePaths: [String] = []
                     for repository in addedRepositories {
@@ -315,14 +287,11 @@ struct WorkplaceEditService {
                             )
                         )
                     }
-                    // oldPath 也入锁:此刻记录仍指向 oldPath,磁盘刷新的锁快照含
-                    // canonical(oldPath) 时,isWorkplaceOperationInFlight 会据此豁免
-                    // 该工作区(克隆持续数分钟,期间记录路径在盘上"缺失"是正常的)。
+                    // oldPath 也必须入锁:此刻记录仍指 oldPath,磁盘刷新的锁快照含 canonical(oldPath)
+                    // 时 isWorkplaceOperationInFlight 才豁免该工作区(克隆数分钟,期间目录"缺失"是正常的)。
                     var cloneLockPaths = [newPath, oldPath]
                     cloneLockPaths.append(contentsOf: expectedClonePaths)
-                    // 在真正进入克隆前登记预期路径(锁等待期间的取消也要罩进锁:
-                    // 这些目录要么不存在、要么本就是本次操作要产出的目标)。
-                    // 删除范围由 onCloneStarted 单独记录:只有克隆已启动的目录才允许被回滚删掉。
+                    // 进入克隆前先登记预期路径(锁等待期间被取消也要罩住这些目录)。
                     cloneTargetPaths = expectedClonePaths
                     clonedStates = try await RepositoryOperationLock.shared.withLockPaths(cloneLockPaths) {
                         try await syncCoordinator.cloneRepositories(
@@ -338,29 +307,20 @@ struct WorkplaceEditService {
                 }
             }
 
-            // 落库前把本轮结果与 Store 的**最新行**做字段增量合并(复用后台收口同一
-            // 口径 `RepositorySyncState.merging`)。retainedStates 全部派生自入口快照
-            // originalStates,而克隆/切分支要跑数分钟,期间磁盘刷新校正的
-            // hasLocalDirectory、后台 pull 落库的 lastSyncedAt/status/lastError
-            // 都会被"整工作区行集合整体替换"覆盖回操作前的旧值(lost update)。
-            // localPath 是例外:改名/移动由本操作拥有,merging 的增量字段不含它,
-            // 必须在本轮结果路径上落笔,否则改名后行仍指向旧目录。
+            // 落库前与 Store 的**最新行**做字段增量合并(`RepositorySyncState.merging`):克隆/切分支跑数分钟,期间
+            // 磁盘刷新与后台 pull 的回写会被整行替换覆盖(lost update)。localPath 例外:本操作拥有,须在本轮结果路径落笔。
             let liveStates = workplaceStore.syncStates.filter { $0.workplaceID == workplaceID }
             let mergedStates: [RepositorySyncState] = retainedStates.map { updated in
                 guard let original = originalStates.first(where: { $0.repositoryID == updated.repositoryID }),
                       let latest = liveStates.first(where: { $0.repositoryID == updated.repositoryID }) else {
-                    // 本轮新增的行(克隆产出)在 Store 里还没有对照,原样写入。
                     return updated
                 }
                 var merged = RepositorySyncState.merging(
                     updated: updated,
                     onto: original,
                     in: latest,
-                    // 入口将本轮全部保留行预标为 .switching(见上方磁盘刷新豁免),
-                    // 收口必须声明该瞬态归本操作所有:否则"结果恰好等于快照"的行
-                    // (只改名、增删仓库、原样保存,或仓库本就在目标分支)会走到
-                    // `?? latest`,把 .switching 原样落库——磁盘刷新与 pull 都跳过
-                    // 瞬态行,没有任何流程收口,行永久停在转轮直到重启。
+                    // 入口把本轮保留行预标为 .switching,收口必须声明该瞬态归本操作所有:
+                    // 否则"结果恰好等于快照"的行会把 .switching 原样落库,永久停在转轮直到重启。
                     premarkedTransient: .switching
                 ) ?? latest
                 merged.localPath = updated.localPath
@@ -368,7 +328,7 @@ struct WorkplaceEditService {
             }
 
             try workplaceStore.applyWorkplaceEdit(updatedWorkplace, syncStates: mergedStates)
-            // 暂存根目录里可能装着多棵被移出的仓库树,递归删除移出主线程。
+            // 暂存根目录里可能装着多棵被移出的仓库树,递归删除必须移出主线程。
             await Self.removeItemOffMainThread(
                 syncCoordinator.fileSystemService,
                 at: removalStagingRoot.path
@@ -386,9 +346,7 @@ struct WorkplaceEditService {
                 stagedRemovals: stagedRemovals,
                 removalStagingRoot: removalStagingRoot
             )
-            // 状态回滚:编辑期间本工作区的行被瞬态标记覆盖(见 do 前的豁免注释),
-            // 现用入口快照原样恢复(含被移出仓库的行)。记录若已在 await 窗口内被
-            // 并发删除,不能为已消失的工作区补写孤儿行,只留痕。
+            // 状态回滚用入口快照原样恢复;记录若已在 await 窗口内被并发删除,不得补写孤儿行,只留痕。
             if workplaceStore.workplaces.contains(where: { $0.id == workplaceID }) {
                 workplaceStore.replaceSyncStates(originalStates, for: workplaceID)
             } else {
@@ -400,12 +358,8 @@ struct WorkplaceEditService {
         }
     }
 
-    /// 尽力回滚编辑流程已产生的本地变更。所有失败留痕后吞掉(原始错误由调用方抛出);
-    /// 暂存目录只有全部还原成功才删除,否则保留供用户手工取回。
-    ///
-    /// 回滚与正向路径一样必须持锁:等锁的 pull/push 若趁回滚移动目录/切分支时插入,
-    /// 会对同一工作树交错写。锁获取本身被取消时降级为无锁尽力回滚(原始错误往往
-    /// 就来自取消,回滚不能再等待),并留痕供排查。
+    /// 回滚同样必须持锁:等锁的 pull/push 若趁回滚移动目录/切分支时插入,会对同一工作树交错写;
+    /// 锁获取本身被取消时降级为无锁尽力回滚(原始错误往往就来自取消,回滚不能再等待)。
     private func performEditRollback(
         renamed: Bool,
         oldPath: String,
@@ -418,10 +372,6 @@ struct WorkplaceEditService {
     ) async {
         let lock = RepositoryOperationLock.shared
         var rollbackLockPaths = [oldPath, newPath]
-        // 罩锁按"预期克隆路径"全集(含未启动的):与仍在等锁/克隆中的并发任务互斥;
-        // 但删除只按 startedClonePaths(克隆已启动),未启动的预期路径可能是用户
-        // 既有同名目录,删掉就是毁数据(取消时 cloneRepositories 抛错、clonedStates 为空,
-        // 已完成/克隆到一半的目录只有这份已启动清单能覆盖)。
         rollbackLockPaths += cloneTargetPaths
         for item in stagedRemovals {
             rollbackLockPaths += [
@@ -436,10 +386,8 @@ struct WorkplaceEditService {
             ]
         }
         var rollbackLocksAcquired: [String] = []
-        // 与 withLockPaths 同一排序(见 RepositoryOperationLock.canonicalLockOrder):
-        // 按原始路径排序与按规范 key 排序可能不一致(symlink 别名/大小写差异),
-        // 会造成与其它多路径持有者的获取顺序反转,产生环形等待死锁。
-        // acquire 内部对 key 的再归一化是幂等的。
+        // 必须与 withLockPaths 同一排序(RepositoryOperationLock.canonicalLockOrder):按原始路径
+        // 排序与按 canonical key 排序可能不一致(symlink 别名/大小写),顺序反转会造成环形等待死锁。
         let rollbackLockKeys = RepositoryOperationLock.canonicalLockOrder(rollbackLockPaths)
         for key in rollbackLockKeys {
             do {
@@ -451,22 +399,18 @@ struct WorkplaceEditService {
                 break
             }
         }
-        // 本函数所有失败路径都在内部 catch 并留痕,不会中途 throw,
-        // 因此按序释放即可,无需 defer(defer 里只能 fire-and-forget,会留出释放真空窗)。
+        // 锁按序显式释放:本函数所有失败路径都在内部 catch,不会中途 throw(defer 里只能 fire-and-forget)。
         do {
-            // 回滚删除的是整棵已克隆仓库目录,递归删除可能耗时很久,移出主线程。
-            // 只删"克隆已启动"的路径:未启动的预期路径不许碰(可能撞用户既有目录)。
+            // 递归删除整棵已克隆仓库目录可能耗时很久,必须移出主线程;入参只能是"克隆已启动"清单。
             try await removeClonedItemsIfNeeded(startedClonePaths)
         } catch {
             editServiceLog.error("event=rollback_cleanup_failed reason=\(error.localizedDescription)")
         }
-        // 暂存根目录里可能装着多棵被移出的仓库树,只有全部还原成功才允许清理;
-        // 否则里面残留的仓库树会被一并删掉,变成用户的本地仓库永久丢失。
+        // 暂存根目录里可能装着多棵被移出的仓库树,只有全部还原成功才允许清理,否则用户的本地仓库永久丢失。
         var stagedItemsRestored = true
         if renamed {
             var renameRolledBack = true
             do {
-                // 回滚同样可能跨卷移动整棵目录树,移出主线程。
                 try await Self.moveItemOffMainThread(fromPath: newPath, toPath: oldPath)
             } catch {
                 renameRolledBack = false
@@ -505,8 +449,8 @@ struct WorkplaceEditService {
                     stagedItemsRestored = false
                 }
             } else {
-                // 目录树仍在 newPath 下:后续按 oldPath 做的分支恢复/暂存还原注定
-                // 级联失败,短路保留现场,暂存目录一律不删(等值于还原失败路径)。
+                // 目录树仍在 newPath 下:按 oldPath 做的分支恢复/暂存还原注定级联失败,
+                // 短路保留现场,暂存目录一律不删。
                 stagedItemsRestored = false
                 editServiceLog.fault("event=rollback_short_circuited reason=directory_still_at_new_path path=\(newPath, privacy: .private)")
             }
@@ -524,13 +468,12 @@ struct WorkplaceEditService {
             }
         }
         if stagedItemsRestored {
-            // 递归删除(暂存目录里可能是整棵仓库树)移出主线程。
             await Self.removeItemOffMainThread(
                 syncCoordinator.fileSystemService,
                 at: removalStagingRoot.path
             )
         } else {
-            // 保留暂存目录,用户可从该路径手工取回未还原的仓库目录。
+            // 还原不完整:保留暂存目录供用户手工取回。
             editServiceLog.error("event=rollback_incomplete staging_root_preserved path=\(removalStagingRoot.path, privacy: .private)")
         }
         for path in rollbackLocksAcquired.reversed() {
@@ -628,8 +571,7 @@ struct WorkplaceEditService {
     }
 
     private func restoreStagedItems(_ stagedItems: [(originalPath: String, stagedPath: String)]) async throws {
-        // 还原同样是整棵仓库树的移动,可能跨卷,移出主线程执行。
-        // 只捕获 Sendable 的路径列表,失败信息带回主线程记录。
+        // 整棵仓库树的移动可能跨卷,移出主线程;闭包只捕获 Sendable 路径列表。
         let failures = await Task.detached(priority: .userInitiated) {
             () -> [(path: String, reason: String)] in
             var failures: [(path: String, reason: String)] = []
@@ -662,10 +604,8 @@ struct WorkplaceEditService {
         }
     }
 
-    /// 按"克隆已启动"路径清单清理本次编辑产生的仓库目录(不存在的路径静默跳过)。
     private func removeClonedItemsIfNeeded(_ paths: [String]) async throws {
-        // 递归删除可能耗时数分钟(参考 WorkplaceRuntimeService.removeItemOffMainThread),
-        // 移出主线程执行;只捕获 Sendable 的文件系统服务与路径列表,不捕获 self。
+        // 递归删除可能耗时数分钟,必须移出主线程;闭包只捕获 Sendable 的服务与路径,不捕获 self。
         let fileSystem = syncCoordinator.fileSystemService
         try await Task.detached(priority: .userInitiated) {
             for path in paths {
@@ -686,8 +626,7 @@ struct WorkplaceEditService {
         _ fileSystem: any FileSystemServicing,
         at path: String
     ) async {
-        // 尽力而为,但失败必须留痕:这里删的可能是整棵仓库树,静默失败会把一份
-        // 完整副本留在临时目录里无人知晓(同文件 restoreStagedItems 已是这个口径)。
+        // 失败必须留痕:删的可能是整棵仓库树,静默失败会把完整副本永久留在临时目录。
         await Task.detached(priority: .userInitiated) {
             do {
                 try fileSystem.removeItemIfExists(at: path)
@@ -704,10 +643,8 @@ struct WorkplaceEditService {
     ) async throws {
         guard rollbacks.isEmpty == false else { return }
         let gitService = gitService
-        // 回滚必须脱离调用方的取消上下文:正向编辑常因用户取消而失败,回滚若仍在
-        // 已取消的任务里跑,checkout 会直接抛 CancellationError,一次都切不回去,
-        // 分支停在编辑中途的状态。与 restoreStagedItems 同款:闭包内只捕获 Sendable
-        // 值,失败信息(已本地化为中文)带回本方法留痕并上抛。
+        // 回滚必须脱离调用方的取消上下文:正向编辑常因用户取消而失败,回滚若仍在已取消的
+        // 任务里跑,checkout 会直接抛 CancellationError、一次都切不回去,分支停在编辑中途。
         let failures = await Task.detached(priority: .userInitiated) {
             () -> [(path: String, branch: String, reason: String)] in
             var failures: [(path: String, branch: String, reason: String)] = []
@@ -743,8 +680,7 @@ struct WorkplaceEditService {
     ) -> String {
         let normalizedPath = WorkplaceStore.normalizedPath(path)
         let normalizedOldPrefix = WorkplaceStore.normalizedPath(oldPrefix)
-        // 前缀必须落在**目录边界**上:`/root/ws2/repo` 对 `/root/ws` 同样 hasPrefix,
-        // 但那是兄弟目录,按前缀替换会产出错误的重映射。
+        // 前缀必须落在**目录边界**上:`/root/ws2/repo` 对 `/root/ws` 同样 hasPrefix,按前缀替换会产出错误重映射。
         let suffix: String
         if normalizedPath == normalizedOldPrefix {
             suffix = ""

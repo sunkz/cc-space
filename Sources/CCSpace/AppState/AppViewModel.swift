@@ -5,27 +5,16 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var route: AppRoute = .settings
     @Published private(set) var selectedWorkplaceID: UUID?
 
-    /// 路由变化的持久化回调,由组合根(RootSplitView)在 `onAppear` 注入
-    /// (见 `bindRoutePersistenceCallbacks`:init 时 SwiftUI 实际持有的 SettingsStore
-    /// 还在 StateObject 的 autoclosure 里,提前构造实例正是要消灭的重复读盘)。
-    /// 写 settings.json 镜像的职责收在 AppViewModel 内,View 层只负责渲染,
-    /// 避免持久化逻辑散落在视图修饰链里随渲染路径漂移。
+    /// 路由变化回调,由组合根(RootSplitView)在 `onAppear` 注入:init 时 SettingsStore 还在
+    /// StateObject 的 autoclosure 里,提前构造会造成重复读盘。写 settings.json 只在本类型内。
     var onRouteChange: ((AppRoute) -> Void)?
     var onSelectedWorkplaceChange: ((UUID?) -> Void)?
 
-    /// 切换路由并清空工作区选中。
-    /// - Parameter notifySelectionChange: 是否回调 `onSelectedWorkplaceChange(nil)`
-    ///   (即把 `lastSelectedWorkplaceID` 持久化成 nil)。启动恢复"降级到列表页"
-    ///   (上次选中项缺失/非法/已删)时传 false:那往往是本轮工作区记录被损坏重置的
-    ///   结果,落盘 nil 会级联改写设置文件(旧版本该分支也是只切路由不写)。
+    /// notifySelectionChange=false 只用于启动恢复"降级到列表页"(上次选中项缺失/非法/已删):
+    /// 那往往是本轮记录被损坏重置的结果,把 nil 落盘会级联改写设置文件。
     func showRoute(_ route: AppRoute, notifySelectionChange: Bool = true) {
-        // 刻意**不**做"值未变就提前返回"的空操作守卫(第八轮评审曾误判为优化点):
-        // 模型只知道自己的状态,不知道设置文件里已持久化的值。启动恢复走 .settings
-        // 时(默认路由即 .settings)内存态本就有 route == .settings && selected == nil,
-        // 守卫会拦掉这次回调,而文件里可能还留着上一轮的 lastSelectedWorkplaceID——
-        // 下一次启动的恢复逻辑读到它就会把 App 直接开进那个工作区,
-        // 变成"上次停在设置页,却打开在工作区页"的幽灵状态。
-        // 冗余的防抖写(同值覆写)代价远小于漏写一个已失效的选中项。
+        // 刻意不做"值未变就提前返回"的空操作守卫:内存态与设置文件里已持久化的值可能不同,守卫会
+        // 拦掉回调,文件残留的 lastSelectedWorkplaceID 会让下次启动直接开进那个工作区(幽灵状态)。
         self.route = route
         selectedWorkplaceID = nil
         onRouteChange?(route)
@@ -34,11 +23,6 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    /// 启动恢复"降级到列表页"的专用入口:只切路由,固定不回调
-    /// `onSelectedWorkplaceChange`(即不把 nil 回写 `lastSelectedWorkplaceID`)。
-    /// 单独成入口而不是让调用方记得传 `notifySelectionChange: false`,
-    /// 是为了把"写错参数"的自由度消掉——写成默认值的后果是把健康文件里的
-    /// 上次选中项覆写成 nil(见 `RouteRestoreSupport.apply`)。
     func showDegradedRoute(_ route: AppRoute) {
         showRoute(route, notifySelectionChange: false)
     }
@@ -64,8 +48,7 @@ final class AppViewModel: ObservableObject {
             case .workplace(let workplaceID):
                 showWorkplace(workplaceID)
             case nil:
-                // getter 恒不返回 nil,但侧栏 List(selection:) 在清空选中时会写入
-                // nil——保持现状(路由不变),不是可删的死分支。
+                // 侧栏 List(selection:) 清空选中时会写入 nil(getter 恒不返回 nil):保持现状,不是死分支。
                 break
             }
         }

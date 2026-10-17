@@ -1,31 +1,19 @@
 import Foundation
 
-/// 「展示所有行」的全文取用与行展开(Service 层)。
-///
-/// 从 `Views/DiffViewerSupport.swift` 迁入:这两个类型直接读磁盘、调
-/// `GitServicing.blobContent`,是业务取数而非展示逻辑。按 AGENTS.md 的依赖方向
-/// (`Views → AppState/Stores → Services → Models`),git/磁盘访问不应挂在 Views 层的
-/// 类型上——迁走后 View 侧只消费结果,取数入口统一到 `RepositoryWindowContext`。
-/// 行为逐字保持不变。
-
 /// 「展示所有行」:用文件全文把 patch 未覆盖的行补齐,得到完整文件序列的行模型。
-///
-/// 全文按 diff 来源取用(见 `DiffFullFileContentStrategy`):工作区改动读磁盘,
-/// commit/分支对比读对应修订版本的 blob;取不到全文(删除的文件、二进制等)时不展开。
+/// 全文按 diff 来源取用(见 `DiffFullFileContentStrategy`):工作区改动读磁盘,commit/分支对比读对应修订版本的 blob;
+/// 取不到全文(删除的文件、二进制等)时不展开。
 enum DiffFullFileExpander {
     /// 读工作区文件全文;文件不存在或无法按 UTF-8 解码时返回 nil。
-    /// 同步磁盘 IO + 全文件解码,大文件可达毫秒级:必须在后台执行——
-    /// 生产调用链由 fullFileContentProvider 将其包进 `Task.detached`,
-    /// 勿在 MainActor 上直接调用(本函数自身是同步函数,不会自动挪线程)。
+    /// 同步磁盘 IO + 全文件解码,必须在后台执行:生产调用链由 fullFileContentProvider 包进 `Task.detached`,
+    /// 本函数是同步函数不会自动挪线程,勿在 MainActor 上直接调用。
     static func workingTreeFileContent(localPath: String, filePath: String) -> String? {
         let fullPath = (localPath as NSString).appendingPathComponent(filePath)
         return try? String(contentsOfFile: fullPath, encoding: .utf8)
     }
 
     /// 纯逻辑:在首个 hunk 之前、hunk 之间与最后一个 hunk 之后,补入文件全文中未被 patch 覆盖的行。
-    ///
-    /// 补入行的内容按新侧行号取自文件;新旧两侧行号沿 hunk 各自累计,
-    /// 因此前面的 hunk 有净增/净删时,补入行的旧侧行号依然正确。
+    /// 补入行按新侧行号取自文件,新旧两侧行号沿 hunk 各自累计,故前面的 hunk 有净增/净删时旧侧行号依然正确;
     /// patch 没有 hunk(空改动、纯重命名/权限变化)时无需展开,原样返回。
     static func expand(patchLines: [DiffPatchLine], fileContent: String?) -> [DiffPatchLine] {
         guard let fileContent else { return patchLines }
@@ -83,7 +71,6 @@ enum DiffFullFileExpander {
         return lines.map { $0.hasSuffix("\r") ? String($0.dropLast()) : $0 }
     }
 
-    /// patch 中单个 hunk 的展开信息:头行、两侧起始行号与 body 的数组下标区间(不含头行)。
     private struct HunkSpan {
         let headerLine: DiffPatchLine
         let oldStart: Int
@@ -117,16 +104,11 @@ enum DiffFullFileExpander {
     }
 }
 
-/// 「展示所有行」新侧全文的取用策略,按 diff 来源解析。
-///
-/// 补全 hunk 间行的内容取自 diff 新侧:工作区改动的新侧是磁盘上的文件;
-/// commit/分支对比的新侧是对应修订版本的 blob。分支对比的 head 为当前分支时,
-/// diff 实为 `git diff <base>`(对比到工作区、含未提交改动),新侧仍在磁盘,
+/// 「展示所有行」新侧全文的取用策略,按 diff 来源解析:工作区改动的新侧是磁盘上的文件,commit/分支对比的新侧是对应修订的 blob。
+/// 分支对比的 head 为当前分支时 diff 实为 `git diff <base>`(对比到工作区、含未提交改动),新侧仍在磁盘,
 /// 必须读文件而非取 blob,否则展示的内容与 diff 对不上。
 enum DiffFullFileContentStrategy: Equatable {
-    /// 读磁盘上的工作区文件。
     case workingTree
-    /// 读修订版本中的 blob。
     case revision(String)
 
     /// 取某文件的新侧全文;二进制文件不展开,返回 nil。
@@ -141,10 +123,7 @@ enum DiffFullFileContentStrategy: Equatable {
     }
 }
 extension DiffFullFileContentStrategy {
-    /// 按 Service 层的 diff 来源解析策略。
-    ///
-    /// `currentBranch` 仅在比较来源下有意义:head 等于当前分支时 diff 实为
-    /// `git diff <base>`(到工作区、含未提交改动),新侧在磁盘而非 blob。
+    /// 按 Service 层的 diff 来源解析策略;`currentBranch` 仅在比较来源下有意义(见类型注释)。
     /// head 为 nil(detached HEAD)返回 nil,走"不展开"兜底。
     static func resolve(
         diffSource: RepositoryWindowContext.DiffSource,

@@ -12,7 +12,6 @@ final class UserFacingErrorTests: XCTestCase {
 
     func test_gitServiceErrorUsesLocalizedChineseMessage() {
         let error = GitServiceError.commandFailed(
-            exitCode: 128,
             stderr: "fatal: could not read Username for 'https://example.com': terminal prompts disabled"
         )
         let message = UserFacingError.message(for: error)
@@ -26,7 +25,6 @@ final class UserFacingErrorTests: XCTestCase {
     /// stderr 原样英文透出——必须补中文标识,不能让英文直接进 `lastError`。
     func test_unmappedEnglishGitStderrGetsChineseMarker() {
         let error = GitServiceError.commandFailed(
-            exitCode: 1,
             stderr: """
             error: Your local changes to the following files would be overwritten by merge:
                 a.txt
@@ -46,7 +44,6 @@ final class UserFacingErrorTests: XCTestCase {
     /// 结构性判据(是否命中 localizeMessage 模式表)下必须仍补中文标识。
     func test_mixedEnglishStderrWithChineseFilenameStillGetsPrefix() {
         let error = GitServiceError.commandFailed(
-            exitCode: 1,
             stderr: """
             error: Your local changes to the following files would be overwritten by merge:
                 技术文档.md

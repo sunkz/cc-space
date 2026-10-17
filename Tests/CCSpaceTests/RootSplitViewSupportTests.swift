@@ -106,10 +106,10 @@ final class RootSplitViewSupportTests: XCTestCase {
             rootDirectory: makeTestRootURL()
         )
         let workplaceStore = WorkplaceStore(fileStore: fileStore)
-        let service = RootSplitRuntimeServices.makeWorkplaceRuntimeService(
+        let service = WorkplaceRuntimeService(
             workplaceStore: workplaceStore,
             syncCoordinator: SyncCoordinator(gitService: GitService()),
-            settings: AppSettings(workplaceRootPath: " /tmp/workspaces ")
+            workplaceRootPath: AppSettings(workplaceRootPath: " /tmp/workspaces ").workplaceRootPath
         )
 
         XCTAssertEqual(service.workplaceRootPath, "/tmp/workspaces")

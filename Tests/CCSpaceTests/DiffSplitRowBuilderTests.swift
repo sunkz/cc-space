@@ -21,7 +21,7 @@ final class DiffSplitRowBuilderTests: XCTestCase {
 
     func test_pairsChangeBlockAndFillsShorterSide() {
         let rows = DiffSplitRowBuilder.rows(from: [
-            line(.hunkHeader(context: nil), "@@ -1,3 +1,3 @@"),
+            line(.hunkHeader, "@@ -1,3 +1,3 @@"),
             line(.removed, "-a", old: 1),
             line(.removed, "-b", old: 2),
             line(.added, "+c", new: 1),
@@ -29,7 +29,7 @@ final class DiffSplitRowBuilderTests: XCTestCase {
         ])
 
         XCTAssertEqual(rows.count, 4)
-        XCTAssertEqual(rows[0].content, .hunkHeader(line(.hunkHeader(context: nil), "@@ -1,3 +1,3 @@")))
+        XCTAssertEqual(rows[0].content, .hunkHeader(line(.hunkHeader, "@@ -1,3 +1,3 @@")))
         // 两条删除对一条新增:第一行 (a,c),第二行 (b,·)。
         XCTAssertEqual(pairOf(rows[1]).left?.text, "-a")
         XCTAssertEqual(pairOf(rows[1]).right?.text, "+c")

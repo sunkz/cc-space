@@ -196,7 +196,12 @@ final class GitProcessRunnerOutputLimitTests: XCTestCase {
         while process.isRunning, Date() < deadline {
             try await Task.sleep(for: .milliseconds(20))
         }
-        XCTAssertFalse(process.isRunning, "进程在 \(timeout)s 内未退出")
+        if process.isRunning {
+            // 超时必须自己收口:waitUntilExit 对仍在运行的进程是无界阻塞,
+            // 直接走下去会让整套件挂死而不是报失败。
+            kill(process.processIdentifier, SIGKILL)
+            XCTFail("进程在 \(timeout)s 内未退出")
+        }
         process.waitUntilExit()
     }
 }

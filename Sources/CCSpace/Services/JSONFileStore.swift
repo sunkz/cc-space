@@ -26,28 +26,22 @@ struct JSONFileStore: Sendable {
     /// 多文档事务的"意图清单"前缀:rename 开始前落盘,提交完成后删除;
     /// 启动清理据此把崩溃中断的多文件提交回滚(全旧)或前滚(全新)。
     static let transactionManifestPrefix = ".ccspace-json-txn-"
-    /// 陈旧回滚判定阈值:目标文件 mtime 比清单 mtime 晚出该值以上,判为
-    /// "崩溃之后被合法重写",回滚防线跳过换回(见 `recoverInterruptedTransactions`)。
-    /// 崩溃那次提交的 rename 发生在清单写入后毫秒~秒级,而"崩溃后继续用"的
-    /// 合法重写至少以分钟计——120s 足以把两类写入分开。
+    /// 陈旧回滚判定阈值:目标 mtime 比清单 mtime 晚出该值以上,判为"崩溃之后被合法重写",回滚防线跳过换回。
+    /// 崩溃那次提交的 rename 距清单写入是毫秒~秒级,而崩溃后的合法重写至少以分钟计——120s 足以分开两类。
     static let staleRestoreMarginSeconds: TimeInterval = 120
-    /// 回滚失败时备份被移出暂存目录后使用的前缀。必须与 `stagingDirectoryPrefix` 不同:
-    /// 否则下次启动的 `cleanupStaleStagingDirectories` 会因 mtime 超阈值把装着唯一备份
-    /// 的目录直接删掉,"可手工取回"就落空了。
+    /// 回滚失败备份移出暂存目录后使用的前缀。必须与 `stagingDirectoryPrefix` 不同,否则下次启动的
+    /// `cleanupStaleStagingDirectories` 会按 mtime 阈值把装着唯一备份的目录直接删掉。
     private static let rollbackBackupDirectoryPrefix = ".ccspace-json-rollback-backup-"
 
     private struct PendingTransactionManifest: Codable {
         let stagingDirectoryName: String
         let fileNames: [String]
     }
-    /// 回滚备份目录的保留份数:超出最近 N 份的旧备份已不再是"唯一可手工取回的副本",
-    /// 必须让启动清理回收——否则回滚反复失败时该目录无限累积(降级模式下其中
-    /// 含带明文 API Key 的 settings.json 副本)。
+    /// 回滚备份保留最近 N 份:更旧的已不是"唯一可手工取回的副本",必须让启动清理回收——否则回滚
+    /// 反复失败时无限累积(降级模式下其中含带明文 API Key 的 settings.json 副本)。
     private static let rollbackBackupDirectoryRetentionCount = 3
-    /// 回滚备份修剪的年龄下限:仅"超出保留份数 **且** mtime 超过本龄期"的备份才可删除。
-    /// 只用暂存目录的清理阈值(默认 10 分钟)时,崩溃循环(连续快速重启)会把用户
-    /// 尚未取回的、装着明文 key 的最新备份在下次启动就剪掉;年龄下限保证刚产生的
-    /// 备份至少保留 24 小时,叠加保留份数,任何时刻最新 1 份必不被剪。
+    /// 修剪的年龄下限:仅"超出保留份数 **且** mtime 超本龄期"的备份才可删。只用暂存目录的 10 分钟阈值时,
+    /// 崩溃循环(连续快速重启)会剪掉用户尚未取回的最新明文 key 备份;24h 下限保证最新 1 份必不被剪。
     private static let rollbackBackupDirectoryMaxAge: TimeInterval = 24 * 3600
 
     let rootDirectory: URL
@@ -56,13 +50,8 @@ struct JSONFileStore: Sendable {
         self.rootDirectory = rootDirectory
     }
 
-    /// 清理上次崩溃/强退遗留的暂存目录,并收敛被崩溃打断的多文档事务(见
-    /// `recoverInterruptedTransactions`)。
-    ///
-    /// **必须由 App 启动显式调用一次**,不要放进 init:JSONFileStore 在运行期会被
-    /// 反复构造(RootSplitView 每次重建都 new 一个),放进 init 等于每次重建都在
-    /// 主线程枚举目录,并可能删掉**正在进行中**的写入暂存目录。
-    /// 另外只清理"足够老"的暂存目录/事务清单,避免误伤并发实例的在途写入。
+    /// 清理崩溃/强退遗留的暂存目录,并收敛被崩溃打断的多文档事务;只处理"足够老"的对象以避开在途写入。
+    /// **必须由 App 启动显式调用一次,不要放进 init**:本类型运行期被反复构造,放 init 会删掉正在进行的写入。
     static func cleanupStaleStagingDirectories(
         in rootDirectory: URL,
         olderThan interval: TimeInterval = 600,
@@ -83,9 +72,8 @@ struct JSONFileStore: Sendable {
             let modifiedAt = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
                 ?? .distantPast
             guard modifiedAt < cutoff else { continue }
-            // 崩溃残留的暂存目录里可能装着 backup/(旧版数据副本):
-            // 先把备份改名逃到 `.ccspace-json-rollback-backup-` 前缀下(不受本清理管辖),
-            // 再删暂存目录——否则会把"被覆写前的唯一副本"连同残留一起销毁。
+            // 暂存目录里可能装着 backup/(旧版数据副本):先把备份逃到 `.ccspace-json-rollback-backup-` 前缀下
+            // (不受本清理管辖)再删暂存目录,否则会把"被覆写前的唯一副本"连同残留一起销毁。
             let backupDirectory = url.appendingPathComponent("backup", isDirectory: true)
             if let backups = try? fileManager.contentsOfDirectory(
                 at: backupDirectory,
@@ -98,19 +86,14 @@ struct JSONFileStore: Sendable {
                 do {
                     try fileManager.moveItem(at: backupDirectory, to: recoveryDirectory)
                 } catch {
-                    // 备份挪不动(多为权限/磁盘异常)时绝不能删暂存目录:
-                    // 那恰好在"唯一副本"最需要保全的时刻把它销毁。
-                    // 保留整个暂存目录,下次启动重试。
+                    // 备份挪不动(多为权限/磁盘异常)时绝不能删暂存目录——那恰好在"唯一副本"最需要保全时
+                    // 把它销毁。保留整个暂存目录,下次启动重试。
                     jsonFileStoreLog.error("event=staging_backup_rescue_failed staging=\(url.lastPathComponent, privacy: .public) reason=\(error.localizedDescription, privacy: .public)")
                     continue
                 }
             }
             try? fileManager.removeItem(at: url)
         }
-        // 回滚备份目录逃过上面的清理,但并非永久保留:仅删除"超出保留份数 **且** 超过
-        // `rollbackBackupDirectoryMaxAge 龄期"的旧备份——与暂存目录共用 10 分钟 cutoff 时,
-        // 崩溃循环下用户尚未取回的最新明文 key 备份会在下次启动即被剪掉;
-        // 保留份数 + 年龄下限双重保证,任何时刻最新的 1 份必不被剪。
         let rollbackBackups = entries
             .filter { $0.lastPathComponent.hasPrefix(rollbackBackupDirectoryPrefix) }
             .sorted { lhs, rhs in
@@ -129,11 +112,8 @@ struct JSONFileStore: Sendable {
         }
     }
 
-    /// 按意图清单收敛被进程崩溃打断的多文档事务:
-    /// - 仍有暂存文件未改名 ⇒ 提交未完成 ⇒ 回滚——已改名的文档用 backup/ 换回旧内容,
-    ///   无备份可删的"新建"文档从目标位置移除,整体回到全旧自洽态;
-    /// - 暂存文件全部消失 ⇒ 提交已完成,只是清单没删掉 ⇒ 前滚——只清残留。
-    /// 与暂存目录清理共用年龄阈值:新清单可能是并发实例的在途写入,不能碰。
+    /// 按意图清单收敛被崩溃打断的多文档事务:仍有暂存文件未改名 ⇒ 回滚(已改名的用 backup/ 换回、无备份的
+    /// 新建文档删掉);全部消失 ⇒ 提交已完成 ⇒ 只清残留。共用年龄阈值以避开并发实例的在途写入。
     private static func recoverInterruptedTransactions(
         in rootDirectory: URL,
         fileManager: FileManager,
@@ -159,8 +139,7 @@ struct JSONFileStore: Sendable {
                 isDirectory: true
             )
             guard fileManager.fileExists(atPath: stagingDirectory.path) else {
-                // 暂存目录已被处理(提交成功后的清理只剩清单没删掉),或已被
-                // 普通残留清理回收——两种情况都已无从回滚,清掉清单即可。
+                // 暂存目录已不在(提交成功后只剩清单没删掉,或已被普通残留清理回收)——都无从回滚,清掉清单。
                 try? fileManager.removeItem(at: url)
                 continue
             }
@@ -177,11 +156,8 @@ struct JSONFileStore: Sendable {
                 guard fileManager.fileExists(atPath: stagingDirectory.appendingPathComponent(fileName).path) == false else {
                     continue // 该文档未被提交,目标仍是旧值,不动
                 }
-                // 陈旧回滚防线:cutoff 只推迟处理,不消灭它——
-                // 崩溃后 10 分钟内重启被跳过、用户继续正常使用数小时,下一次启动
-                // 仍会走到这里,若无条件换回就把"崩溃之后"的合法写入整体吞掉。
-                // rename 保留暂存文件的 mtime(≈清单写入时刻),因此目标 mtime 显著
-                // 晚于清单的,只可能是崩溃后被合法重写:跳过换回/删除,前滚保留新数据。
+                // 陈旧回滚防线:cutoff 只推迟处理不消灭它,若无条件换回会把"崩溃之后"的合法写入整体吞掉。
+                // rename 保留暂存文件 mtime(≈清单写入时刻),目标 mtime 显著更晚只可能是崩溃后被合法重写。
                 let destinationURL = rootDirectory.appendingPathComponent(fileName)
                 let destinationModified = (try? destinationURL.resourceValues(forKeys: [.contentModificationDateKey]))?
                     .contentModificationDate ?? .distantPast
@@ -215,10 +191,8 @@ struct JSONFileStore: Sendable {
         }
     }
 
-    /// 把数据页同步到稳定存储:rename 只保证目录项原子性,不保证内容先落盘,
-    /// 系统崩溃/断电后目标文件可能已就位却是空/零页。刻意不用 F_FULLFSYNC——
-    /// 本存储的写盘在调用线程(多为主线程)同步执行,全盘缓存刷写可达秒级;
-    /// fsync 已足以覆盖进程崩溃与绝大多数系统崩溃窗口。
+    /// rename 只保证目录项原子性,不保证内容先落盘:系统崩溃/断电后目标可能已就位却是空/零页。
+    /// 刻意不用 F_FULLFSYNC——写盘在调用线程(多为主线程)同步执行,全盘刷写可达秒级,fsync 已够覆盖崩溃窗口。
     static func fsyncFile(atPath path: String) throws {
         let descriptor = open(path, O_RDONLY)
         guard descriptor >= 0 else {
@@ -230,11 +204,8 @@ struct JSONFileStore: Sendable {
         }
     }
 
-    /// 把**目录项**变更(rename/link/unlink)同步到稳定存储:文件数据 fsync 后,
-    /// rename 本身可能仍滞留在目录的元数据缓存里,断电后目录回到改名前的形态。
-    /// 提交完成后对数据目录补一次刷写,"清单已删/暂存已清"的收敛才有磁盘依据。
-    /// open 用 O_RDONLY(非 FREAD)才能对目录生效;APFS 上对目录的 F_FULLFSYNC
-    /// 只刷目录元数据,不会退化成同步刷整卷。
+    /// 把**目录项**变更(rename/link/unlink)同步到稳定存储:rename 本身可能滞留在目录元数据缓存里,
+    /// 断电后目录回到改名前形态,提交完成的收敛才失去磁盘依据。O_RDONLY(非 FREAD)才能对目录生效。
     static func fsyncDirectory(atPath path: String) throws {
         let descriptor = open(path, O_RDONLY)
         guard descriptor >= 0 else {
@@ -246,11 +217,8 @@ struct JSONFileStore: Sendable {
         }
     }
 
-    /// 同卷 `rename(2)` 原子覆盖:目标文件在任一时刻都是完整的旧内容或完整的新内容,
-    /// **不存在** `removeItem + moveItem` 那种"旧文件已删、新文件未就位"的崩溃窗口。
-    /// 不用 `FileManager.moveItem`(目标已存在时报错),也不用 `replaceItemAt`
-    /// (backupItemName 传 nil 会把旧文件移进废纸篓,含 API Key 的 settings.json 会滞留系统回收目录)。
-    /// 暂存目录就建在 `rootDirectory` 之下,与目标必然同卷,rename 保证原子且即时可见。
+    /// 同卷 `rename(2)` 原子覆盖:目标在任一时刻都是完整旧内容或完整新内容,不存在 remove+move 的崩溃窗口。
+    /// 不用 `FileManager.moveItem`(目标已存在报错)与 `replaceItemAt`(废纸篓会滞留含 API Key 的 settings.json)。
     static func atomicReplace(stagedURL: URL, destinationURL: URL) throws {
         let result: Int32 = stagedURL.withUnsafeFileSystemRepresentation { srcPtr in
             destinationURL.withUnsafeFileSystemRepresentation { dstPtr in
@@ -279,9 +247,8 @@ struct JSONFileStore: Sendable {
         return decoder
     }
 
-    /// 把无法解码的数据文件保全为 `xxx.json.corrupt-<时间戳>` 副本,
-    /// 避免 Store 用空数据覆写后原内容不可恢复。
-    /// 优先改名(move,不留旧文件);失败时退回复制(copy)——即使后续保存覆写原件,副本仍在。
+    /// 把无法解码的数据文件保全为 `xxx.json.corrupt-<时间戳>` 副本,避免 Store 用空数据覆写后原内容不可恢复。
+    /// 优先改名(move,不留旧文件);失败时退回复制(copy)。
     func preserveCorruptFile(named fileName: String) {
         let sourceURL = rootDirectory.appendingPathComponent(fileName)
         let fileManager = FileManager.default
@@ -302,13 +269,10 @@ struct JSONFileStore: Sendable {
             do {
                 try fileManager.moveItem(at: sourceURL, to: destinationURL)
             } catch {
-                // 改名失败(如跨卷/权限问题)时退回复制,仍保全一份原始内容。
                 try fileManager.copyItem(at: sourceURL, to: destinationURL)
             }
-            // 副本内容等同原文件,settings.json 等数据文件含工作区路径等隐私配置,
-            // 收紧为仅本人可读写。
-            // 失败要留痕:静默 `try?` 会让"敏感数据副本没收紧权限"这件事无迹可读
-            // (口径同 exportBackup)。
+            // 副本内容等同原文件(settings.json 等含工作区路径等隐私配置),收紧为仅本人可读写。
+            // 失败必须留痕:静默 `try?` 会让"敏感副本没收紧权限"这件事无迹可读。
             do {
                 try fileManager.setAttributes(
                     [.posixPermissions: 0o600],
@@ -320,14 +284,14 @@ struct JSONFileStore: Sendable {
                 )
             }
         } catch {
-            // 两种保全方式均失败:已无更多手段,原文件保持原样,
-            // 下次保存仍可能覆写。此处不能 throw(调用方在启动错误路径上),只能留痕。
+            // 两种保全方式均失败:原文件保持原样、下次保存仍可能覆写;此处不能 throw
+            // (调用方在启动错误路径上),只能留痕。
             jsonFileStoreLog.error("event=preserve_corrupt_file_failed file=\(fileName, privacy: .public) reason=\(error.localizedDescription, privacy: .public)")
         }
         pruneCorruptCopies(named: fileName)
     }
 
-    /// 损坏副本此前会永久累积(且可能含明文 API Key),只保留最近若干份。
+    /// 损坏副本可能含明文 API Key 等隐私数据,只保留最近若干份,避免永久累积。
     private func pruneCorruptCopies(named fileName: String, keepingMostRecent limit: Int = 5) {
         let fileManager = FileManager.default
         let prefix = "\(fileName).corrupt-"
@@ -381,9 +345,8 @@ struct JSONFileStore: Sendable {
         let stagingDirectory = rootDirectory
             .appendingPathComponent("\(Self.stagingDirectoryPrefix)\(UUID().uuidString)", isDirectory: true)
         let backupDirectory = stagingDirectory.appendingPathComponent("backup", isDirectory: true)
-        // 暂存/备份目录一并按 0700 创建:数据文件(settings.json 等)含工作区路径等
-        // 隐私配置,写入后到 chmod 0600 之间存在窗口(以及崩溃残留待清理期间),
-        // 目录 0700 保证同机其他用户无法遍历进入读取。
+        // 暂存/备份目录一并按 0700 创建:数据文件含隐私配置,写入后到 chmod 0600 之间存在窗口
+        // (以及崩溃残留待清理期间),目录 0700 保证同机其他用户无法遍历进入读取。
         try FileManager.default.createDirectory(
             at: stagingDirectory,
             withIntermediateDirectories: true,
@@ -411,9 +374,8 @@ struct JSONFileStore: Sendable {
                 try Self.fsyncFile(atPath: stagedURL.path)
             }
             if documents.count > 1 {
-                // 多文档的"原子提交"对进程崩溃并不成立:逐个 rename 之间崩溃会留下
-                // 部分新部分旧的混合态(如"设置指新根、记录指旧根")。rename 开始前先落
-                // 意图清单,启动清理据此把未完成提交回滚到全旧态(见 recover...)。
+                // 多文档的"原子提交"对进程崩溃并不成立:逐个 rename 之间崩溃会留下部分新部分旧的混合态
+                // (如"设置指新根、记录指旧根")。rename 开始前先落意图清单,启动据此回滚到全旧态。
                 manifestURL = try writeTransactionManifest(
                     stagingDirectory: stagingDirectory,
                     documents: documents
@@ -430,8 +392,6 @@ struct JSONFileStore: Sendable {
                         // 备份是跨启动恢复(recoverInterruptedTransactions)换回旧内容的来源:
                         // copyItem 不 fsync,断电后暂存里的备份可能是零页,回滚即把损坏写回正式文件。
                         try Self.fsyncFile(atPath: backupURL.path)
-                        // 回滚副本已自建(backupURL),替换本身用 rename(2) 原子覆盖:
-                        // 不留废纸篓副本,且崩溃时目标文件要么是旧内容要么是新内容,不会消失。
                         try Self.atomicReplace(stagedURL: stagedURL, destinationURL: destinationURL)
                     } else {
                         try FileManager.default.moveItem(at: stagedURL, to: destinationURL)
@@ -442,17 +402,14 @@ struct JSONFileStore: Sendable {
                 for url in newlyCreatedURLs.reversed() {
                     try? FileManager.default.removeItem(at: url)
                 }
-                // 回滚覆盖"凡备份存在者",而非仅成功完成的文档:
-                // 多文档事务里任何一个 rename 成功都意味着该文件已是新内容,
-                // 但整批必须视为失败,凡有备份者都要换回旧内容。
-                // 未轮到的文档没有备份,fileExists 守卫自然跳过。
+                // 回滚覆盖"凡备份存在者",而非仅成功完成的文档:任一 rename 成功即该文件已是新内容,
+                // 但整批必须视为失败;未轮到的文档没有备份,fileExists 守卫自然跳过。
                 for document in documents.reversed() {
                     let backupURL = backupDirectory.appendingPathComponent(document.fileName)
                     let destinationURL = rootDirectory.appendingPathComponent(document.fileName)
                     guard FileManager.default.fileExists(atPath: backupURL.path) else { continue }
                     do {
-                        // 同主路径:rename(2) 原子换回旧内容,不经废纸篓,也不留中间窗口。
-                        // 不能整体 try?:换回失败必须进 rollbackFailed 分支保住备份。
+                        // rename(2) 原子换回旧内容,不经废纸篓;不能整体 try?:换回失败必须进 rollbackFailed 保住备份。
                         try Self.atomicReplace(stagedURL: backupURL, destinationURL: destinationURL)
                         // 换回的旧内容同样要落稳:否则断电后正式文件回到零页备份的形态。
                         try? Self.fsyncFile(atPath: destinationURL.path)
@@ -469,11 +426,7 @@ struct JSONFileStore: Sendable {
             if let manifestURL {
                 try? FileManager.default.removeItem(at: manifestURL)
             }
-            // 回滚未完成时保留备份,让里面的唯一副本有机会被手工取回。
             if rollbackFailed {
-                // 备份必须移出 `.ccspace-json-write-` 前缀:留在暂存目录里,
-                // 下次启动的 cleanupStaleStagingDirectories 会因 mtime 超阈值把它
-                // 当作崩溃残留直接删掉,"可手工取回"就成了空话。
                 var recoveryPath = stagingDirectory.path
                 let recoveryDirectory = rootDirectory.appendingPathComponent(
                     "\(Self.rollbackBackupDirectoryPrefix)\(UUID().uuidString)",
@@ -489,9 +442,6 @@ struct JSONFileStore: Sendable {
                     at: stagingDirectory,
                     to: recoveryDirectory
                 )) != nil {
-                    // 备份单独搬不动(磁盘满/权限与主写失败高度相关,失败概率不低):
-                    // 把整个暂存目录改名到保全前缀下,同样能逃离启动清理,
-                    // 只是连暂存里的半成品文件一起保留。
                     recoveryPath = recoveryDirectory.path
                 } else {
                     jsonFileStoreLog.error(
@@ -505,9 +455,8 @@ struct JSONFileStore: Sendable {
             throw error
         }
 
-        // 提交完成:先让 rename 的目录项落稳,再撤清单、清暂存。
-        // 顺序不能反:若 fsync 排在清残留之后,断电会让"清单已删、rename 未落盘",
-        // 下次启动的跨启动恢复(依赖清单)已无从回滚。
+        // 提交完成:先让 rename 的目录项落稳,再撤清单、清暂存。顺序不能反:若 fsync 排在清残留之后,
+        // 断电会让"清单已删、rename 未落盘",依赖清单的跨启动恢复已无从回滚。
         try? Self.fsyncDirectory(atPath: rootDirectory.path)
         if let manifestURL {
             try? FileManager.default.removeItem(at: manifestURL)
@@ -532,11 +481,8 @@ struct JSONFileStore: Sendable {
         return manifestURL
     }
 
-    /// 逐元素容错地加载数组。
-    ///
-    /// 整文件解码失败时(例如某条记录字段缺失/类型不匹配),丢弃坏记录、保留其余,
-    /// 而不是让整个文件被判为损坏清空——后者会级联触发下游启动对账把关联数据也清掉。
-    /// - Returns: 保留下来的记录与丢弃条数;文件不存在或 JSON 结构本身不合法时返回 nil。
+    /// 逐元素容错加载数组:整文件解码失败时丢弃坏记录、保留其余,而不是让整个文件被判为损坏清空
+    /// (后者会级联触发下游启动对账把关联数据也清掉)。文件不存在或 JSON 结构不合法时返回 nil。
     func loadArrayToleratingBadElements<Value: Decodable>(
         _ type: Value.Type,
         from fileName: String

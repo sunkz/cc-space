@@ -7,7 +7,6 @@ import XCTest
 final class CCSpaceFeedbackActionErrorTests: XCTestCase {
     func test_actionErrorLocalizesUnmappedEnglishGitStderr() {
         let error = GitServiceError.commandFailed(
-            exitCode: 1,
             stderr: """
             error: Your local changes to the following files would be overwritten by merge:
                 a.txt

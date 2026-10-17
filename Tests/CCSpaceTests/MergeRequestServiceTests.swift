@@ -32,7 +32,6 @@ private actor MergeRequestGitServiceStub: GitServicing {
     func remoteURL(in directory: String) async -> String? { remoteURLResult }
     func checkoutBranch(_ branch: String, in directory: String) async throws {}
     func createLocalBranch(_ branch: String, in directory: String) async throws {}
-    func remoteBranchExists(branch: String, remoteURL: String) async -> Bool { false }
     func mergeDefaultBranchIntoCurrent(in directory: String) async throws -> GitMergeDefaultBranchOutcome { .merged }
     func recentCommits(in directory: String, count: Int) async -> [GitCommitEntry] { [] }
     func remoteBranches(for remoteURL: String) async -> [String]? { [] }

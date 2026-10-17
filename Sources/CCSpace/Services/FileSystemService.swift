@@ -7,9 +7,8 @@ protocol FileSystemServicing: Sendable {
 
 extension FileSystemServicing {
     func directoryExists(at path: String) -> Bool {
-        // 归一化口径与 LocalPathSafety.normalizedPath 一致:整串 trim 会把合法地以空格
-        // 结尾的目录("mydir ")判成"不存在",磁盘刷新据此删掉记录(数据丢失)。
-        // trim 结果只用于空判定,探测用原样(去前导空白后)的路径。
+        // 归一化口径与 LocalPathSafety.normalizedPath 一致:整串 trim 会把合法地以空格结尾的目录("mydir ")判成"不存在",
+        // 磁盘刷新据此删掉记录(数据丢失)。trim 结果只用于空判定,探测用原样(去前导空白后)的路径。
         let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmedPath.isEmpty == false else { return false }
         let probePath = LocalPathSafety.normalizedPath(path)
@@ -26,7 +25,7 @@ extension FileSystemServicing {
         do {
             try removeItem(at: path)
         } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError {
-            // File already removed — nothing to do
+            // 目录已被别的路径删除:幂等,不报错。
         }
     }
 }

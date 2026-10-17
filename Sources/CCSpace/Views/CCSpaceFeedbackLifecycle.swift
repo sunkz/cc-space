@@ -1,22 +1,13 @@
 import SwiftUI
 
 extension View {
-    func ccspaceAutoDismissFeedback(
-        _ feedback: Binding<CCSpaceFeedback?>,
-        after delay: TimeInterval = 3
-    ) -> some View {
-        modifier(
-            CCSpaceFeedbackAutoDismissModifier(
-                feedback: feedback,
-                delay: delay
-            )
-        )
+    func ccspaceAutoDismissFeedback(_ feedback: Binding<CCSpaceFeedback?>) -> some View {
+        modifier(CCSpaceFeedbackAutoDismissModifier(feedback: feedback))
     }
 }
 
 private struct CCSpaceFeedbackAutoDismissModifier: ViewModifier {
     @Binding var feedback: CCSpaceFeedback?
-    let delay: TimeInterval
 
     @State private var dismissTask: Task<Void, Never>?
 
@@ -40,7 +31,7 @@ private struct CCSpaceFeedbackAutoDismissModifier: ViewModifier {
         // @MainActor:睡眠后直写 @Binding feedback,须回主执行器落笔(同 CCSpaceTooltip
         // 里 Task { @MainActor in } 的范式)。
         dismissTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(delay))
+            try? await Task.sleep(for: .seconds(3))
             if !Task.isCancelled {
                 self.feedback = nil
             }

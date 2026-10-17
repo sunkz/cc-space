@@ -7,7 +7,6 @@ struct GitDirectoryCandidate: Sendable, Equatable {
     let folderName: String
 }
 
-/// 候选目录加上读到的 origin 远端地址。
 struct DiscoveredGitRepository: Sendable, Equatable {
     let workplaceID: UUID
     let path: String
@@ -39,23 +38,14 @@ struct ExternalRepositoryImportResult: Sendable {
     let changed: Bool
 }
 
-/// 把"用户手动拷进工作区目录的 Git 仓库"变成列表里的正式行(纯函数,便于测试)。
-///
-/// 背景:工作区的仓库行完全由配置驱动(工作区只存 `selectedRepositoryIDs`,
-/// 行是 `RepositorySyncState`),磁盘刷新过去只做"记录对应目录还在不在"的校正,
-/// 不枚举目录。于是拷进 `工作区/xxx` 的仓库永远不会出现在列表里。
-///
-/// 本类型只做两件事:`candidates`(磁盘事实 → 待处理目录)与
-/// `importPlan`(待处理目录 + 远端地址 → 三份文档的新状态),都不落盘、不起进程。
+/// 把"用户手动拷进工作区目录的 Git 仓库"变成列表里的正式行(纯函数,不落盘、不起进程,交由调用方留痕)。
+/// 只做两件事:`candidates`(磁盘事实 → 待处理目录)与 `importPlan`(待处理目录 + 远端地址 → 三份文档的新状态)。
 enum ExternalRepositoryImport {
-    /// 单个工作区每轮最多处理的候选目录数:发现阶段要为每个候选起一次
-    /// `git remote get-url`,用户误把整个大目录塞进工作区时不能把刷新拖成长时间占用。
+    /// 单个工作区每轮最多处理的候选目录数:发现阶段每个候选要起一次 `git remote get-url`,不能把刷新拖成长时间占用。
     static let maxCandidatesPerWorkplace = 32
 
     /// 枚举各工作区目录的**一级子目录**,挑出含 `.git` 且尚未被同步态跟踪的目录。
-    ///
-    /// 只看一级:仓库的正常形态就是 `工作区/仓库名`,更深层级(如仓库内部的
-    /// 子模块、示例工程)不是本工作区管理的仓库,列出来只会制造噪音。
+    /// 只看一级:仓库的正常形态就是 `工作区/仓库名`,更深层级(子模块、示例工程)列出来只是噪音。
     static func candidates(
         workplaces: [Workplace],
         syncStates: [RepositorySyncState],
@@ -88,8 +78,7 @@ enum ExternalRepositoryImport {
                     workplacePath: workplacePath,
                     repositoryName: name
                 ) else { continue }
-                // 符号链接指向工作区外时按"不受管"处理:后续 pull/删除会直接作用在
-                // 解析出的真实目录上,不能让它混进列表。
+                // 符号链接指向工作区外时按"不受管"处理:后续 pull/删除会直接作用在解析出的真实目录上。
                 guard LocalPathSafety.isWithinDirectory(childPath, rootPath: workplacePath) else { continue }
                 var isDirectory = ObjCBool(false)
                 guard fileManager.fileExists(atPath: childPath, isDirectory: &isDirectory),
@@ -114,13 +103,8 @@ enum ExternalRepositoryImport {
         return discovered
     }
 
-    /// 生成把候选目录纳入列表的新状态。
-    ///
-    /// 归属规则(仓库池以 gitURL 为唯一键,磁盘刷新会硬删同 URL 的重复配置):
-    /// - 远端地址已存在于仓库池 → 复用该配置,行的 `localPath` 记实际目录
-    ///   (目录名可以与配置 `repoName` 不同,读/拉/切分支全部走 `localPath`);
-    ///   该工作区里这个仓库已有行时跳过——行 id 是 `工作区-仓库` 组合键,再来一行会撞。
-    /// - 远端地址是新仓库 → 以**目录名**为仓库名新建配置,保证 `repoName` 与磁盘目录一致。
+    /// 归属规则(仓库池以 gitURL 为唯一键,磁盘刷新会硬删同 URL 的重复配置):远端已存在 → 复用该配置、行的 `localPath` 记实际目录
+    /// (读/拉/切分支全走 localPath),该工作区已有行则跳过(行 id 是 `工作区-仓库` 组合键);新远端 → 以**目录名**新建配置,保证与磁盘目录一致。
     static func importPlan(
         discovered: [DiscoveredGitRepository],
         workplaces: [Workplace],

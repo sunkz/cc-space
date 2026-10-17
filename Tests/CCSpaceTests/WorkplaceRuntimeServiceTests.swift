@@ -195,7 +195,6 @@ private actor WorkplaceRuntimeGitServiceSpy: GitServicing {
         return abortInterruptedOperationResultsByDirectory[directory] ?? .merge
     }
 
-    func remoteBranchExists(branch: String, remoteURL: String) async -> Bool { false }
 
 
     func mergeDefaultBranchIntoCurrent(in directory: String) async throws -> GitMergeDefaultBranchOutcome {
@@ -423,7 +422,6 @@ private final class ConcurrentPushGitServiceSpy: GitServicing, @unchecked Sendab
 
     func createLocalBranch(_ branch: String, in directory: String) async throws {}
 
-    func remoteBranchExists(branch: String, remoteURL: String) async -> Bool { false }
 
 
     func mergeDefaultBranchIntoCurrent(in directory: String) async throws -> GitMergeDefaultBranchOutcome {
@@ -469,12 +467,12 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         apiState.hasLocalDirectory = true
         apiState.lastError = nil
         apiState.lastSyncedAt = Date(timeIntervalSince1970: 100)
-        workplaceStore.updateSyncState(apiState)
+        workplaceStore.updateSyncStates([apiState])
 
         var webState = try XCTUnwrap(syncState(for: webRepository.id, workplaceID: workplace.id, in: workplaceStore))
         webState.status = .failed
         webState.lastError = "clone failed"
-        workplaceStore.updateSyncState(webState)
+        workplaceStore.updateSyncStates([webState])
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         let service = WorkplaceRuntimeService(
@@ -531,7 +529,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = "checkout failed"
-        workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncStates([state])
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         let service = WorkplaceRuntimeService(
@@ -581,13 +579,13 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         apiState.status = .success
         apiState.hasLocalDirectory = true
         apiState.lastSyncedAt = baselineDate
-        workplaceStore.updateSyncState(apiState)
+        workplaceStore.updateSyncStates([apiState])
 
         var webState = try XCTUnwrap(syncState(for: webRepository.id, workplaceID: workplace.id, in: workplaceStore))
         webState.status = .success
         webState.hasLocalDirectory = true
         webState.lastSyncedAt = nil
-        workplaceStore.updateSyncState(webState)
+        workplaceStore.updateSyncStates([webState])
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         let service = WorkplaceRuntimeService(
@@ -653,7 +651,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         apiState.hasLocalDirectory = true
         apiState.localPath = apiPath
         apiState.lastSyncedAt = baselineDate
-        workplaceStore.updateSyncState(apiState)
+        workplaceStore.updateSyncStates([apiState])
 
         var webState = try XCTUnwrap(syncState(for: webRepository.id, workplaceID: workplace.id, in: workplaceStore))
         webState.status = .failed
@@ -661,7 +659,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         webState.localPath = webPath
         webState.lastError = "stale push error"
         webState.lastSyncedAt = baselineDate
-        workplaceStore.updateSyncState(webState)
+        workplaceStore.updateSyncStates([webState])
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setBranchStatus(makeBranchStatus(hasUnpushedCommits: true), for: apiPath)
@@ -681,7 +679,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
             syncState(for: webRepository.id, workplaceID: workplace.id, in: workplaceStore)
         )
 
-        XCTAssertEqual(result, RepositoryPushResult(successCount: 1, failedCount: 0, skippedCount: 1))
+        XCTAssertEqual(result, WorkplaceBatchOperationResult(successCount: 1, failedCount: 0, skippedCount: 1))
         XCTAssertEqual(persistedAPIState.status, .success)
         XCTAssertNil(persistedAPIState.lastError)
         XCTAssertNotNil(persistedAPIState.lastSyncedAt)
@@ -720,7 +718,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = nil
-        workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncStates([state])
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setUnreadableBranchStatus(for: localPath)
@@ -737,7 +735,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         )
         let pushedDirectories = await gitService.pushedDirectories()
 
-        XCTAssertEqual(result, RepositoryPushResult(successCount: 0, failedCount: 1, skippedCount: 0, failedNames: ["api"]))
+        XCTAssertEqual(result, WorkplaceBatchOperationResult(successCount: 0, failedCount: 1, skippedCount: 0, failedNames: ["api"]))
         XCTAssertEqual(persistedState.status, .failed)
         XCTAssertEqual(persistedState.lastError, "无法读取仓库 Git 状态")
         XCTAssertTrue(pushedDirectories.isEmpty)
@@ -769,7 +767,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = "old error"
-        workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncStates([state])
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setBranchStatus(makeBranchStatus(hasUnpushedCommits: true), for: localPath)
@@ -785,7 +783,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         let persistedState = try XCTUnwrap(
             syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore)
         )
-        XCTAssertEqual(result, RepositoryPushResult(successCount: 0, failedCount: 1, skippedCount: 0, failedNames: ["api"]))
+        XCTAssertEqual(result, WorkplaceBatchOperationResult(successCount: 0, failedCount: 1, skippedCount: 0, failedNames: ["api"]))
         XCTAssertEqual(persistedState.status, .failed)
         XCTAssertEqual(persistedState.lastError, "push failed")
 
@@ -818,7 +816,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = nil
-        workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncStates([state])
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setBranchStatus(makeBranchStatus(hasUnpushedCommits: true), for: localPath)
@@ -871,7 +869,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
             state.hasLocalDirectory = true
             state.localPath = localPath
             state.lastError = "stale error"
-            workplaceStore.updateSyncState(state)
+            workplaceStore.updateSyncStates([state])
         }
 
         let gitService = ConcurrentPushGitServiceSpy()
@@ -885,7 +883,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         XCTAssertEqual(
             result,
-            RepositoryPushResult(successCount: 8, failedCount: 0, skippedCount: 0)
+            WorkplaceBatchOperationResult(successCount: 8, failedCount: 0, skippedCount: 0)
         )
         let maxActiveCount = await gitService.maxActiveCount()
         XCTAssertEqual(maxActiveCount, 4)
@@ -926,7 +924,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.localPath = localPath
         state.lastError = "push failed"
         state.lastSyncedAt = Date(timeIntervalSince1970: 123)
-        workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncStates([state])
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setBranchStatus(makeBranchStatus(), for: localPath)
@@ -976,7 +974,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = "old error"
-        workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncStates([state])
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setBranchStatus(makeBranchStatus(hasUnpushedCommits: true), for: localPath)
@@ -1091,7 +1089,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         )
         originalState.status = .failed
         originalState.lastError = "existing error"
-        workplaceStore.updateSyncState(originalState)
+        workplaceStore.updateSyncStates([originalState])
 
         let service = WorkplaceRuntimeService(
             workplaceStore: workplaceStore,
@@ -1190,7 +1188,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = "old error"
-        workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncStates([state])
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         let service = WorkplaceRuntimeService(
@@ -1238,7 +1236,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.status = .success
         state.hasLocalDirectory = true
         state.localPath = localPath
-        workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncStates([state])
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setCheckoutError(WorkplaceRuntimeStubError(message: "checkout failed"))
@@ -1284,7 +1282,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.status = .success
         state.hasLocalDirectory = true
         state.localPath = localPath
-        workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncStates([state])
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setCurrentBranch("main", for: localPath)
@@ -1343,7 +1341,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.status = .success
         state.hasLocalDirectory = true
         state.localPath = localPath
-        workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncStates([state])
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setCurrentBranch("main", for: localPath)
@@ -1399,7 +1397,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = "old error"
-        workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncStates([state])
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setCurrentBranch("release", for: localPath)
@@ -1461,7 +1459,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
             state.hasLocalDirectory = true
             state.localPath = URL(fileURLWithPath: workplace.path).appendingPathComponent(repository.repoName).path
             state.lastError = "old error"
-            workplaceStore.updateSyncState(state)
+            workplaceStore.updateSyncStates([state])
         }
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
@@ -1473,7 +1471,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         let result = try await service.switchRepositoriesToWorkBranch(in: workplace)
 
-        XCTAssertEqual(result, WorkplaceBulkBranchSwitchResult(successCount: 2, failedCount: 0))
+        XCTAssertEqual(result, WorkplaceBatchOperationResult(successCount: 2, failedCount: 0))
         let checkoutCalls = await gitService.checkedOutBranches()
         XCTAssertEqual(checkoutCalls.map(\.branch), ["release/88", "release/88"])
 
@@ -1521,7 +1519,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
             state.status = .success
             state.hasLocalDirectory = true
             state.localPath = localPaths[index]
-            workplaceStore.updateSyncState(state)
+            workplaceStore.updateSyncStates([state])
         }
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
@@ -1539,7 +1537,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         let result = try await service.switchRepositoriesToWorkBranch(in: workplace)
 
-        XCTAssertEqual(result, WorkplaceBulkBranchSwitchResult(successCount: 2, failedCount: 0))
+        XCTAssertEqual(result, WorkplaceBatchOperationResult(successCount: 2, failedCount: 0))
 
         let stashCalls = await gitService.stashedDirectories()
         XCTAssertEqual(stashCalls, [localPaths[0]])
@@ -1587,7 +1585,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = "old error"
-        workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncStates([state])
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         let service = WorkplaceRuntimeService(
@@ -1638,7 +1636,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.status = .success
         state.hasLocalDirectory = true
         state.localPath = localPath
-        workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncStates([state])
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setCurrentBranch("feature/api", for: localPath)
@@ -1650,7 +1648,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         let result = try await service.switchRepositoriesToDefaultBranch(in: workplace)
 
-        XCTAssertEqual(result, WorkplaceBulkBranchSwitchResult(successCount: 1, failedCount: 0))
+        XCTAssertEqual(result, WorkplaceBatchOperationResult(successCount: 1, failedCount: 0))
         let checkoutCalls = await gitService.checkedOutBranches()
         XCTAssertEqual(checkoutCalls.first?.branch, "main")
         let defaultBranchCalls = await gitService.defaultBranchCalls
@@ -1682,7 +1680,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.status = .success
         state.hasLocalDirectory = true
         state.localPath = localPath
-        workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncStates([state])
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setCurrentBranch("feature/api", for: localPath)
@@ -1724,7 +1722,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.status = .success
         state.hasLocalDirectory = true
         state.localPath = localPath
-        workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncStates([state])
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setDefaultBranchResult(nil)
@@ -1736,7 +1734,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
 
         let result = try await service.switchRepositoriesToDefaultBranch(in: workplace)
 
-        XCTAssertEqual(result, WorkplaceBulkBranchSwitchResult(successCount: 0, failedCount: 1, failedNames: ["api"]))
+        XCTAssertEqual(result, WorkplaceBatchOperationResult(successCount: 0, failedCount: 1, failedNames: ["api"]))
         let persistedState = try XCTUnwrap(
             syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore)
         )
@@ -1744,70 +1742,6 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         XCTAssertEqual(persistedState.status, .failed)
     }
 
-    func test_mergeDefaultBranchIntoCurrentSkipsDefaultBranchRepositories() async throws {
-        let stores = try makeServiceStores()
-        let repositoryStore = stores.repositoryStore
-        let workplaceStore = stores.workplaceStore
-        let workspaceRoot = stores.workspaceRoot
-
-        try repositoryStore.addRepository(gitURL: "git@github.com:org/api.git")
-        try repositoryStore.addRepository(gitURL: "git@github.com:org/web.git")
-
-        let repositories = repositoryStore.repositories.sorted { $0.repoName < $1.repoName }
-        let workplace = try workplaceStore.createWorkplace(
-            name: "blog",
-            rootPath: workspaceRoot.path,
-            selectedRepositories: repositories
-        )
-
-        let localPaths = repositories.map {
-            URL(fileURLWithPath: workplace.path).appendingPathComponent($0.repoName).path
-        }
-        for localPath in localPaths {
-            try FileManager.default.createDirectory(
-                atPath: localPath,
-                withIntermediateDirectories: true,
-                attributes: nil
-            )
-        }
-
-        for (index, repository) in repositories.enumerated() {
-            var state = try XCTUnwrap(
-                syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore)
-            )
-            state.status = .failed
-            state.hasLocalDirectory = true
-            state.localPath = localPaths[index]
-            state.lastError = "old error"
-            workplaceStore.updateSyncState(state)
-        }
-
-        let gitService = WorkplaceRuntimeGitServiceSpy()
-        await gitService.setCurrentBranch("main", for: localPaths[0])
-        await gitService.setCurrentBranch("feature/web", for: localPaths[1])
-        let service = WorkplaceRuntimeService(
-            workplaceStore: workplaceStore,
-            syncCoordinator: SyncCoordinator(gitService: gitService),
-            workplaceRootPath: workspaceRoot.path
-        )
-
-        let result = try await service.mergeDefaultBranchIntoCurrent(in: workplace)
-
-        XCTAssertEqual(
-            result,
-            WorkplaceBulkBranchSwitchResult(successCount: 1, failedCount: 0, skippedCount: 1)
-        )
-        let mergeCalls = await gitService.mergedDirectories()
-        XCTAssertEqual(mergeCalls, [localPaths[1]])
-
-        for repository in repositories {
-            let persistedState = try XCTUnwrap(
-                syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore)
-            )
-            XCTAssertEqual(persistedState.status, .success)
-            XCTAssertNil(persistedState.lastError)
-        }
-    }
 
     func test_mergeDefaultBranchIntoCurrentForRepositoryReturnsOutcomeAndClearsLastError() async throws {
         let stores = try makeServiceStores()
@@ -1835,7 +1769,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.hasLocalDirectory = true
         state.localPath = localPath
         state.lastError = "old error"
-        workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncStates([state])
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setCurrentBranch("main", for: localPath)
@@ -1883,7 +1817,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.status = .success
         state.hasLocalDirectory = true
         state.localPath = localPath
-        workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncStates([state])
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         await gitService.setCurrentBranch("feature/test", for: localPath)
@@ -1917,129 +1851,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         XCTAssertEqual(stashPopCalls, [localPath])
     }
 
-    func test_mergeDefaultBranchIntoCurrentPersistsFailuresPerRepository() async throws {
-        let stores = try makeServiceStores()
-        let repositoryStore = stores.repositoryStore
-        let workplaceStore = stores.workplaceStore
-        let workspaceRoot = stores.workspaceRoot
 
-        try repositoryStore.addRepository(gitURL: "git@github.com:org/api.git")
-        let repository = try XCTUnwrap(repositoryStore.repositories.first)
-        let workplace = try workplaceStore.createWorkplace(
-            name: "blog",
-            rootPath: workspaceRoot.path,
-            selectedRepositories: [repository]
-        )
-
-        let localPath = URL(fileURLWithPath: workplace.path).appendingPathComponent(repository.repoName).path
-        try FileManager.default.createDirectory(
-            atPath: localPath,
-            withIntermediateDirectories: true,
-            attributes: nil
-        )
-
-        var state = try XCTUnwrap(syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore))
-        state.status = .success
-        state.hasLocalDirectory = true
-        state.localPath = localPath
-        workplaceStore.updateSyncState(state)
-
-        let gitService = WorkplaceRuntimeGitServiceSpy()
-        await gitService.setCurrentBranch("feature/api", for: localPath)
-        await gitService.setMergeError(WorkplaceRuntimeStubError(message: "merge conflict"), for: localPath)
-        let service = WorkplaceRuntimeService(
-            workplaceStore: workplaceStore,
-            syncCoordinator: SyncCoordinator(gitService: gitService),
-            workplaceRootPath: workspaceRoot.path
-        )
-
-        let result = try await service.mergeDefaultBranchIntoCurrent(in: workplace)
-
-        XCTAssertEqual(
-            result,
-            WorkplaceBulkBranchSwitchResult(successCount: 0, failedCount: 1, skippedCount: 0, failedNames: ["api"])
-        )
-        let persistedState = try XCTUnwrap(
-            syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore)
-        )
-        XCTAssertEqual(persistedState.lastError, "merge conflict")
-        XCTAssertEqual(persistedState.status, .failed)
-    }
-
-    func test_mergeDefaultBranchIntoCurrentPersistsDirtyWorktreeFailure() async throws {
-        let stores = try makeServiceStores()
-        let repositoryStore = stores.repositoryStore
-        let workplaceStore = stores.workplaceStore
-        let workspaceRoot = stores.workspaceRoot
-
-        try repositoryStore.addRepository(gitURL: "git@github.com:org/api.git")
-        try repositoryStore.addRepository(gitURL: "git@github.com:org/web.git")
-
-        let repositories = repositoryStore.repositories.sorted { $0.repoName < $1.repoName }
-        let workplace = try workplaceStore.createWorkplace(
-            name: "blog",
-            rootPath: workspaceRoot.path,
-            selectedRepositories: repositories
-        )
-
-        let localPaths = repositories.map {
-            URL(fileURLWithPath: workplace.path).appendingPathComponent($0.repoName).path
-        }
-        for localPath in localPaths {
-            try FileManager.default.createDirectory(
-                atPath: localPath,
-                withIntermediateDirectories: true,
-                attributes: nil
-            )
-        }
-
-        for (index, repository) in repositories.enumerated() {
-            var state = try XCTUnwrap(
-                syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore)
-            )
-            state.status = .success
-            state.hasLocalDirectory = true
-            state.localPath = localPaths[index]
-            workplaceStore.updateSyncState(state)
-        }
-
-        let gitService = WorkplaceRuntimeGitServiceSpy()
-        await gitService.setCurrentBranch("feature/api", for: localPaths[0])
-        await gitService.setCurrentBranch("feature/web", for: localPaths[1])
-        await gitService.setBranchStatus(
-            makeBranchStatus(currentBranch: "feature/api", hasUncommittedChanges: true),
-            for: localPaths[0]
-        )
-        let service = WorkplaceRuntimeService(
-            workplaceStore: workplaceStore,
-            syncCoordinator: SyncCoordinator(gitService: gitService),
-            workplaceRootPath: workspaceRoot.path
-        )
-
-        let result = try await service.mergeDefaultBranchIntoCurrent(in: workplace)
-
-        XCTAssertEqual(
-            result,
-            WorkplaceBulkBranchSwitchResult(successCount: 2, failedCount: 0, skippedCount: 0)
-        )
-
-        let stashCalls = await gitService.stashedDirectories()
-        XCTAssertEqual(stashCalls, [localPaths[0]])
-
-        let stashPopCalls = await gitService.stashPoppedDirectories()
-        XCTAssertEqual(stashPopCalls, [localPaths[0]])
-
-        for repository in repositories {
-            let persistedState = try XCTUnwrap(
-                syncState(for: repository.id, workplaceID: workplace.id, in: workplaceStore)
-            )
-            XCTAssertEqual(persistedState.status, .success)
-            XCTAssertNil(persistedState.lastError)
-        }
-
-        let mergeCalls = await gitService.mergedDirectories()
-        XCTAssertEqual(Set(mergeCalls), Set(localPaths))
-    }
 
     func test_retryCloneDoesNotRemoveCorruptedPathOutsideWorkplace() async throws {
         let stores = try makeServiceStores()
@@ -2081,7 +1893,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.status = .failed
         state.hasLocalDirectory = true
         state.localPath = corruptedPath
-        workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncStates([state])
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         let service = WorkplaceRuntimeService(
@@ -2176,7 +1988,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
         state.status = .success
         state.hasLocalDirectory = true
         state.localPath = localPath
-        workplaceStore.updateSyncState(state)
+        workplaceStore.updateSyncStates([state])
 
         let gitService = WorkplaceRuntimeGitServiceSpy()
         if uncommittedChanges {
@@ -2660,7 +2472,7 @@ final class WorkplaceRuntimeServiceTests: XCTestCase {
             state.status = .success
             state.hasLocalDirectory = true
             state.localPath = localPath
-            workplaceStore.updateSyncState(state)
+            workplaceStore.updateSyncStates([state])
         }
 
         let gitService = WorkplaceRuntimeGitServiceSpy()

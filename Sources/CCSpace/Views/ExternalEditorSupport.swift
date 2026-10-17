@@ -364,8 +364,10 @@ final class OpenActionsModel: ObservableObject {
             )
             await MainActor.run {
                 guard generation == self.refreshGeneration else { return }
-                self.installedEditors = editors
-                self.installedTerminals = terminals
+                // 装的 App 通常不变:同值不回写,否则每轮刷新都把侧栏+详情+全部
+                // 仓库行重渲染一遍。
+                if self.installedEditors != editors { self.installedEditors = editors }
+                if self.installedTerminals != terminals { self.installedTerminals = terminals }
             }
         }
     }

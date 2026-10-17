@@ -89,19 +89,6 @@ final class SidebarViewSupportTests: XCTestCase {
         XCTAssertEqual(SidebarWorkplaceRowPresentationState.accessorySpacing, 4)
     }
 
-    func test_rowAccessoryStateOnlyShowsPinnedIndicatorForActivePinnedWorkplace() {
-        let pinnedActive = SidebarWorkplaceRowPresentationState(
-            workplace: makeWorkplace(name: "Pinned", repositoryCount: 1, isPinned: true, isArchived: false),
-            hasFailed: false
-        )
-        let pinnedArchived = SidebarWorkplaceRowPresentationState(
-            workplace: makeWorkplace(name: "Archived", repositoryCount: 1, isPinned: true, isArchived: true),
-            hasFailed: false
-        )
-
-        XCTAssertTrue(pinnedActive.showsPinnedIndicator)
-        XCTAssertFalse(pinnedArchived.showsPinnedIndicator)
-    }
 
     // MARK: - 创建时间相对文案
 

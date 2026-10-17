@@ -214,65 +214,7 @@ final class WorkplaceStoreTests: XCTestCase {
         XCTAssertEqual(persistedWorkplace.selectedRepositoryIDs, [repository.id])
     }
 
-    func test_updateRepositoriesUpdatesSelectedRepositoryIDs() throws {
-        let fileStore = JSONFileStore(rootDirectory: tempRoot())
-        let store = WorkplaceStore(fileStore: fileStore)
-        let firstRepository = makeRepository(
-            id: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
-            repoName: "api"
-        )
-        let secondRepository = makeRepository(
-            id: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
-            repoName: "web"
-        )
-        let rootPath = tempRoot().path
-        let workplace = try store.createWorkplace(
-            name: "ios-dev",
-            rootPath: rootPath,
-            selectedRepositories: [firstRepository]
-        )
 
-        try store.updateRepositories(
-            for: workplace.id,
-            selectedRepositoryIDs: [secondRepository.id],
-            repositories: []
-        )
-
-        XCTAssertEqual(store.workplaces.first?.selectedRepositoryIDs, [secondRepository.id])
-    }
-
-    func test_updateRepositoriesRemovesDeselectedSyncStatesAndPersists() throws {
-        let root = tempRoot()
-        let fileStore = JSONFileStore(rootDirectory: root)
-        let store = WorkplaceStore(fileStore: fileStore)
-        let firstRepository = makeRepository(
-            id: UUID(uuidString: "33333333-3333-3333-3333-333333333333")!,
-            repoName: "api"
-        )
-        let secondRepository = makeRepository(
-            id: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
-            repoName: "web"
-        )
-        let rootPath = tempRoot().path
-        let workplace = try store.createWorkplace(
-            name: "ios-dev",
-            rootPath: rootPath,
-            selectedRepositories: [firstRepository, secondRepository]
-        )
-
-        try store.updateRepositories(
-            for: workplace.id,
-            selectedRepositoryIDs: [firstRepository.id],
-            repositories: []
-        )
-
-        let inMemoryStates = store.syncStates.filter { $0.workplaceID == workplace.id }
-        XCTAssertEqual(inMemoryStates.map(\.repositoryID), [firstRepository.id])
-
-        let reloadedStore = WorkplaceStore(fileStore: fileStore)
-        let persistedStates = reloadedStore.syncStates.filter { $0.workplaceID == workplace.id }
-        XCTAssertEqual(persistedStates.map(\.repositoryID), [firstRepository.id])
-    }
 
     func test_updateSyncStateReplacesMatchingState() throws {
         let fileStore = JSONFileStore(rootDirectory: tempRoot())
@@ -288,7 +230,7 @@ final class WorkplaceStoreTests: XCTestCase {
         var updatedState = store.syncStates.first!
         updatedState.status = .success
         updatedState.lastSyncedAt = Date(timeIntervalSince1970: 1000)
-        store.updateSyncState(updatedState)
+        store.updateSyncStates([updatedState])
 
         let result = store.syncStates.first { $0.workplaceID == workplace.id && $0.repositoryID == repository.id }
         XCTAssertEqual(result?.status, .success)
@@ -313,7 +255,7 @@ final class WorkplaceStoreTests: XCTestCase {
 
         var arrived = existing
         arrived.status = .success
-        store.updateSyncState(arrived)
+        store.updateSyncStates([arrived])
 
         let restored = store.syncStates.first { $0.repositoryID == repository.id }
         XCTAssertEqual(restored?.status, .success)
@@ -340,7 +282,7 @@ final class WorkplaceStoreTests: XCTestCase {
             lastError: nil,
             lastSyncedAt: nil
         )
-        store.updateSyncState(orphanState)
+        store.updateSyncStates([orphanState])
 
         XCTAssertEqual(store.syncStates.count, 1)
     }
@@ -386,13 +328,12 @@ final class WorkplaceStoreTests: XCTestCase {
         let store = WorkplaceStore(fileStore: fileStore)
         let kept = makeRepository(repoName: "api")
         let dropped = makeRepository(repoName: "legacy")
+        // legacy 不在选中列表里:构造"行不存在且不被选中"的场景。
         let workplace = try store.createWorkplace(
             name: "ios-dev",
             rootPath: tempRoot().path,
-            selectedRepositories: [kept, dropped]
+            selectedRepositories: [kept]
         )
-        // 取消勾选 legacy:该仓库的状态行随之被移除(留下"行已不存在"的场景)。
-        try store.updateRepositories(for: workplace.id, selectedRepositoryIDs: [kept.id], repositories: [kept, dropped])
 
         let orphanRow = RepositorySyncState(
             workplaceID: workplace.id,
@@ -528,7 +469,7 @@ final class WorkplaceStoreTests: XCTestCase {
         var state = try XCTUnwrap(store.syncStates.first { $0.workplaceID == workplace.id })
         state.status = .success
         state.lastSyncedAt = .now
-        store.updateSyncState(state)
+        store.updateSyncStates([state])
 
         store.applyDiskRefreshResult(
             WorkplaceStore.diskRefreshResult(
@@ -551,142 +492,10 @@ final class WorkplaceStoreTests: XCTestCase {
         )
     }
 
-    func test_renameWorkplaceUpdatesNamePathAndSyncPaths() throws {
-        let root = tempRoot()
-        let fileStore = JSONFileStore(rootDirectory: root)
-        let store = WorkplaceStore(fileStore: fileStore)
-        let repository = makeRepository(repoName: "api")
-        let rootPath = tempRoot().path
-        let workplace = try store.createWorkplace(
-            name: "ios-dev",
-            rootPath: rootPath,
-            selectedRepositories: [repository]
-        )
 
-        // Create the directory so moveItem succeeds
-        try FileManager.default.createDirectory(
-            atPath: workplace.path,
-            withIntermediateDirectories: true
-        )
 
-        try store.renameWorkplace(id: workplace.id, newName: "ios-prod")
 
-        let updated = store.workplaces.first { $0.id == workplace.id }
-        XCTAssertEqual(updated?.name, "ios-prod")
-        XCTAssertEqual(updated?.path, URL(fileURLWithPath: rootPath).appendingPathComponent("ios-prod").path)
 
-        let syncState = store.syncStates.first { $0.workplaceID == workplace.id }
-        XCTAssertEqual(
-            syncState?.localPath,
-            URL(fileURLWithPath: rootPath).appendingPathComponent("ios-prod/api").path
-        )
-
-        // Verify persistence
-        let reloaded = WorkplaceStore(fileStore: fileStore)
-        XCTAssertEqual(reloaded.workplaces.first?.name, "ios-prod")
-        XCTAssertEqual(
-            reloaded.syncStates.first?.localPath,
-            URL(fileURLWithPath: rootPath).appendingPathComponent("ios-prod/api").path
-        )
-
-        // Cleanup
-        try? FileManager.default.removeItem(
-            atPath: URL(fileURLWithPath: rootPath).appendingPathComponent("ios-prod").path
-        )
-    }
-
-    func test_renameWorkplaceRejectsEmptyName() throws {
-        let fileStore = JSONFileStore(rootDirectory: tempRoot())
-        let store = WorkplaceStore(fileStore: fileStore)
-        let repository = makeRepository(repoName: "api")
-        let rootPath = tempRoot().path
-        let workplace = try store.createWorkplace(
-            name: "ios-dev",
-            rootPath: rootPath,
-            selectedRepositories: [repository]
-        )
-
-        XCTAssertThrowsError(
-            try store.renameWorkplace(id: workplace.id, newName: "   ")
-        ) { error in
-            XCTAssertEqual(error as? WorkplaceStoreError, .emptyName)
-        }
-    }
-
-    func test_renameWorkplaceRejectsInvalidName() throws {
-        let fileStore = JSONFileStore(rootDirectory: tempRoot())
-        let store = WorkplaceStore(fileStore: fileStore)
-        let repository = makeRepository(repoName: "api")
-        let rootPath = tempRoot()
-        let workplace = try store.createWorkplace(
-            name: "ios-dev",
-            rootPath: rootPath.path,
-            selectedRepositories: [repository]
-        )
-
-        XCTAssertThrowsError(
-            try store.renameWorkplace(id: workplace.id, newName: "../ios-prod")
-        ) { error in
-            XCTAssertEqual(error as? WorkplaceStoreError, .invalidName)
-        }
-    }
-
-    func test_renameWorkplaceRejectsDuplicatePath() throws {
-        let fileStore = JSONFileStore(rootDirectory: tempRoot())
-        let store = WorkplaceStore(fileStore: fileStore)
-        let repo1 = makeRepository(
-            id: UUID(uuidString: "77777777-7777-7777-7777-777777777777")!,
-            repoName: "api"
-        )
-        let repo2 = makeRepository(
-            id: UUID(uuidString: "88888888-8888-8888-8888-888888888888")!,
-            repoName: "web"
-        )
-        let rootPath = tempRoot().path
-        _ = try store.createWorkplace(
-            name: "ios-dev",
-            rootPath: rootPath,
-            selectedRepositories: [repo1]
-        )
-        let second = try store.createWorkplace(
-            name: "ios-staging",
-            rootPath: rootPath,
-            selectedRepositories: [repo2]
-        )
-
-        XCTAssertThrowsError(
-            try store.renameWorkplace(id: second.id, newName: "ios-dev")
-        ) { error in
-            XCTAssertEqual(error as? WorkplaceStoreError, .duplicatePath)
-        }
-    }
-
-    func test_renameWorkplaceRejectsExistingDirectoryOnDisk() throws {
-        let fileStore = JSONFileStore(rootDirectory: tempRoot())
-        let store = WorkplaceStore(fileStore: fileStore)
-        let rootPath = tempRoot()
-        let repository = makeRepository(repoName: "api")
-        let workplace = try store.createWorkplace(
-            name: "ios-dev",
-            rootPath: rootPath.path,
-            selectedRepositories: [repository]
-        )
-
-        try FileManager.default.createDirectory(
-            atPath: workplace.path,
-            withIntermediateDirectories: true
-        )
-        try FileManager.default.createDirectory(
-            at: rootPath.appendingPathComponent("ios-prod"),
-            withIntermediateDirectories: true
-        )
-
-        XCTAssertThrowsError(
-            try store.renameWorkplace(id: workplace.id, newName: "ios-prod")
-        ) { error in
-            XCTAssertEqual(error as? WorkplaceStoreError, .pathAlreadyExistsOnDisk)
-        }
-    }
 
     func test_workplaceLegacyJSONDecodesPinnedRepositoryIDsAsEmpty() throws {
         let legacyJSON = """
@@ -805,36 +614,6 @@ final class WorkplaceStoreTests: XCTestCase {
         XCTAssertEqual(updated.pinnedRepositoryIDs, [])
     }
 
-    func test_updateRepositoriesRemovesPinnedIDsThatAreNoLongerSelected() throws {
-        let fileStore = JSONFileStore(rootDirectory: tempRoot())
-        let store = WorkplaceStore(fileStore: fileStore)
-        let firstRepository = makeRepository(
-            id: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
-            repoName: "api"
-        )
-        let secondRepository = makeRepository(
-            id: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
-            repoName: "web"
-        )
-        let rootPath = tempRoot().path
-        let workplace = try store.createWorkplace(
-            name: "ios-dev",
-            rootPath: rootPath,
-            selectedRepositories: [firstRepository, secondRepository]
-        )
-
-        try store.setRepositoryPinned(true, repositoryID: firstRepository.id, in: workplace.id)
-        try store.setRepositoryPinned(true, repositoryID: secondRepository.id, in: workplace.id)
-
-        try store.updateRepositories(
-            for: workplace.id,
-            selectedRepositoryIDs: [secondRepository.id],
-            repositories: [firstRepository, secondRepository]
-        )
-
-        let updated = try XCTUnwrap(store.workplaces.first(where: { $0.id == workplace.id }))
-        XCTAssertEqual(updated.pinnedRepositoryIDs, [secondRepository.id])
-    }
 
     func test_applyWorkplaceEditRemovesPinnedIDsThatAreNoLongerSelected() throws {
         let fileStore = JSONFileStore(rootDirectory: tempRoot())

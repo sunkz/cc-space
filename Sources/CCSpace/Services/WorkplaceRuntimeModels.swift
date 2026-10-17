@@ -9,14 +9,11 @@ protocol BatchOperationResult: Sendable {
     var isCancelled: Bool { get }
 }
 
-/// 批量操作(切分支/合并/推送等)的统一汇总结果。
-/// 历史上的 `WorkplaceBulkBranchSwitchResult` / `RepositoryPushResult` / `BatchResultSummary`
-/// 字段完全一致,以下别名保留旧名称以减少调用方改动。
+/// 批量操作的统一汇总结果。
 struct WorkplaceBatchOperationResult: Equatable {
     let successCount: Int
     let failedCount: Int
     let skippedCount: Int
-    /// 等锁期间被取消的仓库数:与 skippedCount(业务跳过)分列,反馈文案据实表述。
     let cancelledCount: Int
     let failedNames: [String]
 
@@ -33,15 +30,10 @@ struct WorkplaceBatchOperationResult: Equatable {
         self.cancelledCount = cancelledCount
         self.failedNames = failedNames
     }
-
 }
 
-typealias BatchResultSummary = WorkplaceBatchOperationResult
-typealias WorkplaceBulkBranchSwitchResult = WorkplaceBatchOperationResult
-typealias RepositoryPushResult = WorkplaceBatchOperationResult
-
 extension Array where Element: BatchOperationResult {
-    func summarize() -> BatchResultSummary {
+    func summarize() -> WorkplaceBatchOperationResult {
         var successCount = 0
         var failedCount = 0
         var skippedCount = 0
@@ -61,7 +53,7 @@ extension Array where Element: BatchOperationResult {
                 skippedCount += 1
             }
         }
-        return BatchResultSummary(
+        return WorkplaceBatchOperationResult(
             successCount: successCount,
             failedCount: failedCount,
             skippedCount: skippedCount,
@@ -75,7 +67,6 @@ enum WorkplaceRuntimeServiceError: LocalizedError {
     case missingLocalRepository
     case emptyBranch
     case noLocalRepositories
-    case missingRemoteRepository
     case missingDefaultBranch
     case unreadableGitStatus
     case nothingToStash
@@ -91,8 +82,6 @@ enum WorkplaceRuntimeServiceError: LocalizedError {
             return "分支名不能为空"
         case .noLocalRepositories:
             return "当前工作区没有已克隆的本地仓库"
-        case .missingRemoteRepository:
-            return "仓库未配置 origin 远端"
         case .missingDefaultBranch:
             return "无法识别仓库默认分支"
         case .unreadableGitStatus:
@@ -202,13 +191,6 @@ enum BatchBranchResolutionResult: Sendable {
     case failure(String)
 }
 
-enum BatchMergeOperationResult: Sendable {
-    case merged(RepositorySyncState)
-    case skipped(RepositorySyncState)
-    case cancelled(RepositorySyncState)
-    case failed(RepositorySyncState)
-}
-
 extension BatchPushOperationResult: BatchOperationResult {
     var updatedState: RepositorySyncState {
         switch self {
@@ -248,35 +230,6 @@ extension BatchBranchSwitchOperationResult: BatchOperationResult {
 
     var isSucceeded: Bool {
         if case .success = self { return true }
-        return false
-    }
-
-    var isSkipped: Bool {
-        if case .skipped = self { return true }
-        return false
-    }
-
-    var isCancelled: Bool {
-        if case .cancelled = self { return true }
-        return false
-    }
-
-    var isFailed: Bool {
-        if case .failed = self { return true }
-        return false
-    }
-}
-
-extension BatchMergeOperationResult: BatchOperationResult {
-    var updatedState: RepositorySyncState {
-        switch self {
-        case .merged(let state), .skipped(let state), .cancelled(let state), .failed(let state):
-            return state
-        }
-    }
-
-    var isSucceeded: Bool {
-        if case .merged = self { return true }
         return false
     }
 

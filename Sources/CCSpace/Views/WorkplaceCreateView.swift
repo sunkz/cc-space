@@ -97,6 +97,9 @@ struct WorkplaceCreateView: View {
     }
 
     var body: some View {
+        // 派生状态每轮 body 只求值一次:每次读取都重跑分支名校验与整池排序。
+        let state = presentationState
+
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
@@ -106,7 +109,7 @@ struct WorkplaceCreateView: View {
                         name: $name,
                         branch: $branch,
                         isDisabled: isSubmitting,
-                        branchValidationError: presentationState.branchValidationError,
+                        branchValidationError: state.branchValidationError,
                         nameHint: "名称会作为根目录下的文件夹名",
                         branchHint: "选填，统一切换分支时使用此名称",
                         onInputChanged: clearFeedback
@@ -121,13 +124,13 @@ struct WorkplaceCreateView: View {
                         onToggle: toggleSelection
                     )
 
-                    if let branchStrategyFeedback = presentationState.branchStrategyFeedback {
+                    if let branchStrategyFeedback = state.branchStrategyFeedback {
                         CCSpaceFeedbackBanner(feedback: branchStrategyFeedback)
                     }
 
                     if let shownFeedback = feedback {
                         CCSpaceFeedbackBanner(feedback: shownFeedback, onClose: { self.feedback = nil })
-                    } else if let missingRootPathFeedback = presentationState.missingRootPathFeedback {
+                    } else if let missingRootPathFeedback = state.missingRootPathFeedback {
                         CCSpaceFeedbackBanner(feedback: missingRootPathFeedback)
                     }
                 }
@@ -140,7 +143,7 @@ struct WorkplaceCreateView: View {
                 submitTitle: "创建",
                 submittingTitle: "创建中",
                 isSubmitting: isSubmitting,
-                isSubmitDisabled: !presentationState.canSubmit,
+                isSubmitDisabled: !state.canSubmit,
                 progress: operationProgress,
                 // 提交中保留取消:onCancel 里走 submitTask?.cancel() 的清理通道,
                 // 禁用反而让用户对着 interactiveDismissDisabled 的弹窗干等。

@@ -65,8 +65,7 @@ final class UpdateChecker: ObservableObject {
             let (data, response) = try await dataLoader(request)
             guard !Task.isCancelled else { return }
             guard let httpResponse = response as? HTTPURLResponse else {
-                // 与下方 catch 同一口径:失败不清 latestVersion,避免徽标因一次
-                // 无效响应/限流 403 闪烁消失(见 catch 注释)。
+                // 与下方 catch 同一口径:失败不清 latestVersion,避免徽标闪烁消失。
                 lastErrorMessage = "检查更新失败：响应无效"
                 return
             }
@@ -83,17 +82,13 @@ final class UpdateChecker: ObservableObject {
             lastErrorMessage = nil
             updateCheckerLog.notice("event=update_check status=success version=\(version)")
         } catch {
-            // 失败时**保留**上次已知的 latestVersion:一次网络抖动就让"有更新"
-            // 徽标闪烁消失会误导用户(刚才还有新版本,现在又显示无)。
-            // 错误信息照记,版本只在成功拿到结果时更新。
+            // 失败时**保留**上次已知的 latestVersion:一次网络抖动就让"有更新"徽标闪烁消失会误导用户;错误信息照记,版本只在成功时更新。
             lastErrorMessage = Self.userFacingFailureMessage(for: error)
             updateCheckerLog.error("event=update_check status=failed reason=\(error.localizedDescription)")
         }
     }
 
-    /// 把检查更新失败映射为用户可读中文:NSURLError 的 localizedDescription 是英文,
-    /// 直接透出体验差;网络类错误一律给映射文案或通用兜底,不掺英文原文。
-    /// 用户主动取消不是失败,返回 nil(不写错误横幅)。
+    /// 检查更新失败映射为中文(NSURLError 的 localizedDescription 是英文,不掺原文直出);用户主动取消返回 nil(不写错误横幅)。
     private static func userFacingFailureMessage(for error: Error) -> String? {
         if error is CancellationError {
             return nil
@@ -103,12 +98,10 @@ final class UpdateChecker: ObservableObject {
             return nil
         }
         guard nsError.domain == NSURLErrorDomain else {
-            // 响应解码失败最常见:localizedDescription 是英文(DecodingError),
-            // 直接给中文说明,原文已进上方日志。其余罕见错误交给统一入口
-            // (自带中文文案原样透出,纯英文补中文前缀),不让英文 localizedDescription 直出。
             if error is DecodingError {
                 return "检查更新失败：无法解析更新服务器返回的数据"
             }
+            // 罕见错误走统一入口(中文文案原样透出、纯英文补中文前缀)。
             return UserFacingError.message(for: error)
         }
         switch nsError.code {

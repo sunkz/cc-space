@@ -62,35 +62,15 @@ extension View {
         modifier(CCSpaceIconActionButtonModifier(large: large))
     }
 
-    @ViewBuilder
-    func ccspaceToolbarActionButton(prominent: Bool = false) -> some View {
-        if prominent {
-            buttonStyle(.plain)
-                .controlSize(.regular)
-                .font(.body.weight(.semibold))
-                .foregroundStyle(.primary)
-                .frame(minWidth: 30, minHeight: 28)
-                .contentShape(Rectangle())
-        } else {
-            buttonStyle(.plain)
-                .controlSize(.small)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-        }
+    func ccspaceToolbarActionButton() -> some View {
+        buttonStyle(.plain)
+            .controlSize(.regular)
+            .font(.body.weight(.semibold))
+            .foregroundStyle(.primary)
+            .frame(minWidth: 30, minHeight: 28)
+            .contentShape(Rectangle())
     }
 
-}
-
-/// NSMenu/AppKit 渲染场景下的空白占位图标:
-/// 菜单里的 SwiftUI Button 会被转成 NSMenuItem,opacity/hidden 等修饰会被忽略,
-/// 只有"真实存在但不绘制内容"的图片才能既占住图标列宽度又不显形。
-enum MenuPlaceholderIcon {
-    /// 空白占位图:14pt 见方与勾选/星标一列的符号图同档,保证图标列等宽、文字左对齐一致。
-    static let blank: NSImage = {
-        let image = NSImage(size: NSSize(width: 14, height: 14))
-        image.isTemplate = true
-        return image
-    }()
 }
 
 struct CCSpaceEmptyStateCard<Actions: View>: View {

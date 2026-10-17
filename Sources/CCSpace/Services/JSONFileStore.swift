@@ -305,8 +305,9 @@ struct JSONFileStore: Sendable {
                 // 改名失败(如跨卷/权限问题)时退回复制,仍保全一份原始内容。
                 try fileManager.copyItem(at: sourceURL, to: destinationURL)
             }
-            // 副本内容等同原文件,settings.json 里含 AI API Key,收紧为仅本人可读写。
-            // 失败要留痕:静默 `try?` 会让"明文 key 的副本没收紧权限"这件事无迹可读
+            // 副本内容等同原文件,settings.json 等数据文件含工作区路径等隐私配置,
+            // 收紧为仅本人可读写。
+            // 失败要留痕:静默 `try?` 会让"敏感数据副本没收紧权限"这件事无迹可读
             // (口径同 exportBackup)。
             do {
                 try fileManager.setAttributes(
@@ -380,9 +381,9 @@ struct JSONFileStore: Sendable {
         let stagingDirectory = rootDirectory
             .appendingPathComponent("\(Self.stagingDirectoryPrefix)\(UUID().uuidString)", isDirectory: true)
         let backupDirectory = stagingDirectory.appendingPathComponent("backup", isDirectory: true)
-        // 暂存/备份目录一并按 0700 创建:数据文件含 AI API Key(settings.json)等敏感
-        // 配置,写入后到 chmod 0600 之间存在窗口(以及崩溃残留待清理期间),目录 0700
-        // 保证同机其他用户无法遍历进入读取。
+        // 暂存/备份目录一并按 0700 创建:数据文件(settings.json 等)含工作区路径等
+        // 隐私配置,写入后到 chmod 0600 之间存在窗口(以及崩溃残留待清理期间),
+        // 目录 0700 保证同机其他用户无法遍历进入读取。
         try FileManager.default.createDirectory(
             at: stagingDirectory,
             withIntermediateDirectories: true,
@@ -401,7 +402,7 @@ struct JSONFileStore: Sendable {
             for document in documents {
                 let stagedURL = stagingDirectory.appendingPathComponent(document.fileName)
                 try document.data.write(to: stagedURL, options: .atomic)
-                // 数据文件含 AI API Key(settings.json)等敏感配置,收紧为仅当前用户可读写;
+                // 数据文件(settings.json 等)含工作区路径等隐私配置,收紧为仅当前用户可读写;
                 // 后续 rename 是把该 inode 直接换到目标位置,权限随文件带过去。
                 try FileManager.default.setAttributes(
                     [.posixPermissions: 0o600],

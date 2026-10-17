@@ -8,54 +8,12 @@ struct AppSettings: Codable, Equatable, Sendable {
         case dark
     }
 
-    /// AI 服务配置:OpenAI 兼容服务(提交信息生成/测试连接/模型列表)。
-    ///
-    /// API Key 明文保存在 settings.json(数据目录已按 0600 收紧,与钥匙串
-    /// 功能移除前的旧版口径一致):编码恒写 apiKey 字段;缺字段的旧文件
-    /// (钥匙串托管期产物)解码为空串,在设置页重新粘贴一次即可。
-    struct AISettings: Codable, Equatable, Sendable {
-        /// 服务根地址,如 https://open.bigmodel.cn/api/paas/v4。
-        var baseURL: String
-        /// 模型名,如 glm-5.3-flash。
-        var modelName: String
-        /// 服务 API Key。
-        var apiKey: String = ""
-
-        enum CodingKeys: String, CodingKey {
-            case baseURL
-            case modelName
-            case apiKey
-        }
-
-        init(
-            baseURL: String,
-            modelName: String,
-            apiKey: String = ""
-        ) {
-            self.baseURL = baseURL
-            self.modelName = modelName
-            self.apiKey = apiKey
-        }
-
-        /// 手写解码并全部走 decodeIfPresent:Swift 属性默认值不参与合成解码,
-        /// 缺 key 即抛错会把整个 settings.json 判为损坏而整体重置;
-        /// 新增字段的默认值在此处兜底,保证旧数据前向兼容。
-        init(from decoder: Decoder) throws {
-            let container = try decoder.container(keyedBy: CodingKeys.self)
-            baseURL = try container.decodeIfPresent(String.self, forKey: .baseURL) ?? ""
-            modelName = try container.decodeIfPresent(String.self, forKey: .modelName) ?? ""
-            apiKey = try container.decodeIfPresent(String.self, forKey: .apiKey) ?? ""
-        }
-    }
-
     var workplaceRootPath: String
     var preferredOpenActionID: String?
     var hasCompletedOnboarding: Bool = false
     var lastSelectedRoute: String?
     var lastSelectedWorkplaceID: String?
     var appearanceMode: AppearanceMode = .system
-    /// AI 服务配置;nil 表示未启用。
-    var aiSettings: AISettings?
 
     enum CodingKeys: String, CodingKey {
         case workplaceRootPath
@@ -64,21 +22,18 @@ struct AppSettings: Codable, Equatable, Sendable {
         case lastSelectedRoute
         case lastSelectedWorkplaceID
         case appearanceMode
-        case aiSettings
     }
 
     init(
         workplaceRootPath: String,
         preferredOpenActionID: String? = nil,
         hasCompletedOnboarding: Bool = false,
-        appearanceMode: AppearanceMode = .system,
-        aiSettings: AISettings? = nil
+        appearanceMode: AppearanceMode = .system
     ) {
         self.workplaceRootPath = workplaceRootPath
         self.preferredOpenActionID = preferredOpenActionID
         self.hasCompletedOnboarding = hasCompletedOnboarding
         self.appearanceMode = appearanceMode
-        self.aiSettings = aiSettings
     }
 
     init(from decoder: Decoder) throws {
@@ -94,7 +49,6 @@ struct AppSettings: Codable, Equatable, Sendable {
         // 避免 decode 抛错导致整个 settings.json 被重置。
         let rawAppearanceMode = try container.decodeIfPresent(String.self, forKey: .appearanceMode)
         appearanceMode = rawAppearanceMode.flatMap(AppearanceMode.init(rawValue:)) ?? .system
-        aiSettings = try container.decodeIfPresent(AISettings.self, forKey: .aiSettings)
     }
 }
 

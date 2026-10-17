@@ -124,50 +124,9 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertFalse(json.contains("editorCommand"))
     }
 
-    /// AI 配置保存:API Key 明文随配置落盘,新 Store 读回完整配置(所见即所存)。
-    func test_updateAISettingsPersistsAPIKeyInFileAndReloads() throws {
-        let root = makeTestRootURL()
-        let fileStore = JSONFileStore(rootDirectory: root)
-        let firstStore = SettingsStore(fileStore: fileStore)
-        let aiSettings = AppSettings.AISettings(
-            baseURL: "https://api.example.com/v1",
-            modelName: "gpt-test",
-            apiKey: "sk-secret-123"
-        )
-
-        try firstStore.updateAISettings(aiSettings)
-
-        let rawJSON = try String(
-            contentsOf: root.appendingPathComponent("settings.json"),
-            encoding: .utf8
-        )
-        XCTAssertTrue(rawJSON.contains("\"apiKey\""), "API Key 字段必须落盘")
-        XCTAssertTrue(rawJSON.contains("sk-secret-123"), "钥匙串功能已移除,Key 以明文落盘")
-
-        let secondStore = SettingsStore(fileStore: fileStore)
-        let loaded = try XCTUnwrap(secondStore.settings.aiSettings)
-        XCTAssertEqual(loaded.baseURL, aiSettings.baseURL)
-        XCTAssertEqual(loaded.modelName, aiSettings.modelName)
-        XCTAssertEqual(loaded.apiKey, "sk-secret-123")
-    }
-
-    func test_clearAISettingsPersistsNil() throws {
-        let root = makeTestRootURL()
-        let fileStore = JSONFileStore(rootDirectory: root)
-        let firstStore = SettingsStore(fileStore: fileStore)
-        try firstStore.updateAISettings(
-            .init(baseURL: "https://api.example.com/v1", modelName: "gpt-test", apiKey: "sk-x")
-        )
-
-        try firstStore.updateAISettings(nil)
-
-        let secondStore = SettingsStore(fileStore: fileStore)
-        XCTAssertNil(secondStore.settings.aiSettings)
-    }
-
-    /// 启动(构造)只读不写:带明文 Key 的旧文件原样保留,
-    /// 不再有钥匙串迁移及其重写文件的副作用。
-    func test_constructionLoadsPlaintextAPIKeyWithoutRewritingFile() throws {
+    /// 启动(构造)只读不写:旧版本文件(含已移除的 aiSettings 字段)解码正常、原样保留,
+    /// 构造路径不得有迁移/改写副作用。
+    func test_constructionLoadsLegacyFileWithoutRewriting() throws {
         let root = makeTestRootURL()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let legacyJSON = """
@@ -178,103 +137,12 @@ final class SettingsStoreTests: XCTestCase {
 
         let store = SettingsStore(fileStore: JSONFileStore(rootDirectory: root))
 
-        XCTAssertEqual(store.settings.aiSettings?.apiKey, "legacy-secret", "构造读入完整 Key")
+        XCTAssertEqual(store.settings.workplaceRootPath, "/Users/demo/Workplaces", "构造读入完整配置")
         XCTAssertEqual(
             try String(contentsOf: settingsURL, encoding: .utf8),
             legacyJSON,
-            "构造不得改写 settings.json(启动迁移已随钥匙串移除)"
+            "构造不得改写 settings.json"
         )
-    }
-
-    /// 所见即所存:输入框(回显自已存值)清空后保存,已存 Key 随之删除。
-    /// 钥匙串时代的"空串回读保护"已随钥匙串一并移除——本地文件回显不存在
-    /// "读失败折叠成空串"的歧义,清空输入框是显式动作。
-    func test_updateAISettingsClearsStoredAPIKeyWhenInputEmptied() throws {
-        let root = makeTestRootURL()
-        let fileStore = JSONFileStore(rootDirectory: root)
-        let store = SettingsStore(fileStore: fileStore)
-        try store.updateAISettings(
-            .init(baseURL: "https://api.example.com/v1", modelName: "glm", apiKey: "sk-secret-123")
-        )
-
-        try store.updateAISettings(
-            .init(baseURL: "https://api.example.com/v2", modelName: "glm-2", apiKey: "")
-        )
-
-        XCTAssertEqual(store.settings.aiSettings?.apiKey, "", "清空输入框后保存即删除已存 Key")
-        XCTAssertEqual(store.settings.aiSettings?.baseURL, "https://api.example.com/v2", "其余配置照常保存")
-        let reloaded = SettingsStore(fileStore: fileStore)
-        XCTAssertEqual(reloaded.settings.aiSettings?.apiKey, "", "删除结果落盘")
-    }
-
-    /// 仅清除密钥、保留配置:换 Key / 改用本地服务的正规入口。
-    func test_clearStoredAPIKeyClearsKeyAndKeepsConfig() throws {
-        let root = makeTestRootURL()
-        let fileStore = JSONFileStore(rootDirectory: root)
-        let store = SettingsStore(fileStore: fileStore)
-        try store.updateAISettings(
-            .init(baseURL: "https://api.example.com/v1", modelName: "gpt-test", apiKey: "sk-x")
-        )
-
-        try store.clearStoredAPIKey()
-
-        let ai = try XCTUnwrap(store.settings.aiSettings)
-        XCTAssertEqual(ai.baseURL, "https://api.example.com/v1", "Base URL 保留")
-        XCTAssertEqual(ai.modelName, "gpt-test", "模型名保留")
-        XCTAssertEqual(ai.apiKey, "")
-
-        // 落盘可复读:重新加载后配置仍在、Key 仍空。
-        let reloaded = SettingsStore(fileStore: fileStore)
-        XCTAssertEqual(reloaded.settings.aiSettings?.baseURL, "https://api.example.com/v1")
-        XCTAssertEqual(reloaded.settings.aiSettings?.apiKey, "")
-    }
-
-    /// 无 AI 配置时是 no-op:没有可清的 Key。
-    func test_clearStoredAPIKeyIsNoopWithoutAIConfig() throws {
-        let root = makeTestRootURL()
-        let fileStore = JSONFileStore(rootDirectory: root)
-        let store = SettingsStore(fileStore: fileStore)
-
-        XCTAssertNoThrow(try store.clearStoredAPIKey())
-        XCTAssertNil(store.settings.aiSettings)
-    }
-
-    func test_decodingSettingsWithoutAISettingsYieldsNil() throws {
-        let legacyJSON = #"{"workplaceRootPath":"/Users/demo/Workplaces"}"#
-
-        let settings = try JSONDecoder().decode(
-            AppSettings.self,
-            from: Data(legacyJSON.utf8)
-        )
-
-        XCTAssertNil(settings.aiSettings)
-        XCTAssertEqual(settings.workplaceRootPath, "/Users/demo/Workplaces")
-    }
-
-    func test_decodingAISettingsWithoutAPIKeyKeepsOtherSettings() throws {
-        // AISettings 手写解码:字段缺失降级为默认值,而不是把整个 settings.json 判为损坏。
-        let legacyJSON = #"{"workplaceRootPath":"/Users/demo/Workplaces","aiSettings":{"baseURL":"https://api.example.com/v1","modelName":"gpt-test"}}"#
-
-        let settings = try JSONDecoder().decode(
-            AppSettings.self,
-            from: Data(legacyJSON.utf8)
-        )
-
-        XCTAssertEqual(settings.workplaceRootPath, "/Users/demo/Workplaces")
-        XCTAssertEqual(settings.aiSettings?.baseURL, "https://api.example.com/v1")
-        XCTAssertEqual(settings.aiSettings?.modelName, "gpt-test")
-        XCTAssertEqual(settings.aiSettings?.apiKey, "")
-    }
-
-    func test_decodingAISettingsWithUnknownFutureFieldIsIgnored() throws {
-        let futureJSON = #"{"workplaceRootPath":"/tmp","aiSettings":{"baseURL":"https://a.com","modelName":"m","apiKey":"k","futureField":1}}"#
-
-        let settings = try JSONDecoder().decode(
-            AppSettings.self,
-            from: Data(futureJSON.utf8)
-        )
-
-        XCTAssertEqual(settings.aiSettings?.apiKey, "k")
     }
 
     func test_saveRootPathErrorMessageWhenPersistFails() throws {

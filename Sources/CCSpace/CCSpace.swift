@@ -1,12 +1,4 @@
 import SwiftUI
-import os
-
-/// 文件级 logger:App 类型隐式 @MainActor,成员静态属性会被连带隔离,
-/// 而 settingsReader 是非隔离 Sendable 闭包,只能引用 nonisolated 的日志器。
-private let appStartupLog = Logger(
-    subsystem: "com.ccspace.app",
-    category: "App"
-)
 
 @main
 struct CCSpace: App {
@@ -16,41 +8,17 @@ struct CCSpace: App {
     /// 独立窗口(Diff/提交记录)的破坏性写操作统一走协调器:
     /// 与主窗口后台 pull/push/切分支共用 per-path 锁,避免对同一工作树交错写。
     private let syncCoordinator: SyncCoordinator
-    private let aiCommitService: AICommitMessageService
     /// 文件系统探测(目录存在性等):顶层持有,注入给需要它的独立窗口视图,
     /// 让 View 不再直接调 FileManager。
     private let fileSystemService = FileSystemService()
 
     @MainActor init() {
         self.syncCoordinator = SyncCoordinator(gitService: gitService)
-        let appSupportDirectory = launchConfiguration.resolvedAppSupportDirectory()
         // 清理上次崩溃/强退遗留的 JSON 写入暂存目录。**只在启动调用一次**:
         // JSONFileStore 在运行期会被反复构造,清理逻辑不能放在它的 init 里,
         // 否则会删掉正在进行中的写入暂存目录。
-        JSONFileStore.cleanupStaleStagingDirectories(in: appSupportDirectory)
-
-        // AI 服务(提交信息生成/测试连接/模型列表):Diff 独立窗口与主窗口的
-        // SettingsStore 不共享状态,服务在每次请求时直接读盘取最新配置,变更即时生效
-        // (API Key 明文在 settings.json 中,读盘即得完整配置)。
-        let settingsFileStore = JSONFileStore(
-            rootDirectory: appSupportDirectory
-        )
-        aiCommitService = AICommitMessageService(
-            settingsReader: {
-                do {
-                    return try settingsFileStore.loadIfPresent(
-                        AppSettings.self,
-                        from: "settings.json",
-                        default: AppSettings(workplaceRootPath: "")
-                    )
-                } catch {
-                    // 此前 `try?` 吞掉全部读盘/解码错误:settings.json 临时不可读时
-                    // AI 功能静默降级为"未配置",现场无任何日志可查。
-                    // reason 是动态 String,不标 .public 会被 os_log 脱敏成 <private>。
-                    appStartupLog.error("event=settings_reader_failed reason=\(error.localizedDescription, privacy: .public)")
-                    return nil
-                }
-            }
+        JSONFileStore.cleanupStaleStagingDirectories(
+            in: launchConfiguration.resolvedAppSupportDirectory()
         )
     }
 
@@ -58,8 +26,7 @@ struct CCSpace: App {
         Window("CCSpace", id: "main") {
             RootSplitView(
                 launchConfiguration: launchConfiguration,
-                gitService: gitService,
-                aiService: aiCommitService
+                gitService: gitService
             )
         }
         .defaultSize(
@@ -74,7 +41,6 @@ struct CCSpace: App {
                     payload: payload,
                     gitService: gitService,
                     syncCoordinator: syncCoordinator,
-                    aiCommitService: aiCommitService,
                     fileSystemService: fileSystemService
                 )
             } else {

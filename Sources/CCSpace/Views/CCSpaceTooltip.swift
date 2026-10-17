@@ -1,44 +1,6 @@
 import AppKit
 import SwiftUI
 
-private struct CCSpaceQuickHelpEnabledKey: EnvironmentKey {
-    static let defaultValue = true
-}
-
-extension EnvironmentValues {
-    /// 悬停提示总开关。常驻在层级里但被隐藏的内容(设置页未选中的页签)必须显式
-    /// 关掉这一路:`NSTrackingArea` 既不看 opacity 也不看命中测试,鼠标划过隐藏侧
-    /// 照样弹气泡。页签场景直接用 `ccspaceTabPane(isActive:)`,它把这一路连同
-    /// 命中测试、读屏隐藏一起封好了。
-    var ccspaceQuickHelpEnabled: Bool {
-        get { self[CCSpaceQuickHelpEnabledKey.self] }
-        set { self[CCSpaceQuickHelpEnabledKey.self] = newValue }
-    }
-}
-
-extension View {
-    /// 常驻在视图树里、只靠透明度切换的页签容器。
-    ///
-    /// 命中测试、读屏隐藏与悬浮提示开关(`ccspaceQuickHelpEnabled`)必须整体生效,
-    /// 少任何一件都会漏(透明度切换下隐藏侧照样能收到 tracking 事件)。
-    /// 新增页签请走这个修饰器,不要手抄那四行。
-    func ccspaceTabPane(isActive: Bool) -> some View {
-        modifier(CCSpaceTabPaneModifier(isActive: isActive))
-    }
-}
-
-private struct CCSpaceTabPaneModifier: ViewModifier {
-    let isActive: Bool
-
-    func body(content: Content) -> some View {
-        content
-            .opacity(isActive ? 1 : 0)
-            .allowsHitTesting(isActive)
-            .accessibilityHidden(isActive == false)
-            .environment(\.ccspaceQuickHelpEnabled, isActive)
-    }
-}
-
 extension View {
     /// 悬浮提示。
     /// - Parameters:
@@ -107,16 +69,9 @@ private struct CCSpaceQuickHelpModifier: ViewModifier {
     let label: String?
     let hint: String?
 
-    @Environment(\.ccspaceQuickHelpEnabled) private var isEnabled
-
     @ViewBuilder
     func body(content: Content) -> some View {
-        // 隐藏页签里不挂桥接视图:没有 tracking area,也就不会被划出的鼠标事件弹出来。
-        if isEnabled == false {
-            content
-        } else {
-            attached(content)
-        }
+        attached(content)
     }
 
     @ViewBuilder

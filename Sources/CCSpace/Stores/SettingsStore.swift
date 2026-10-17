@@ -207,18 +207,6 @@ final class SettingsStore: ObservableObject {
         }
     }
 
-    /// 仅清除 API Key(Base URL 与模型名保留):换 Key、或改用本地服务时的正规入口。
-    /// 设置页「清除密钥」按钮的落地点;与"清空 Key 输入框后保存"等价,
-    /// 但一键完成且不牵动其他字段的未保存修改。
-    /// 无 AI 配置(`aiSettings == nil`)时为 no-op:没有可清的 Key。
-    func clearStoredAPIKey() throws {
-        guard var ai = settings.aiSettings else { return }
-        ai.apiKey = ""
-        var updatedSettings = settings
-        updatedSettings.aiSettings = ai
-        try persistSettings(updatedSettings)
-    }
-
     func updatePreferredOpenActionID(_ actionID: String?) throws {
         var updatedSettings = settings
         updatedSettings.preferredOpenActionID = actionID
@@ -228,19 +216,6 @@ final class SettingsStore: ObservableObject {
     func updateAppearanceMode(_ mode: AppSettings.AppearanceMode) throws {
         var updatedSettings = settings
         updatedSettings.appearanceMode = mode
-        try persistSettings(updatedSettings)
-    }
-
-    /// 保存 AI 服务配置;传 nil 表示清除配置(`aiSettings` 整体落盘为 nil)。
-    ///
-    /// API Key 明文随配置落盘,**所见即所存**:设置页首帧回显的就是已存值,
-    /// 清空输入框后保存即删除已存 Key(显式动作,与钥匙串时代需要回读保护的
-    /// 场景不同——本地文件回显不存在"读失败折叠成空串"的歧义);
-    /// 单独删除另有 `clearStoredAPIKey` 一键入口。
-    /// `persistSettings` 先写盘后改内存,失败时内存保持旧值并抛给调用方提示。
-    func updateAISettings(_ aiSettings: AppSettings.AISettings?) throws {
-        var updatedSettings = settings
-        updatedSettings.aiSettings = aiSettings
         try persistSettings(updatedSettings)
     }
 

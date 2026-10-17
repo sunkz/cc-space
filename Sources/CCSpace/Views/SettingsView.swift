@@ -12,12 +12,7 @@ struct SettingsView: View {
     @ObservedObject var repositoryStore: RepositoryStore
     @ObservedObject var workplaceStore: WorkplaceStore
     let gitService: GitServicing
-    let aiService: AIServiceInfoServicing
     @Binding var showOnboarding: Bool
-    /// AI 表单未保存修改的上报通道(RootSplitView 持有,标题栏页签「•」标记消费)。
-    @Binding var hasUnsavedAIChanges: Bool
-    /// 当前页签:通用设置 / AI 配置。状态由 RootSplitView 持有(标题栏 tab 栏在根工具栏渲染)。
-    @Binding var selectedTab: SettingsTab
 
     @State private var saveFeedback: CCSpaceFeedback?
     /// 重置引导的结果横幅:挂在引导区块自己的位置,错误不再落在视线外的顶部区块
@@ -43,19 +38,13 @@ struct SettingsView: View {
         repositoryStore: RepositoryStore,
         workplaceStore: WorkplaceStore,
         gitService: GitServicing,
-        aiService: AIServiceInfoServicing,
-        showOnboarding: Binding<Bool>,
-        hasUnsavedAIChanges: Binding<Bool>,
-        selectedTab: Binding<SettingsTab>
+        showOnboarding: Binding<Bool>
     ) {
         self.settingsStore = settingsStore
         self.repositoryStore = repositoryStore
         self.workplaceStore = workplaceStore
         self.gitService = gitService
-        self.aiService = aiService
         self._showOnboarding = showOnboarding
-        self._hasUnsavedAIChanges = hasUnsavedAIChanges
-        self._selectedTab = selectedTab
         // 初值恒为 false:存在性一律由 `.task(id: savedPath)` 后台探测回写。
         // 这里原本写 `State(initialValue: Self.directoryExists(...))`,而 SwiftUI 在
         // 设置页存续期间会反复重建本 View(父级刷新、切页签),每次构造都跑一次
@@ -87,27 +76,13 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        // 两个页签各自持有独立 ScrollView、常驻视图树(透明度切换):
-        // - 常驻:AI 表单里粘贴到一半的 Key 等未保存输入不会随切页被静默丢弃;
-        // - 独立滚动:单 ScrollView 下两页签共享偏移,在通用页签滚到底再切 AI
-        //   会停在空白区——各自持有时滚动位置随页签独立保留。
-        // 隐藏侧的命中测试、读屏隐藏与悬浮提示开关由 ccspaceTabPane 一并处理,
-        // 交互与 if/else 等价。
-        ZStack(alignment: .topLeading) {
-            generalTab.ccspaceTabPane(isActive: selectedTab == .general)
-            aiTab.ccspaceTabPane(isActive: selectedTab == .ai)
-        }
-        .onChange(of: selectedTab) { _, _ in
-            // 两页签视图常驻,隐藏侧的输入框不会自动交出第一响应者:
-            // 在 AI 页签点过 Base URL 再切回通用,键盘会敲进隐藏字段。
-            NSApp.keyWindow?.makeFirstResponder(nil)
-        }
-        .ccspaceScreenBackground()
-        .navigationTitle("设置")
-        // 进入页面与换根后各探一次存在性;探测走后台线程,body/init 路径零磁盘 IO。
-        .task(id: savedPath) {
-            refreshRootDirectoryExists()
-        }
+        generalTab
+            .ccspaceScreenBackground()
+            .navigationTitle("设置")
+            // 进入页面与换根后各探一次存在性;探测走后台线程,body/init 路径零磁盘 IO。
+            .task(id: savedPath) {
+                refreshRootDirectoryExists()
+            }
     }
 
     // MARK: - 通用设置页签
@@ -168,22 +143,6 @@ struct SettingsView: View {
             repositories: repositoryStore.repositories,
             searchText: searchText
         ).showsBackToTop
-    }
-
-    // MARK: - AI 配置页签
-
-    private var aiTab: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                AISettingsSection(
-                    settingsStore: settingsStore,
-                    aiService: aiService,
-                    hasUnsavedChanges: $hasUnsavedAIChanges
-                )
-            }
-            .frame(maxWidth: 860, alignment: .leading)
-            .padding(12)
-        }
     }
 
     // MARK: - 动作
@@ -375,34 +334,5 @@ struct SettingsView: View {
             padding: 12,
             borderOpacity: 0.03
         )
-    }
-
-}
-
-/// 标题栏居中的页签切换 [通用][AI]:由 RootSplitView 挂在工具栏 principal 位置。
-/// 用系统分段控件(NSSegmentedControl)实现:选中滑块动画、玻璃容器、键盘与
-/// VoiceOver 支持全部由系统提供,组件不画任何背景。AI 段用 Label 带 sparkles 图标;
-/// AI 表单有未保存修改时段标题追加「•」(标记逻辑见 SettingsTabPresentationState)。
-struct SettingsTabBar: View {
-    @Binding var selectedTab: SettingsTab
-    /// AI 表单是否存在未保存修改(RootSplitView 持有,AISettingsSection 上报)。
-    var showsUnsavedChanges: Bool = false
-
-    private var presentationState: SettingsTabPresentationState {
-        SettingsTabPresentationState(
-            selectedTab: selectedTab,
-            showsUnsavedChanges: showsUnsavedChanges
-        )
-    }
-
-    var body: some View {
-        Picker("设置页签", selection: $selectedTab) {
-            ForEach(SettingsTabPresentationState.allTabs, id: \.self) { tab in
-                Text(presentationState.pickerTitle(for: tab))
-            }
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .fixedSize()
     }
 }

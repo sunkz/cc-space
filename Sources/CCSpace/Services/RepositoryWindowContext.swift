@@ -137,11 +137,6 @@ final class RepositoryWindowContext: ObservableObject {
         await gitService.commitDetail(hash: hash, in: directory)
     }
 
-    /// 最近提交主题(AI 生成提交信息的语言/风格参考)。
-    func recentCommitSubjects(directory: String, count: Int) async -> [String] {
-        await gitService.recentCommits(in: directory, count: count).map(\.subject)
-    }
-
     /// 「展示所有行」的新侧全文:来源策略解析(head 是否等于当前分支 → 读磁盘还是 blob)、
     /// currentBranch 探测与重 IO 全部收在 Service 层,View 只提供 entry 与来源。
     func fullFileContent(

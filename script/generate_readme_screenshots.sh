@@ -10,7 +10,7 @@ APP_BUNDLE="${ROOT_DIR}/dist/${APP_NAME}.app"
 # 演示数据目录 DEMO_ROOT/APP_SUPPORT_DIR 的初始化挪到 trap cleanup EXIT 之后:
 # 之前在参数解析前就 mktemp,传错参数 exit 1 时 trap 尚未安装、临时目录泄漏。
 DEFAULT_WINDOW_SIZE="960x640"
-# 设置页区块较多(含 AI 服务),加高窗口避免底部区块被底边截断。
+# 设置页区块较多,加高窗口避免底部区块被底边截断。
 SETTINGS_WINDOW_SIZE="960x800"
 SCREENSHOT_WORKPLACE_NAME="analytics-sprint"
 CREATE_WORKPLACE_NAME="checkout-redesign"

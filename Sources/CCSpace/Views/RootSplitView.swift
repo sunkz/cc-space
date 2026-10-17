@@ -18,11 +18,6 @@ struct RootSplitView: View {
     @State private var refreshGeneration: UInt64 = 0
     /// 在飞的磁盘刷新是否由用户显式触发(供"再点一次刷新"判断要不要重开一轮)。
     @State private var isInFlightDiskRefreshForced = false
-    /// 设置页当前页签:tab 栏挂在标题栏 principal 位置,状态放在根视图共享给 SettingsView。
-    @State private var settingsTab: SettingsTab = .general
-    /// AI 表单是否存在未保存修改:跨视图上报链 AISettingsSection → SettingsView →
-    /// 这里,标题栏页签标记(SettingsTabBar)从这里读。离开设置页时上报方复位。
-    @State private var aiSettingsHasUnsavedChanges = false
     @StateObject private var appViewModel = AppViewModel()
     @StateObject private var detailActionCoordinator = WorkplaceDetailActionCoordinator()
     @StateObject private var updateChecker = UpdateChecker()
@@ -46,7 +41,6 @@ struct RootSplitView: View {
     /// 仓库只读信息查询(实际 origin 等):RootSplitView 作为顶层持有并注入,
     /// 视图侧不再出现 `gitService.remoteURL(...)` 这类直接 git 调用。
     private let repositoryInfoService: RepositoryInfoService
-    private let aiService: AIServiceInfoServicing
 
     private var selectedWorkplace: Workplace? {
         guard let selectedID = appViewModel.selectedWorkplaceID else { return nil }
@@ -109,8 +103,7 @@ struct RootSplitView: View {
 
     init(
         launchConfiguration: CCSpaceLaunchConfiguration = CCSpaceLaunchConfiguration(),
-        gitService: GitService = GitService(),
-        aiService: AIServiceInfoServicing
+        gitService: GitService = GitService()
     ) {
         self.launchConfiguration = launchConfiguration
 
@@ -123,14 +116,12 @@ struct RootSplitView: View {
         // 而实例随即被丢弃。三者互不依赖(SettingsStore 的换根在调用时才传入
         // WorkplaceStore),可以各自独立惰性构造。
         // autoclosure 在视图生命周期内只求值一次 → SettingsStore.init 只跑一次,
-        // 读盘(loadIfPresent)因此是"每启动一次",且早于 body 里任何读
-        // `aiSettings`(API Key 明文存 settings.json)的消费方。
+        // 读盘(loadIfPresent)因此是"每启动一次"。
         _settingsStore = StateObject(wrappedValue: SettingsStore(fileStore: fileStore))
         _repositoryStore = StateObject(wrappedValue: RepositoryStore(fileStore: fileStore))
         _workplaceStore = StateObject(wrappedValue: WorkplaceStore(fileStore: fileStore))
         self.gitService = gitService
         self.repositoryInfoService = RepositoryInfoService(gitService: gitService)
-        self.aiService = aiService
         syncCoordinator = SyncCoordinator(gitService: gitService)
 
         let appViewModel = AppViewModel()
@@ -193,10 +184,7 @@ struct RootSplitView: View {
                             repositoryStore: repositoryStore,
                             workplaceStore: workplaceStore,
                             gitService: gitService,
-                            aiService: aiService,
-                            showOnboarding: $showOnboarding,
-                            hasUnsavedAIChanges: $aiSettingsHasUnsavedChanges,
-                            selectedTab: $settingsTab
+                            showOnboarding: $showOnboarding
                         )
                     case .workplaces:
                         if let workplace = selectedWorkplace {
@@ -207,7 +195,6 @@ struct RootSplitView: View {
                     }
                 }
                 .toolbar {
-                    settingsTabToolbarItem
                     settingsToolbarItem
                 }
                 .navigationSplitViewStyle(.balanced)
@@ -281,7 +268,7 @@ struct RootSplitView: View {
                     )
                     var details: [String] = []
                     if settingsStore.didRecoverFromCorruptFile {
-                        details.append("工作区根目录、AI 服务等设置回到了初始状态,若有备份文件请重新导入。")
+                        details.append("工作区根目录等设置回到了初始状态,若有备份文件请重新导入。")
                     }
                     if repositoryStore.didRecoverFromCorruptFile || workplaceStore.didRecoverFromCorruptFile {
                         details.append("已抢救仍可解码的仓库/工作区记录,被丢弃的条目请重新添加。")
@@ -980,19 +967,6 @@ struct RootSplitView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ccspaceScreenBackground()
-    }
-
-    /// [通用][AI] tab 栏:挂 principal 位置,标题栏正中,与右上 light/dark 同一行。
-    @ToolbarContentBuilder
-    private var settingsTabToolbarItem: some ToolbarContent {
-        if appViewModel.route == .settings {
-            ToolbarItem(placement: .principal) {
-                SettingsTabBar(
-                    selectedTab: $settingsTab,
-                    showsUnsavedChanges: aiSettingsHasUnsavedChanges
-                )
-            }
-        }
     }
 
     /// 外观切换与"获取更新"合并为同一工具栏 item:

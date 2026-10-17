@@ -45,7 +45,6 @@ struct DiffWindowView: View {
     @StateObject private var context: RepositoryWindowContext
     /// 破坏性写(丢弃/提交)的唯一入口:协调器内部持 per-path 锁与后台 pull/push 互斥。
     let syncCoordinator: SyncCoordinator
-    let aiCommitService: AICommitMessageServicing
     /// 目录存在性探测:View 不直接碰 FileManager,统一走 FileSystemService(含 isDirectory 校验)。
     let fileSystemService: FileSystemServicing
 
@@ -53,13 +52,11 @@ struct DiffWindowView: View {
         payload: DiffWindowPayload,
         gitService: GitServicing,
         syncCoordinator: SyncCoordinator,
-        aiCommitService: AICommitMessageServicing,
         fileSystemService: FileSystemServicing
     ) {
         self.payload = payload
         self._context = StateObject(wrappedValue: RepositoryWindowContext(gitService: gitService))
         self.syncCoordinator = syncCoordinator
-        self.aiCommitService = aiCommitService
         self.fileSystemService = fileSystemService
     }
 
@@ -85,17 +82,11 @@ struct DiffWindowView: View {
     /// 本窗口是否刚提交成功;驱动空态显示"提交成功"而非"没有改动"。
     /// 丢弃成功后重置——空态的成因变了,继续显示"提交成功"会造成误导。
     @State private var didCommit = false
-    /// AI 生成提交信息;生成成功后直接覆盖输入框内容。
-    @State private var isGeneratingMessage = false
-    @State private var generateMessageTask: Task<Void, Never>?
-    @State private var generateMessageErrorMessage: String?
     /// payload 代际号:WindowGroup 复用同一窗口更换 payload 时,旧仓库的进行中任务
-    /// (提交/丢弃/AI 生成/diff 加载)不得再把结果写进新仓库的状态。
+    /// (提交/丢弃/diff 加载)不得再把结果写进新仓库的状态。
     @State private var payloadGeneration = 0
     /// 提交信息输入区是否聚焦;聚焦时整枚胶囊描一圈主题色。
     @FocusState private var isCommitInputFocused: Bool
-    /// 魔法棒 hover 态;hover 出淡灰圆底标示点击热区。
-    @State private var isGenerateHovered = false
 
     private var isWorkingDirectorySource: Bool {
         if case .workingDirectory = payload.source { return true }
@@ -164,22 +155,18 @@ struct DiffWindowView: View {
         .onChange(of: payload) { _, _ in
             // WindowGroup(for:) 复用同一窗口更换 payload 时 .task 不会重跑:
             // 重置自持状态并按新参数重新加载,避免显示旧仓库的 diff。
-            // 必须先作废旧代际并取消进行中任务:旧仓库的提交/AI 生成回调
+            // 必须先作废旧代际并取消进行中任务:旧仓库的提交/丢弃回调
             // 会把"提交成功"文案、空输入框、错误弹窗带进新仓库窗口。
             payloadGeneration += 1
             discardTask?.cancel()
             discardTask = nil
             commitTask?.cancel()
             commitTask = nil
-            generateMessageTask?.cancel()
-            generateMessageTask = nil
             isDiscarding = false
             isCommitting = false
-            isGeneratingMessage = false
             pendingDiscardEntry = nil
             discardErrorMessage = nil
             commitErrorMessage = nil
-            generateMessageErrorMessage = nil
             commitMessage = ""
             didCommit = false
             // 复用窗口换新 payload:作废"首载已完成"标记,防止加载期间一次
@@ -192,7 +179,7 @@ struct DiffWindowView: View {
             // 进行中的提交/丢弃会自行 refresh,这里不再抢刷,避免与进行中任务抢刷新导致闪烁/滚动丢失。
             // 守卫只等"首次加载流程结束",失败同样算结束:否则首载瞬时失败后聚焦刷新就再也进不来。
             guard hasLoadedInitialData else { return }
-            guard isCommitting == false, isDiscarding == false, isGeneratingMessage == false else { return }
+            guard isCommitting == false, isDiscarding == false else { return }
             load(isRefresh: true)
         }
         .onDisappear {
@@ -202,8 +189,6 @@ struct DiffWindowView: View {
             discardTask = nil
             commitTask?.cancel()
             commitTask = nil
-            generateMessageTask?.cancel()
-            generateMessageTask = nil
         }
         .alert(
             pendingDiscardEntry.map { DiscardFileConfirmation.title(for: $0) } ?? "",
@@ -242,17 +227,6 @@ struct DiffWindowView: View {
             Button("好", role: .cancel) {}
         } message: {
             Text(commitErrorMessage ?? "")
-        }
-        .alert(
-            "生成提交信息失败",
-            isPresented: Binding(
-                get: { generateMessageErrorMessage != nil },
-                set: { if $0 == false { generateMessageErrorMessage = nil } }
-            )
-        ) {
-            Button("好", role: .cancel) {}
-        } message: {
-            Text(generateMessageErrorMessage ?? "")
         }
     }
 
@@ -383,70 +357,7 @@ struct DiffWindowView: View {
         }
     }
 
-    /// 请求 AI 生成提交信息并填入输入框(覆盖已有内容,便于反复重试换结果);
-    /// 失败弹窗提示且不影响已输入内容。
-    private func generateCommitMessage() {
-        guard isGeneratingMessage == false, isCommitting == false else { return }
-        isGeneratingMessage = true
-        generateMessageErrorMessage = nil
-        let service = aiCommitService
-        let context = _context.wrappedValue
-        let directory = payload.localPath
-        let diffs = entries
-        let generation = payloadGeneration
-        generateMessageTask = Task { @MainActor in
-            // defer 复位:与 discard/commit 保持一致。此前三个分支各写一次复位,
-            // 取消路径(onDisappear 已 cancel 任务)会把 isGeneratingMessage 永久留在 true。
-            defer { isGeneratingMessage = false }
-            // 先取最近提交主题作为语言与风格参考,失败时静默降级为空列表。
-            let recentSubjects = await context.recentCommitSubjects(
-                directory: directory,
-                count: AICommitPromptBuilder.recentCommitSubjectCount
-            )
-            do {
-                let message = try await service.generateCommitMessage(
-                    diffs: diffs,
-                    recentCommitSubjects: recentSubjects
-                )
-                // payload 已更换时不得把旧仓库的生成结果填进新仓库的输入框。
-                guard !Task.isCancelled, generation == payloadGeneration else { return }
-                commitMessage = message
-            } catch {
-                guard !Task.isCancelled, generation == payloadGeneration else { return }
-                generateMessageErrorMessage = Self.localizedAIFailureMessage(error)
-            }
-        }
-    }
-
-    /// 把面向用户的失败文案兜底为中文。
-    ///
-    /// git 错误与 `AICommitMessageError` 已本地化,但 `URLError`(离线/超时/DNS)
-    /// 是系统英文文案,直接展示会出现「生成提交信息失败:The Internet connection
-    /// appears to be offline.」这种中英混排;非 URLError 的兜底同样改走
-    /// UserFacingError(取消/系统域/未本地化的英文描述补中文前缀)。
-    private static func localizedAIFailureMessage(_ error: Error) -> String {
-        if let urlError = error as? URLError {
-            switch urlError.code {
-            case .notConnectedToInternet, .networkConnectionLost:
-                return "网络不可用，请检查网络连接后重试"
-            case .timedOut:
-                return "请求超时，请稍后重试"
-            case .cannotFindHost, .dnsLookupFailed:
-                return "无法解析 AI 服务地址，请检查配置"
-            case .cannotConnectToHost:
-                return "无法连接 AI 服务，请检查地址与网络"
-            case .badServerResponse, .cannotParseResponse:
-                return "AI 服务返回的内容无法解析"
-            case .userCancelledAuthentication, .userAuthenticationRequired:
-                return "AI 服务认证失败，请检查 API Key"
-            default:
-                return "网络请求失败（错误码 \(urlError.errorCode)）"
-            }
-        }
-        return UserFacingError.message(for: error)
-    }
-
-    /// 底部提交栏:胶囊浮岛式——整条收进一枚白色圆角胶囊;魔法棒(AI 生成)在输入区左内侧,右端胶囊提交钮。
+    /// 底部提交栏:胶囊浮岛式——整条收进一枚白色圆角胶囊,右端胶囊提交钮。
     ///
     /// 用单行 TextField(macOS 上 `axis: .vertical` 的 onSubmit 不触发,回车提交会失效);
     /// 无边框输入用纯文本样式 + 整枚胶囊描边(常态浅灰/聚焦主题色)。
@@ -463,7 +374,6 @@ struct DiffWindowView: View {
                         .lineLimit(1)
                 }
                 HStack(spacing: 0) {
-                    generateButton
                     commitMessageField
                     Button("提交", action: commit)
                         .buttonStyle(PillCommitButtonStyle())
@@ -492,9 +402,9 @@ struct DiffWindowView: View {
         }
     }
 
-    /// 胶囊内输入区:魔法棒右侧的纯文本输入,生成中展示打字机提示(逐字打出 + 闪烁光标)。
+    /// 胶囊内输入区:纯文本输入。
     private var commitMessageField: some View {
-        TextField(isGeneratingMessage ? "" : "输入提交信息…", text: $commitMessage)
+        TextField("输入提交信息…", text: $commitMessage)
             .textFieldStyle(.plain)
             .focused($isCommitInputFocused)
             .onSubmit(commit)
@@ -502,153 +412,6 @@ struct DiffWindowView: View {
             .padding(.leading, 2)
             .padding(.trailing, 11)
             .frame(maxWidth: .infinity)
-            .overlay {
-                if isGeneratingMessage, commitMessage.isEmpty {
-                    GeneratingTypewriterText()
-                }
-            }
-    }
-
-    /// 魔法棒(AI 生成提交信息,可反复点击重试):输入区左内侧前缀图标,主题色显眼标注。
-    /// 生成中星星逐个闪烁 + 轻微摆动,周围冒星尘(见 GeneratingStardust);提交期间降透明度禁点。
-    private var generateButton: some View {
-        Button {
-            generateCommitMessage()
-        } label: {
-            Image(systemName: "wand.and.stars")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(Color.accentColor)
-                .symbolEffect(
-                    .variableColor.iterative.dimInactiveLayers,
-                    options: .repeating,
-                    isActive: isGeneratingMessage
-                )
-                .rotationEffect(.degrees(isGeneratingMessage ? 10 : 0))
-                .animation(
-                    isGeneratingMessage
-                        ? .easeInOut(duration: 0.35).repeatForever(autoreverses: true)
-                        : .easeOut(duration: 0.2),
-                    value: isGeneratingMessage
-                )
-                .frame(width: 26, height: 26)
-                .background(
-                    isGenerateHovered ? Color.accentColor.opacity(0.12) : Color.clear,
-                    in: Circle()
-                )
-                .opacity(isCommitting ? 0.45 : 1)
-        }
-        .buttonStyle(.plain)
-        .disabled(isGeneratingMessage || isCommitting)
-        .padding(.leading, 5)
-        .overlay {
-            if isGeneratingMessage {
-                GeneratingStardust()
-            }
-        }
-        .onHover { isGenerateHovered = $0 }
-        .ccspaceQuickHelp("AI 生成提交信息，可反复点击重新生成", providesLabel: true)
-    }
-}
-
-/// AI 生成中的星尘粒子:魔法棒周围持续冒出细小星尘(浮现→上浮→消散),三颗按相位错峰。
-///
-/// 用 TimelineView 按真实时钟计算相位(macOS 14 无 KeyframeAnimator/PhaseAnimator,
-/// 多段关键帧用时钟驱动最稳):仅生成期间插入视图树,移除即自动停帧;
-/// 单周期 1.5s,透明度走抛物线(起止 0、中段峰值),上浮 3→−11pt。
-private struct GeneratingStardust: View {
-    /// 单个粒子的起始偏移(相对魔法棒中心)与错峰相位。
-    private struct Seed {
-        let x: CGFloat
-        let y: CGFloat
-        let phase: Double
-    }
-
-    private static let cycle: Double = 1.5
-    private static let seeds: [Seed] = [
-        Seed(x: -11, y: -6, phase: 0),
-        Seed(x: 11, y: -3, phase: 1.0 / 3.0),
-        Seed(x: -4, y: -12, phase: 2.0 / 3.0),
-    ]
-
-    /// 粒子相位进度(0..<1):由当前时刻与错峰相位推出。
-    private static func progress(at date: Date, phase: Double) -> Double {
-        ((date.timeIntervalSinceReferenceDate / cycle) + phase)
-            .truncatingRemainder(dividingBy: 1)
-    }
-
-    var body: some View {
-        TimelineView(.animation) { context in
-            ZStack {
-                ForEach(Array(Self.seeds.enumerated()), id: \.offset) { _, seed in
-                    let p = Self.progress(at: context.date, phase: seed.phase)
-                    Image(systemName: "sparkle")
-                        .font(.system(size: 6, weight: .medium))
-                        .foregroundStyle(Color.accentColor)
-                        .opacity(4 * p * (1 - p))
-                        .scaleEffect(0.55 + 0.45 * min(p * 2.5, 1))
-                        .offset(x: seed.x, y: seed.y + 3 - 14 * p)
-                }
-            }
-            .allowsHitTesting(false)
-        }
-    }
-}
-
-/// AI 生成中的打字机提示:「AI 正在生成…」逐字打出→停顿→回退消隐,循环;尾部主题色光标闪烁。
-///
-/// 用 .task 长循环驱动(勿在 body 内建 Timer):仅生成期间插入视图树,
-/// 任务随视图移除自动取消;生成完成时真文案直接替换,衔接自然。
-private struct GeneratingTypewriterText: View {
-    private static let fullText = "AI 正在生成…"
-    @State private var visibleCount = 0
-
-    var body: some View {
-        HStack(spacing: 1) {
-            Text(Self.fullText.prefix(visibleCount))
-                .font(.system(size: 13))
-                .foregroundStyle(.tertiary)
-            BlinkingCaret()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .allowsHitTesting(false)
-        .task {
-            // 取消必须让任务当场退出:try? 会吞掉 CancellationError,内层循环继续
-            // 空转并持续写 @State,直到整个周期跑完(正确范式见 CCSpaceTooltip)。
-            while Task.isCancelled == false {
-                for count in 0...Self.fullText.count {
-                    visibleCount = count
-                    do { try await Task.sleep(for: .milliseconds(90)) } catch { return }
-                }
-                do { try await Task.sleep(for: .milliseconds(800)) } catch { return }
-                for count in stride(from: Self.fullText.count, through: 0, by: -1) {
-                    visibleCount = count
-                    do { try await Task.sleep(for: .milliseconds(40)) } catch { return }
-                }
-                do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
-            }
-        }
-    }
-}
-
-/// 打字机尾部的闪烁光标:1.5pt 主题色竖线,0.5s 一闪。
-private struct BlinkingCaret: View {
-    @State private var visible = true
-
-    var body: some View {
-        Rectangle()
-            .fill(Color.accentColor)
-            .frame(width: 1.5, height: 15)
-            .opacity(visible ? 1 : 0)
-            .task {
-                while Task.isCancelled == false {
-                    do {
-                        try await Task.sleep(for: .milliseconds(500))
-                    } catch {
-                        return
-                    }
-                    visible.toggle()
-                }
-            }
     }
 }
 

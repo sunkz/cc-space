@@ -34,11 +34,11 @@ mkdir -p "${DEMO_ROOT}/remotes" "${DEMO_ROOT}/seeds" "${DEMO_ROOT}/workspaces" "
 touch "${DEMO_ROOT}/.ccspace-demo-root"
 
 python3 - "${DEMO_ROOT}" "${FIXTURE_DIR}" <<'PY'
+import itertools
 import json
 import pathlib
 import subprocess
 import sys
-import uuid
 
 demo_root = pathlib.Path(sys.argv[1]).resolve()
 fixture = pathlib.Path(sys.argv[2])
@@ -86,37 +86,20 @@ for repo in repositories:
         run("git", "-C", str(seed), "push", "-u", "origin", branch)
     run("git", "-C", str(seed), "checkout", default_branch)
 
-# 2) 工作区:fixture 里只有 analytics-sprint 配了仓库,其余是空壳(点开什么都看不到)。
-#    这里按主题给每个工作区补齐分支与仓库选择,再真实克隆,并轮转造出各种仓库状态。
+# 2) 工作区:分支与仓库选择都已固化在 fixture 里,这里只把占位路径落成真实目录,
+#    按选择逐个真实克隆,并轮转造出各种仓库状态。
 STATES = ["clean", "dirty", "ahead", "behind", "diverged", "stash"]
 repo_by_id = {repo["id"]: repo for repo in repositories}
-id_by_name = {repo["repoName"]: repo["id"] for repo in repositories}
 
-WORKPLACE_PLAN = {
-    # 名称: (工作分支, 纳入的仓库)
-    "analytics-sprint":  ("feature/analytics-dashboard", ["api-gateway", "ios-app", "release-tools", "shared-ui"]),
-    "growth-experiment": ("feature/growth-experiment",   ["api-gateway", "shared-ui"]),
-    "ios-release":       ("release/1.0",                 ["ios-app", "shared-ui", "docs-portal"]),
-    "docs-refresh":      ("docs/refresh-2026q2",         ["docs-portal", "api-gateway"]),
-    "ops-hotfix":        ("hotfix/ops-incident-4821",    ["api-gateway", "release-tools"]),
-    "marketing-weekly":  ("feature/marketing-weekly",    ["docs-portal", "shared-ui"]),
-}
+state_cycle = itertools.cycle(STATES)
 
 for workplace in workplaces:
-    plan = WORKPLACE_PLAN.get(workplace["name"])
-    if plan is None:
-        continue
-    branch, repo_names = plan
     workplace["path"] = str(demo_root / "workspaces" / workplace["name"])
-    workplace["branch"] = branch
-    workplace["selectedRepositoryIDs"] = [id_by_name[n] for n in repo_names if n in id_by_name]
-
-state_cycle = iter(STATES * 4)
-
-for workplace in workplaces:
     wp_dir = pathlib.Path(workplace["path"])
     wp_dir.mkdir(parents=True, exist_ok=True)
-    branch = workplace["branch"]
+    branch = workplace.get("branch")
+    if not branch:
+        continue
     for repo_id in workplace["selectedRepositoryIDs"]:
         repo = repo_by_id.get(repo_id)
         if repo is None:
@@ -181,7 +164,7 @@ for workplace in workplaces:
             run("git", "-C", str(local), "stash", "pop")   # 留一条在列表里,另一条已弹回
             run("git", "-C", str(local), "checkout", "--", "README.md")
 
-# 5) 落盘:sync-states 交给 app 自己扫真实仓库生成,这里只给空数组。
+# 3) 落盘:sync-states 交给 app 自己扫真实仓库生成,这里只给空数组。
 settings["workplaceRootPath"] = str(demo_root / "workspaces")
 
 def dump(name, data):

@@ -1,56 +1,108 @@
 [
   {
     "branch": "feature/analytics-dashboard",
-    "createdAt": "2026-04-18T00:00:00Z",
+    "createdAt": "2026-10-16T09:30:00Z",
     "id": "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
+    "isPinned": true,
     "name": "analytics-sprint",
     "path": "/tmp/CCSpaceDemo/workspaces/analytics-sprint",
+    "pinnedRepositoryIDs": [
+      "55555555-5555-5555-5555-555555555555"
+    ],
     "selectedRepositoryIDs": [
       "11111111-1111-1111-1111-111111111111",
+      "22222222-2222-2222-2222-222222222222",
+      "33333333-3333-3333-3333-333333333333",
       "44444444-4444-4444-4444-444444444444",
       "55555555-5555-5555-5555-555555555555",
       "66666666-6666-6666-6666-666666666666"
     ],
-    "updatedAt": "2026-04-18T00:00:00Z"
+    "updatedAt": "2026-10-16T09:30:00Z"
   },
   {
-    "createdAt": "2026-04-18T00:00:00Z",
+    "branch": "feature/growth-experiment",
+    "createdAt": "2026-10-12T14:05:00Z",
     "id": "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB",
     "name": "growth-experiment",
     "path": "/tmp/CCSpaceDemo/workspaces/growth-experiment",
-    "selectedRepositoryIDs": [],
-    "updatedAt": "2026-04-18T00:00:00Z"
+    "selectedRepositoryIDs": [
+      "11111111-1111-1111-1111-111111111111",
+      "33333333-3333-3333-3333-333333333333",
+      "66666666-6666-6666-6666-666666666666"
+    ],
+    "updatedAt": "2026-10-12T14:05:00Z"
   },
   {
-    "createdAt": "2026-04-18T00:00:00Z",
+    "branch": "release/1.0",
+    "createdAt": "2026-10-08T10:20:00Z",
     "id": "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC",
     "name": "ios-release",
     "path": "/tmp/CCSpaceDemo/workspaces/ios-release",
-    "selectedRepositoryIDs": [],
-    "updatedAt": "2026-04-18T00:00:00Z"
+    "selectedRepositoryIDs": [
+      "44444444-4444-4444-4444-444444444444",
+      "66666666-6666-6666-6666-666666666666",
+      "22222222-2222-2222-2222-222222222222"
+    ],
+    "updatedAt": "2026-10-08T10:20:00Z"
   },
   {
-    "createdAt": "2026-04-18T00:00:00Z",
+    "branch": "docs/refresh-2026q2",
+    "createdAt": "2026-09-29T16:40:00Z",
     "id": "DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD",
     "name": "docs-refresh",
     "path": "/tmp/CCSpaceDemo/workspaces/docs-refresh",
-    "selectedRepositoryIDs": [],
-    "updatedAt": "2026-04-18T00:00:00Z"
+    "selectedRepositoryIDs": [
+      "22222222-2222-2222-2222-222222222222",
+      "11111111-1111-1111-1111-111111111111"
+    ],
+    "updatedAt": "2026-09-29T16:40:00Z"
   },
   {
-    "createdAt": "2026-04-18T00:00:00Z",
+    "branch": "hotfix/ops-incident-4821",
+    "createdAt": "2026-09-24T08:15:00Z",
     "id": "EEEEEEEE-EEEE-EEEE-EEEE-EEEEEEEEEEEE",
     "name": "ops-hotfix",
     "path": "/tmp/CCSpaceDemo/workspaces/ops-hotfix",
-    "selectedRepositoryIDs": [],
-    "updatedAt": "2026-04-18T00:00:00Z"
+    "selectedRepositoryIDs": [
+      "11111111-1111-1111-1111-111111111111",
+      "55555555-5555-5555-5555-555555555555"
+    ],
+    "updatedAt": "2026-09-24T08:15:00Z"
   },
   {
-    "createdAt": "2026-04-18T00:00:00Z",
+    "branch": "feature/marketing-weekly",
+    "createdAt": "2026-09-18T11:50:00Z",
     "id": "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
     "name": "marketing-weekly",
     "path": "/tmp/CCSpaceDemo/workspaces/marketing-weekly",
-    "selectedRepositoryIDs": [],
-    "updatedAt": "2026-04-18T00:00:00Z"
+    "selectedRepositoryIDs": [
+      "22222222-2222-2222-2222-222222222222",
+      "66666666-6666-6666-6666-666666666666"
+    ],
+    "updatedAt": "2026-09-18T11:50:00Z"
+  },
+  {
+    "branch": "feature/payments-migration",
+    "createdAt": "2026-09-10T13:25:00Z",
+    "id": "99999999-9999-4999-8999-999999999991",
+    "name": "payments-migration",
+    "path": "/tmp/CCSpaceDemo/workspaces/payments-migration",
+    "selectedRepositoryIDs": [
+      "11111111-1111-1111-1111-111111111111",
+      "33333333-3333-3333-3333-333333333333"
+    ],
+    "updatedAt": "2026-09-10T13:25:00Z"
+  },
+  {
+    "branch": "feature/mobile-refresh",
+    "createdAt": "2026-08-28T17:10:00Z",
+    "id": "99999999-9999-4999-8999-999999999992",
+    "name": "mobile-refresh",
+    "path": "/tmp/CCSpaceDemo/workspaces/mobile-refresh",
+    "selectedRepositoryIDs": [
+      "44444444-4444-4444-4444-444444444444",
+      "66666666-6666-6666-6666-666666666666"
+    ],
+    "updatedAt": "2026-08-28T17:10:00Z"
   }
 ]

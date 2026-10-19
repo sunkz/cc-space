@@ -1,3 +1,4 @@
+import AppKit
 import os
 import SwiftUI
 
@@ -1129,6 +1130,9 @@ struct RootSplitView: View {
         case .settingsOverview:
             appViewModel.showRoute(.settings)
             createWorkplaceSheet = nil
+            // 设置页打开时 AppKit 会把首个可编辑控件(地址框)设成第一响应者,光标闪烁让截图
+            // 稳定采样永远等不到连续一致的帧。只在截图场景下延迟清掉,正常使用不受影响。
+            scheduleScreenshotFocusReset()
         case .workplaceDetail:
             if let workplace = launchConfiguration.targetWorkplace(
                 in: workplaceStore.workplaces
@@ -1151,6 +1155,15 @@ struct RootSplitView: View {
                     repositories: repositoryStore.repositories
                 )
             )
+        }
+    }
+
+    @MainActor
+    private func scheduleScreenshotFocusReset() {
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(500))
+            let window = NSApp.windows.first { $0.isVisible && $0.canBecomeKey }
+            window?.makeFirstResponder(nil)
         }
     }
 

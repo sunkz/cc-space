@@ -5,7 +5,8 @@
     "gitURL": "git@cc:api-gateway.git",
     "id": "11111111-1111-1111-1111-111111111111",
     "mrTargetBranches": [
-      "main"
+      "main",
+      "release/1.0"
     ],
     "repoName": "api-gateway",
     "updatedAt": "2026-04-18T00:00:00Z"
@@ -40,7 +41,8 @@
     "gitURL": "git@cc:ios-app.git",
     "id": "44444444-4444-4444-4444-444444444444",
     "mrTargetBranches": [
-      "main"
+      "main",
+      "release/1.0"
     ],
     "repoName": "ios-app",
     "updatedAt": "2026-04-18T00:00:00Z"
@@ -62,7 +64,8 @@
     "gitURL": "git@cc:shared-ui.git",
     "id": "66666666-6666-6666-6666-666666666666",
     "mrTargetBranches": [
-      "main"
+      "main",
+      "release/1.0"
     ],
     "repoName": "shared-ui",
     "updatedAt": "2026-04-18T00:00:00Z"

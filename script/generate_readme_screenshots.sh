@@ -111,120 +111,35 @@ build_app_bundle() {
 }
 
 prepare_demo_data() {
-    local workplace_name
-
     echo "=> Preparing demo data under ${DEMO_ROOT}..."
-    mkdir -p "${APP_SUPPORT_DIR}" \
-        "${DEMO_ROOT}/remotes" \
-        "${DEMO_ROOT}/seeds" \
-        "${DEMO_ROOT}/remote-workers" \
-        "${DEMO_ROOT}/workspaces"
 
-    cp "${FIXTURE_DIR}/settings.json" "${APP_SUPPORT_DIR}/settings.json"
-    cp "${FIXTURE_DIR}/repositories.json" "${APP_SUPPORT_DIR}/repositories.json"
-    cp "${FIXTURE_DIR}/workplaces.json" "${APP_SUPPORT_DIR}/workplaces.json"
-    cp "${FIXTURE_DIR}/sync-states.json" "${APP_SUPPORT_DIR}/sync-states.json"
+    # 截图与手动演示共用同一份生成器:所有工作区都会真实克隆,侧栏不会出现"未克隆"红点,
+    # 详情页也覆盖 clean / dirty / ahead / behind / diverged / stash 六种状态。
+    # mktemp 目录没有标记文件,make_demo_data.sh 会拒绝清空,先补上。
+    touch "${DEMO_ROOT}/.ccspace-demo-root"
+    CCSPACE_DEMO_ROOT="${DEMO_ROOT}" "${ROOT_DIR}/script/make_demo_data.sh" >/dev/null
 
-    # fixture 里的路径统一以 /tmp/CCSpaceDemo 为占位前缀;DEMO_ROOT 每次运行
-    # 都是随机临时目录,复制后把占位前缀改写为本次的真实路径,否则 app 读到
-    # 的 workplaceRootPath/各 localPath 会指向不存在的目录。
-    python3 - "${DEMO_ROOT}" "${APP_SUPPORT_DIR}" <<'PY'
+    # make_demo_data.sh 会把 gitURL 改写成真实的本地 bare 路径(否则磁盘刷新会判"来源不符");
+    # 截图里还原成 fixture 的展示地址,设置页才不会被一长串临时目录占满。
+    python3 - "${APP_SUPPORT_DIR}" "${FIXTURE_DIR}" <<'PY'
 import json
 import pathlib
 import sys
 
-demo_root = sys.argv[1]
-support_dir = pathlib.Path(sys.argv[2])
-placeholder = "/tmp/CCSpaceDemo"
+support_dir = pathlib.Path(sys.argv[1])
+fixture_dir = pathlib.Path(sys.argv[2])
 
-for name in ("settings.json", "workplaces.json", "sync-states.json"):
-    path = support_dir / name
-    data = json.loads(path.read_text(encoding="utf-8"))
-    text = json.dumps(data, ensure_ascii=False, indent=2)
-    text = text.replace(placeholder, demo_root)
-    path.write_text(text + "\n", encoding="utf-8")
+display_urls = {
+    repo["id"]: repo["gitURL"]
+    for repo in json.loads((fixture_dir / "repositories.json").read_text(encoding="utf-8"))
+}
+
+path = support_dir / "repositories.json"
+repositories = json.loads(path.read_text(encoding="utf-8"))
+for repository in repositories:
+    repository["gitURL"] = display_urls.get(repository["id"], repository["gitURL"])
+path.write_text(json.dumps(repositories, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 PY
-
-    for workplace_name in \
-        analytics-sprint \
-        growth-experiment \
-        ios-release \
-        docs-refresh \
-        ops-hotfix \
-        marketing-weekly; do
-        mkdir -p "${DEMO_ROOT}/workspaces/${workplace_name}"
-    done
-
-    create_repo_fixture "api-gateway" "dirty"
-    create_repo_fixture "ios-app" "clean"
-    create_repo_fixture "release-tools" "ahead"
-    create_repo_fixture "shared-ui" "behind"
-}
-
-git_configure_demo_identity() {
-    local repository_path="$1"
-
-    git -C "${repository_path}" config user.name "CCSpace Demo"
-    git -C "${repository_path}" config user.email "demo@ccspace.local"
-}
-
-create_repo_fixture() {
-    local repo_name="$1"
-    local repo_state="$2"
-    local remote_path="${DEMO_ROOT}/remotes/${repo_name}.git"
-    local seed_path="${DEMO_ROOT}/seeds/${repo_name}"
-    local worker_path="${DEMO_ROOT}/remote-workers/${repo_name}"
-    local local_path="${DEMO_ROOT}/workspaces/analytics-sprint/${repo_name}"
-
-    git init --bare "${remote_path}" >/dev/null
-    git -C "${remote_path}" symbolic-ref HEAD refs/heads/main
-
-    git init -b main "${seed_path}" >/dev/null
-    git_configure_demo_identity "${seed_path}"
-    printf '# %s\n' "${repo_name}" > "${seed_path}/README.md"
-    printf '%s baseline\n' "${repo_name}" > "${seed_path}/status.txt"
-    git -C "${seed_path}" add README.md status.txt
-    git -C "${seed_path}" commit -m "Initial commit" >/dev/null
-    git -C "${seed_path}" remote add origin "${remote_path}"
-    git -C "${seed_path}" push -u origin main >/dev/null
-
-    git -C "${seed_path}" switch -c "feature/analytics-dashboard" >/dev/null
-    printf '%s feature baseline\n' "${repo_name}" >> "${seed_path}/status.txt"
-    git -C "${seed_path}" add status.txt
-    git -C "${seed_path}" commit -m "Feature baseline" >/dev/null
-    git -C "${seed_path}" push -u origin "feature/analytics-dashboard" >/dev/null
-
-    git clone "${remote_path}" "${local_path}" >/dev/null
-    git_configure_demo_identity "${local_path}"
-    git -C "${local_path}" checkout "feature/analytics-dashboard" >/dev/null
-
-    case "${repo_state}" in
-        dirty)
-            printf 'worktree change\n' >> "${local_path}/status.txt"
-            ;;
-        clean)
-            ;;
-        ahead)
-            printf 'local ahead\n' >> "${local_path}/status.txt"
-            git -C "${local_path}" add status.txt
-            git -C "${local_path}" commit -m "Local ahead change" >/dev/null
-            ;;
-        behind)
-            git clone "${remote_path}" "${worker_path}" >/dev/null
-            git_configure_demo_identity "${worker_path}"
-            git -C "${worker_path}" checkout "feature/analytics-dashboard" >/dev/null
-            printf 'remote ahead\n' >> "${worker_path}/status.txt"
-            git -C "${worker_path}" add status.txt
-            git -C "${worker_path}" commit -m "Remote ahead change" >/dev/null
-            git -C "${worker_path}" push >/dev/null
-            git -C "${local_path}" fetch origin >/dev/null
-            rm -rf "${worker_path}"
-            ;;
-        *)
-            echo "Unknown repo fixture state: ${repo_state}" >&2
-            exit 1
-            ;;
-    esac
 }
 
 readme_targets() {

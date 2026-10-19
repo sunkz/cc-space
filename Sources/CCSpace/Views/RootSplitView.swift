@@ -29,6 +29,8 @@ struct RootSplitView: View {
     @State private var showOnboarding = false
     @State private var appearanceFeedback: CCSpaceFeedback?
     @State private var deduplicationNotices = DeduplicationNoticeQueue()
+    /// 详情页分支快照的进程内缓存:随 `.id(workplace.id)` 销毁的 @State 会让每次切换重跑全量 git 扫描。
+    @State private var branchSnapshotCache = WorkplaceBranchSnapshotCache()
     private let launchConfiguration: CCSpaceLaunchConfiguration
     private let syncCoordinator: SyncCoordinator
     private let gitService: GitService
@@ -281,7 +283,11 @@ struct RootSplitView: View {
                 settingsStore.flushSettings()
             }
             .onChange(of: appViewModel.selectedWorkplaceID) { _, _ in
-                detailActionCoordinator.feedback = nil
+                // @Published 不做同值守卫:nil → nil 也会发一次变更、整棵分栏树多渲染一轮,
+                // 而"选中项变化时本来就没有反馈"是这条链路的常态。
+                if detailActionCoordinator.feedback != nil {
+                    detailActionCoordinator.feedback = nil
+                }
             }
             // 兜底:磁盘刷新也可能静默删除工作区,此时选中项悬空,在集合变化时校验选中项仍有效。
             .onChange(of: Set(workplaceStore.workplaces.map(\.id))) { _, currentIDs in
@@ -383,6 +389,7 @@ struct RootSplitView: View {
                         current,
                         removeLocalDirectories: true
                     )
+                    branchSnapshotCache.invalidate(workplace.id)
                     if appViewModel.selectedWorkplaceID == workplace.id {
                         appViewModel.showRoute(.workplaces)
                     }
@@ -848,6 +855,7 @@ struct RootSplitView: View {
             installedEditors: openActionsModel.installedEditors,
             installedTerminals: openActionsModel.installedTerminals,
             preferredOpenActionID: settingsStore.settings.preferredOpenActionID,
+            branchSnapshotCache: branchSnapshotCache,
             onSelectOpenAction: { actionID in
                 // 不用 `try?` 静默吞掉写盘失败:UI 行为不变(仍停在原选择),但失败必须留痕可查。
                 do {

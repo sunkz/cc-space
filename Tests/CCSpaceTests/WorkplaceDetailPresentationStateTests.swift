@@ -305,7 +305,10 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
     /// 显式构造详情视图夹具:生产 init 已去掉 no-op 默认 actions 与默认编辑器列表,
     /// 测试调用点自行传入全套空回调。
     @MainActor
-    private func makeDetailView(workplace: Workplace) -> WorkplaceDetailView {
+    private func makeDetailView(
+        workplace: Workplace,
+        branchSnapshotCache: WorkplaceBranchSnapshotCache = WorkplaceBranchSnapshotCache()
+    ) -> WorkplaceDetailView {
         WorkplaceDetailView(
             workplace: workplace,
             repositories: [],
@@ -344,6 +347,7 @@ final class WorkplaceDetailPresentationStateTests: XCTestCase {
             installedEditors: [],
             installedTerminals: [],
             preferredOpenActionID: nil,
+            branchSnapshotCache: branchSnapshotCache,
             onSelectOpenAction: { _ in }
         )
     }

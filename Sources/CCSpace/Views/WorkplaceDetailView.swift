@@ -57,8 +57,11 @@ struct WorkplaceDetailView: View {
     let installedTerminals: [ExternalEditor]
     let preferredOpenActionID: String?
     let onSelectOpenAction: (String) -> Void
+    let branchSnapshotCache: WorkplaceBranchSnapshotCache
     @Binding var feedback: CCSpaceFeedback?
     @State private var branchSnapshots: [RepositoryBranchCacheKey: RepositoryBranchSnapshot] = [:]
+    /// 本视图实例的挂载首轮是否已判过一次缓存复用;`.id(workplace.id)` 保证每次切换都是新实例、复位为 false。
+    @State private var hasCheckedCacheAtMount = false
     @State private var showingDeleteConfirmation = false
     /// 删除确认弹窗内容:在删除按钮触发时刻做一次目录探测后写入。不能按 body 求值现算——
     /// `.alert` 参数直接读计算属性等于每帧一次主线程 stat。
@@ -71,7 +74,9 @@ struct WorkplaceDetailView: View {
     /// 新任务收尾会把**新任务**句柄抹成 nil,下次排程再起一个并发加载器(同 RootSplitView 的 refreshGeneration)。
     @State private var branchRefreshGeneration: UInt64 = 0
     @State private var hasQueuedBranchRefresh = false
-    @State private var lastFocusRefreshTime: Date?
+    /// 上次"因活动刷新状态"的时刻。默认取挂载此刻:挂载本身就排了一轮快照扫描,
+    /// 启动/切换时连着到达的 `didBecomeKey` 若按 nil 处理会绕过节流,再补一整轮。
+    @State private var lastFocusRefreshTime = Date()
     @State private var hostWindow: NSWindow?
     @State private var periodicRefreshTask: Task<Void, Never>?
     /// scenePhase 的 @State 镜像:长驻任务捕获首帧视图拷贝,@Environment 的值在拷贝上是冻结快照(同 RootSplitView)。
@@ -180,6 +185,7 @@ struct WorkplaceDetailView: View {
         installedEditors: [ExternalEditor],
         installedTerminals: [ExternalEditor],
         preferredOpenActionID: String?,
+        branchSnapshotCache: WorkplaceBranchSnapshotCache,
         onSelectOpenAction: @escaping (String) -> Void
     ) {
         self.workplace = workplace
@@ -194,6 +200,10 @@ struct WorkplaceDetailView: View {
         self.installedTerminals = installedTerminals
         self.preferredOpenActionID = preferredOpenActionID
         self.onSelectOpenAction = onSelectOpenAction
+        self.branchSnapshotCache = branchSnapshotCache
+        // 视图带 `.id(workplace.id)`,切换即新建身份,这个初值每次切换都会真正生效;
+        // 同一工作区内的重复求值由 State 的"只在身份新建时取初值"挡掉,不会覆盖已回填的快照。
+        _branchSnapshots = State(initialValue: branchSnapshotCache.snapshots(for: workplace.id))
         self.repositoryInfoService = RepositoryInfoService(gitService: gitService)
     }
 
@@ -204,10 +214,14 @@ struct WorkplaceDetailView: View {
                 // 排序含 localizedStandardCompare,同样不能进 ForEach 现算。
                 let lookup = repositoryByID
                 let sortedStates = sortedWorkplaceSyncStates
+                let openActionItems = openActions
+                let preferredAction = preferredOpenAction
                 repositorySection(
                     sortedStates: sortedStates,
                     lookup: lookup,
-                    detailState: presentationState
+                    detailState: presentationState,
+                    openActionItems: openActionItems,
+                    preferredAction: preferredAction
                 )
             }
             .frame(maxWidth: 980, alignment: .topLeading)
@@ -348,7 +362,9 @@ struct WorkplaceDetailView: View {
     /// 那在长驻任务捕获的首帧拷贝上是冻结快照。@MainActor:每拍直写 @State 须落主执行器;Task.sleep 异步等待不阻塞主线程。
     @MainActor
     private func runPeriodicStatusRefresh() async {
-        var lastSnapshotReload = Date.distantPast
+        // 基线取"此刻"而不是 distantPast:本循环由挂载/回前台启动,同一时刻挂载首轮扫描已经在跑,
+        // distantPast 会让第一个 5s 心跳无条件判定"已过 30s",每次都多排一整轮全量扫描(21 仓 = 42 个进程)。
+        var lastSnapshotReload = Date()
         while true {
             do {
                 try await Task.sleep(for: .seconds(WorkplaceDetailRefreshInterval.activeGitStatus))
@@ -531,23 +547,45 @@ struct WorkplaceDetailView: View {
     @MainActor
     private func loadBranches() async -> Bool {
         let localSyncStates = localDirectoryMirror.localDirectoryStates
+        let attemptedKeys = localSyncStates.map { RepositoryBranchCacheKey(state: $0) }
         guard localSyncStates.isEmpty == false else {
             branchSnapshots = [:]
+            branchSnapshotCache.record([:], for: workplace.id)
             return true
         }
         guard mirroredScenePhase == .active else { return false }
         guard mirroredIsActionLocked == false else { return false }
+
+        // 挂载首轮先试缓存:来回切是连续操作,每次都重扫会白付一遍 git 进程风暴(每仓 2 个进程)
+        // 与"空列表 → 数百毫秒后回填"的跳动。年龄上限沿用 `branchSnapshotReload`:角标允许 30s 延迟,
+        // 缓存复用就不是新的宽松口径;窗口重新获得焦点(didBecomeKey)另有节流,不受这里影响。
+        if hasCheckedCacheAtMount == false {
+            hasCheckedCacheAtMount = true
+            if branchSnapshotCache.canReuse(
+                for: workplace.id,
+                maxAge: WorkplaceDetailRefreshInterval.branchSnapshotReload,
+                covering: attemptedKeys
+            ) {
+                return true
+            }
+        }
+
+        // 本轮扫描已开始,视同刚做过一次聚焦刷新:挂载后紧接着到达的 `didBecomeKeyNotification`
+        // 走的是同一条节流窗,不该让它把同一份工作再排一遍。
+        lastFocusRefreshTime = Date()
 
         let snapshots = await WorkplaceBranchLoader.loadBranchSnapshots(
             for: localSyncStates,
             gitService: gitService
         )
         guard Task.isCancelled == false else { return false }
-        branchSnapshots = WorkplaceBranchSnapshotMerge.merge(
-            attemptedKeys: localSyncStates.map { RepositoryBranchCacheKey(state: $0) },
+        let merged = WorkplaceBranchSnapshotMerge.merge(
+            attemptedKeys: attemptedKeys,
             fresh: snapshots,
             previous: branchSnapshots
         )
+        branchSnapshots = merged
+        branchSnapshotCache.record(merged, for: workplace.id)
         return true
     }
 
@@ -583,9 +621,8 @@ struct WorkplaceDetailView: View {
     /// 聚焦类事件驱动的立即刷新;做最小间隔节流,重复触发时依赖分支加载任务的排队去重。
     private func triggerFocusDrivenStatusRefresh() {
         guard syncStates.contains(where: \.hasLocalDirectory) else { return }
-        if let lastFocusRefreshTime,
-           Date.now.timeIntervalSince(lastFocusRefreshTime)
-               < WorkplaceDetailRefreshInterval.minFocusEventInterval {
+        if Date.now.timeIntervalSince(lastFocusRefreshTime)
+            < WorkplaceDetailRefreshInterval.minFocusEventInterval {
             return
         }
         lastFocusRefreshTime = .now
@@ -595,7 +632,9 @@ struct WorkplaceDetailView: View {
     private func repositorySection(
         sortedStates: [RepositorySyncState],
         lookup: [UUID: RepositoryConfig],
-        detailState: WorkplaceDetailPresentationState
+        detailState: WorkplaceDetailPresentationState,
+        openActionItems: [OpenActionItem],
+        preferredAction: OpenActionItem
     ) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             if syncStates.isEmpty {
@@ -612,7 +651,13 @@ struct WorkplaceDetailView: View {
             } else {
                 LazyVStack(spacing: 6) {
                     ForEach(sortedStates) { state in
-                        repositoryRow(for: state, lookup: lookup, detailState: detailState)
+                        repositoryRow(
+                            for: state,
+                            lookup: lookup,
+                            detailState: detailState,
+                            openActionItems: openActionItems,
+                            preferredAction: preferredAction
+                        )
                             .transition(.opacity.combined(with: .scale(scale: 0.95)))
                     }
                 }
@@ -621,11 +666,13 @@ struct WorkplaceDetailView: View {
     }
 
     /// 单行仓库卡片;参数较多,独立成函数避免 ViewBuilder 表达式类型检查超时。
-    /// lookup/state 由调用方沿渲染路径传入,否则 ForEach 每行各建一份字典/状态,退化为 O(N²)。
+    /// lookup/state/openActions 由调用方沿渲染路径传入,否则 ForEach 每行各建一份字典/状态/动作表。
     private func repositoryRow(
         for state: RepositorySyncState,
         lookup: [UUID: RepositoryConfig],
-        detailState: WorkplaceDetailPresentationState
+        detailState: WorkplaceDetailPresentationState,
+        openActionItems: [OpenActionItem],
+        preferredAction: OpenActionItem
     ) -> some View {
         let branchSnapshot = branchSnapshots[RepositoryBranchCacheKey(state: state)]
         let repository = lookup[state.repositoryID]
@@ -683,8 +730,8 @@ struct WorkplaceDetailView: View {
                 actions.onOpenRepositoryWeb(state, repository)
             },
             actionsDisabled: detailState.isActionLocked,
-            openActions: openActions,
-            preferredOpenAction: preferredOpenAction,
+            openActions: openActionItems,
+            preferredOpenAction: preferredAction,
             onOpenAction: handleOpenAction,
             infoService: repositoryInfoService,
             onDelete: {

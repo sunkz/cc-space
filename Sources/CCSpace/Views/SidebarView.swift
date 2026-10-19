@@ -105,6 +105,10 @@ struct SidebarView: View {
                 }
             }
             .listStyle(.sidebar)
+            // 焦点探针必须是侧栏子树里的兄弟节点:它靠"最近的含列表祖先"定位工作区列表。
+            .background {
+                SidebarSearchFocusRelinquisher(selectedWorkplaceID: appViewModel.selectedWorkplaceID)
+            }
             .searchable(text: $searchText, placement: .sidebar, prompt: "搜索工作区名称或分支")
             .toolbar {
                 ToolbarItem {

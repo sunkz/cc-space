@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import SwiftUI
@@ -222,8 +223,8 @@ struct CCSpaceMarqueeText: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .clipped()
-            .background(measureContainer.allowsHitTesting(false))
-            .background(measureText.allowsHitTesting(false))
+            .background(measureContainerLayer)
+            .background(measureTextLayer)
             .onChange(of: presentationState) { _, newState in
                 handleScrollPlanChange(newState)
             }
@@ -231,6 +232,23 @@ struct CCSpaceMarqueeText: View {
                 scrollTask?.cancel()
                 activeScrollPlan = nil
             }
+    }
+
+    /// 宽度只在真正会滚动时(hover)才有意义:`isActive == false` 时 shouldScroll 恒为 false,
+    /// 测量层纯属白跑。GeometryReader 要参与每一次布局,37 行两枚就是 74 个,侧栏每次重渲染都付一遍。
+    /// 挂/卸只改动这一行的背景层,宽度 @State 跨 hover 保留,再次 hover 时首轮求值即拿到旧宽度。
+    @ViewBuilder
+    private var measureContainerLayer: some View {
+        if isActive {
+            measureContainer.allowsHitTesting(false)
+        }
+    }
+
+    @ViewBuilder
+    private var measureTextLayer: some View {
+        if isActive {
+            measureText.allowsHitTesting(false)
+        }
     }
 
     /// 隐藏的等宽测量层:取文案固有宽度。仅测量不绘制,避免与正文形成重影。
@@ -415,6 +433,97 @@ struct SidebarWorkplaceRowView: View {
                 }
             }
             .labelStyle(.titleAndIcon)
+        }
+    }
+}
+
+/// 鼠标点选工作区后,把键盘焦点从侧栏搜索框交回工作区列表。
+///
+/// 搜索框是 `.searchable(placement: .sidebar)`,SwiftUI 不给焦点绑定:一旦点过它,第一响应者就一直
+/// 停在搜索框里——光标不停闪、后续敲的字符全进了搜索框。这里在选中项变化时主动接管。
+///
+/// 只在"搜索框仍然是第一响应者"时动手:用键盘从搜索框跳进列表时焦点早已离开,不该被抢回来;
+/// 选中项变回 nil(切去设置页)也不接管,那是停止筛选、不是选完就走。
+struct SidebarSearchFocusRelinquisher: NSViewRepresentable {
+    /// 焦点交还的推迟量,见 `updateNSView`。
+    static let handoffSettleDelay: TimeInterval = 0.2
+
+    let selectedWorkplaceID: UUID?
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(lastSelectedWorkplaceID: selectedWorkplaceID)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        // 只用来定位窗口与视图树,不参与命中:默认 NSView 会接住列表空白区的点击。
+        ProbeView()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        let coordinator = context.coordinator
+        guard coordinator.lastSelectedWorkplaceID != selectedWorkplaceID else { return }
+        coordinator.lastSelectedWorkplaceID = selectedWorkplaceID
+        guard selectedWorkplaceID != nil else { return }
+        // 接管要推迟到本轮视图更新之后:同步做读到的是点击前的旧第一响应者;
+        // 而启动恢复选中项那一轮 SwiftUI 还在重建侧栏,立刻把刚建出来的列表设成第一响应者
+        // 会让宿主窗口直接消失(实测:0ms 必现,≥200ms 两条路径都正常)。
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.handoffSettleDelay) { [weak nsView] in
+            guard let nsView else { return }
+            MainActor.assumeIsolated {
+                Self.relinquishFocus(from: nsView)
+            }
+        }
+    }
+
+    @MainActor
+    static func relinquishFocus(from probe: NSView) {
+        guard let window = probe.window, isEditingSearchField(window.firstResponder) else { return }
+        // 交回列表而不是单纯失焦:列表拿到第一响应者后,上下键还能继续切工作区
+        // (resign 到窗口本身会把这条键盘导航一起弄丢,实测 ↓ 不再切换)。
+        window.makeFirstResponder(nearestTableView(above: probe))
+    }
+
+    /// "正在编辑的是不是搜索框":文本编辑期间窗口的第一响应者是**字段编辑器**(`NSTextView`),
+    /// 控件本身挂在它的 `delegate` 上(实测 `.searchable` 落的是 `AppKitSearchField`)。
+    /// 只判 `firstResponder is NSSearchField` 恒假,整段接管会静默变成空操作。
+    @MainActor
+    static func isEditingSearchField(_ responder: NSResponder?) -> Bool {
+        if responder is NSSearchField { return true }
+        return (responder as? NSTextView)?.delegate is NSSearchField
+    }
+
+    /// 从探针逐级往上找**最近的**含 `NSTableView` 的祖先——SwiftUI 的 `List` 在 macOS 上由
+    /// `NSTableView` 承载。只按窗口全量扫会抓到详情区/弹层里的表,拿到错的视图反而抢走焦点。
+    @MainActor
+    static func nearestTableView(above probe: NSView) -> NSTableView? {
+        var ancestor = probe.superview
+        while let current = ancestor {
+            if let table = firstTableView(in: current) { return table }
+            ancestor = current.superview
+        }
+        return nil
+    }
+
+    @MainActor
+    static func firstTableView(in root: NSView) -> NSTableView? {
+        for subview in root.subviews {
+            if let table = subview as? NSTableView { return table }
+            if let table = firstTableView(in: subview) { return table }
+        }
+        return nil
+    }
+
+    private final class ProbeView: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            nil
+        }
+    }
+
+    final class Coordinator {
+        var lastSelectedWorkplaceID: UUID?
+
+        init(lastSelectedWorkplaceID: UUID?) {
+            self.lastSelectedWorkplaceID = lastSelectedWorkplaceID
         }
     }
 }

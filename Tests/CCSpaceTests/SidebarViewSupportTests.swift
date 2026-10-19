@@ -245,3 +245,72 @@ final class SidebarViewSupportTests: XCTestCase {
         )
     }
 }
+
+/// 焦点探针的视图树定位逻辑:纯 AppKit 结构,不需要真窗口即可锁住。
+@MainActor
+final class SidebarSearchFocusRelinquisherTests: XCTestCase {
+    private func makeScrollableTable() -> (scroll: NSScrollView, table: NSTableView) {
+        let table = NSTableView()
+        let scroll = NSScrollView()
+        scroll.documentView = table
+        return (scroll, table)
+    }
+
+    func test_firstTableViewFindsNestedTable() {
+        let root = NSView()
+        let (scroll, table) = makeScrollableTable()
+        root.addSubview(scroll)
+
+        XCTAssertTrue(SidebarSearchFocusRelinquisher.firstTableView(in: root) === table)
+    }
+
+    func test_firstTableViewReturnsNilWithoutTable() {
+        let root = NSView()
+        root.addSubview(NSView())
+
+        XCTAssertNil(SidebarSearchFocusRelinquisher.firstTableView(in: root))
+    }
+
+    /// 全窗口扫会抓到详情区那张表:必须停在**最近的**含表祖先上。
+    func test_nearestTableViewStopsAtClosestAncestorHoldingATable() {
+        let window = NSView()
+        let (detailScroll, detailTable) = makeScrollableTable()
+        window.addSubview(detailScroll)
+
+        let sidebar = NSView()
+        let (sidebarScroll, sidebarTable) = makeScrollableTable()
+        sidebar.addSubview(sidebarScroll)
+        let probe = NSView()
+        sidebar.addSubview(probe)
+        window.addSubview(sidebar)
+
+        XCTAssertTrue(SidebarSearchFocusRelinquisher.nearestTableView(above: probe) === sidebarTable)
+        XCTAssertFalse(SidebarSearchFocusRelinquisher.nearestTableView(above: probe) === detailTable)
+    }
+
+    /// 接管条件必须认得"字段编辑器":文本编辑期间窗口第一响应者是 NSTextView,搜索框在它的
+    /// delegate 上;只认 `is NSSearchField` 的那版实现实测恒假、整段静默空转。
+    func test_isEditingSearchFieldAcceptsControlAndItsFieldEditor() {
+        let field = NSSearchField()
+        let editor = NSTextView()
+        guard let delegate = field as? NSTextViewDelegate else {
+            return XCTFail("NSSearchField 不再是字段编辑器的 delegate,接管条件已失效")
+        }
+        editor.delegate = delegate
+
+        XCTAssertTrue(SidebarSearchFocusRelinquisher.isEditingSearchField(field))
+        XCTAssertTrue(SidebarSearchFocusRelinquisher.isEditingSearchField(editor))
+
+        let plainEditor = NSTextView()
+        XCTAssertFalse(SidebarSearchFocusRelinquisher.isEditingSearchField(plainEditor))
+        XCTAssertFalse(SidebarSearchFocusRelinquisher.isEditingSearchField(nil))
+    }
+
+    func test_nearestTableViewReturnsNilWhenNoAncestorHasTable() {
+        let root = NSView()
+        let probe = NSView()
+        root.addSubview(probe)
+
+        XCTAssertNil(SidebarSearchFocusRelinquisher.nearestTableView(above: probe))
+    }
+}

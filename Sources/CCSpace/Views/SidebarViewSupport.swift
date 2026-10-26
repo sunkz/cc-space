@@ -357,6 +357,12 @@ struct SidebarWorkplaceRowView: View {
         return rowPresentationState.creationTimeText
     }
 
+    /// 右键菜单「复制工作分支名称」的可复制值:未设置分支时为 nil,菜单项随之置灰。
+    private var copyableBranchName: String? {
+        guard let branchName, branchName.isEmpty == false else { return nil }
+        return branchName
+    }
+
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: workplace.isArchived ? "archivebox" : "folder")
@@ -422,6 +428,22 @@ struct SidebarWorkplaceRowView: View {
                 } label: {
                     Label("复制工作区", systemImage: "doc.on.doc")
                 }
+
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(workplace.name, forType: .string)
+                } label: {
+                    Label("复制工作区名称", systemImage: "doc.on.clipboard")
+                }
+
+                Button {
+                    guard let branchName = copyableBranchName else { return }
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(branchName, forType: .string)
+                } label: {
+                    Label("复制工作分支名称", systemImage: "doc.on.clipboard")
+                }
+                .disabled(copyableBranchName == nil)
 
                 Button {
                     onToggleArchived(workplace)

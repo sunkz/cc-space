@@ -16,11 +16,13 @@ struct RepositorySettingsSection: View {
     private let infoService: RepositoryInfoService
     /// 由 SettingsView 注入(它才持有外层 ScrollView 的 reader),把某条仓库行滚进视野。
     let scrollToRepository: (UUID) -> Void
-    /// 与 `searchText` 是两个互不相干的控件:地址框只负责建档,搜索框只负责过滤,否则粘贴地址会把列表筛成"未找到"。
+    /// 一行两用:`isAddingRepository` 决定这个框装的是过滤关键词还是待建档地址,两态各留一份文本。
+    /// 进地址态时 `searchText` 直接清空且不恢复;取消退回搜索态时粘过的地址仍在框里。
     @State private var addURLText = ""
-    /// 点过「新增仓库」但框里是空的:提示行要说"没填",不能报"格式不对"。
+    @State private var isAddingRepository = false
+    /// 点过「添加」但框里是空的:提示行要说"没填",不能报"格式不对"。
     @State private var addSubmitAttempted = false
-    @FocusState private var addURLFocused: Bool
+    @FocusState private var fieldFocused: Bool
     @State private var feedback: CCSpaceFeedback?
     @State private var deletePresentationState: RepositoryDeletePresentationState?
     @State private var justAddedRepositoryID: UUID?
@@ -119,12 +121,7 @@ struct RepositorySettingsSection: View {
                     .ccspaceAutoDismissFeedback($feedback)
             }
 
-            addRepositoryRow
-
-            // 仓库池为空时搜索框没有可过滤的内容,不出现;新增引导由地址框承担。
-            if repositories.isEmpty == false {
-                searchField
-            }
+            inputRow
 
             if searchState.filteredRepositories.isEmpty {
                 CCSpaceEmptyStateCard(
@@ -187,66 +184,103 @@ struct RepositorySettingsSection: View {
         }
     }
 
-    private var searchField: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            TextField("搜索仓库名称或地址", text: $searchText)
-                .textFieldStyle(.plain)
-        }
-        .padding(.vertical, 6)
-        .padding(.horizontal, 10)
-        .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-    }
-
-    private var addRepositoryRow: some View {
-        let hint = addHint
+    /// 搜索态与地址态共用同一个框:壳层从灰底无描边换成白底灰描边,加上模式标记换字,
+    /// 就是"现在敲进去的东西是要建档的、不是用来过滤的"这件事的全部信号。
+    private var inputRow: some View {
+        let adding = isAddingRepository
+        let hint = adding ? addHint : nil
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                addURLField
-                addRepositoryButton
+                inputField(adding: adding)
+                if adding {
+                    submitAddButton
+                    cancelButton
+                } else {
+                    enterAddButton
+                }
             }
-            if hint.text.isEmpty == false {
+            if let hint, hint.text.isEmpty == false {
                 addHintLine(hint)
             }
         }
     }
 
     /// 聚焦只加深描边灰度、不上蓝色焦点环:设置页通篇没有彩色边框。
-    private var addURLField: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "link")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            TextField("粘贴 Git 仓库地址", text: $addURLText)
+    private func inputField(adding: Bool) -> some View {
+        HStack(spacing: 7) {
+            modeMark(adding: adding)
+            TextField(adding ? "粘贴 Git 仓库地址" : "搜索仓库名称或地址", text: fieldText)
                 .textFieldStyle(.plain)
                 .font(.callout)
-                .focused($addURLFocused)
+                .focused($fieldFocused)
+                .onSubmit {
+                    // 只有地址态回车提交;搜索态回车没有下一步动作。
+                    if adding {
+                        addRepository()
+                    }
+                }
         }
         .padding(.vertical, 6)
         .padding(.horizontal, 10)
         .background(
-            Color(nsColor: .textBackgroundColor),
+            adding
+                ? Color(nsColor: .textBackgroundColor)
+                : Color.primary.opacity(0.03),
             in: RoundedRectangle(cornerRadius: 8, style: .continuous)
         )
         .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(
-                    Color.primary.opacity(addURLFocused ? 0.22 : 0.10),
-                    lineWidth: 1
-                )
+            if adding {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(
+                        Color.primary.opacity(fieldFocused ? 0.22 : 0.10),
+                        lineWidth: 1
+                    )
+            }
         }
     }
 
-    private var addRepositoryButton: some View {
+    private var fieldText: Binding<String> {
+        isAddingRepository ? $addURLText : $searchText
+    }
+
+    /// 一个框两用,总得有个常驻元素说清当前是哪一态——灰阶,不带颜色也不带图标。
+    private func modeMark(adding: Bool) -> some View {
+        Text(adding ? "地址" : "搜索")
+            .font(.caption2.weight(adding ? .semibold : .regular))
+            .foregroundStyle(adding ? Color.primary : Color.secondary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(
+                Color.primary.opacity(adding ? 0.09 : 0.05),
+                in: Capsule()
+            )
+    }
+
+    private var enterAddButton: some View {
         Button {
-            addRepository()
+            enterAddMode()
         } label: {
             Label("新增仓库", systemImage: "plus")
         }
         .ccspacePrimaryActionButton()
-        .ccspaceQuickHelp("以地址框的内容新增仓库")
+        .ccspaceQuickHelp("把这一行换成 Git 仓库地址输入")
+    }
+
+    private var submitAddButton: some View {
+        Button("添加") {
+            addRepository()
+        }
+        .ccspacePrimaryActionButton()
+        .ccspaceQuickHelp("以框里的地址新增仓库")
+    }
+
+    /// `.cancelAction` 让 Esc 与点「取消」走同一条退路。
+    private var cancelButton: some View {
+        Button("取消") {
+            exitAddMode()
+        }
+        .ccspaceSecondaryActionButton()
+        .keyboardShortcut(.cancelAction)
     }
 
     private var addHint: RepositoryAddFieldHint {
@@ -283,48 +317,51 @@ struct RepositorySettingsSection: View {
         }
     }
 
-    /// 点击时才判定,按钮不置灰。拦截性反馈一律落在地址框下方那一行,顶部横幅只留
+    /// 点「新增仓库」= 就地切到地址态。搜索词直接清空且不恢复:框被地址文本独占,
+    /// 留着旧关键词会在退回搜索态时莫名把列表重新过滤一遍。
+    private func enterAddMode() {
+        searchText = ""
+        addSubmitAttempted = false
+        isAddingRepository = true
+        fieldFocused = true
+    }
+
+    /// 取消只退形态,框里已粘的地址留着——再点「新增仓库」接着用。
+    private func exitAddMode() {
+        isAddingRepository = false
+        addSubmitAttempted = false
+    }
+
+    /// 点击时才判定,按钮不置灰。拦截性反馈一律落在这一行下方,顶部横幅只留
     /// "已新增 xxx"和写盘失败这类整页级信息。
     private func addRepository() {
         let gitURL = addURLText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard gitURL.isEmpty == false else {
             addSubmitAttempted = true
-            addURLFocused = true
+            fieldFocused = true
             return
         }
         // 格式与重复都已在提示行里说清了,这里只挡住提交:再去 store 撞一次异常只会得到同一条信息的第二个版本。
         let hint = addHint
         guard hint.style != .error, hint.duplicateRepositoryID == nil else {
-            addURLFocused = true
+            fieldFocused = true
             return
         }
         do {
             let repository = try repositoryStore.addRepository(gitURL: gitURL)
             addURLText = ""
             addSubmitAttempted = false
-            clearSearchIfOccluding(repository)
             feedback = RepositoryConfigFeedbackFactory.addSuccess(repositoryName: repository.repoName)
             flagJustAdded(repository.id)
             refreshDefaultBranch(id: repository.id, gitURL: repository.gitURL)
-            // 连续新增:焦点留在地址框,下一个直接 ⌘V。
-            addURLFocused = true
+            // 连续新增:停在地址态、焦点留在框里,下一个直接 ⌘V。
+            fieldFocused = true
         } catch {
             feedback = CCSpaceFeedbackFactory.actionError(action: "新增仓库", error: error)
         }
     }
 
-    /// 搜索词还挂着、而这条记录不匹配它时先把词清掉——否则用户看不见刚加的仓库(判据与列表过滤同源)。
-    private func clearSearchIfOccluding(_ repository: RepositoryConfig) {
-        let keyword = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard keyword.isEmpty == false,
-              RepositorySearchPresentationState.matches(repository, keyword: keyword) == false else { return }
-        searchText = ""
-    }
-
     private func locateRepository(_ id: UUID) {
-        if let repository = repositoryStore.repository(for: id) {
-            clearSearchIfOccluding(repository)
-        }
         Task { @MainActor in
             scrollToRepository(id)
         }

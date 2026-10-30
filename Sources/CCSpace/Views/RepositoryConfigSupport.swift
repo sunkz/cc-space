@@ -12,8 +12,8 @@ enum RepositoryListLayout {
 struct RepositorySearchPresentationState {
     static let backToTopThreshold = 8
 
-    /// 仓库池为空时搜索框不出现(没东西可搜),空态副标题因此要指向地址框。
-    static let emptyLibrarySubtitle = "在上方地址框粘贴 Git 仓库地址，点「新增仓库」即可添加。"
+    /// 新增入口就是上方那一行(点「新增仓库」切成地址态),空池时把用户指到这里。
+    static let emptyLibrarySubtitle = "点上方「新增仓库」，在这一行粘贴 Git 仓库地址即可添加。"
 
     let filteredRepositories: [RepositoryConfig]
     let emptyTitle: String
@@ -25,7 +25,7 @@ struct RepositorySearchPresentationState {
     ) {
         let trimmedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // 池为空时不能说"未找到匹配仓库":让用户去找一个此时并不出现的搜索框是误导。
+        // 池为空时不能说"未找到匹配仓库":根本没有关键词可谈,要说的是新增入口在哪。
         if trimmedSearchText.isEmpty || repositories.isEmpty {
             filteredRepositories = repositories
             emptyTitle = "暂无仓库配置"
@@ -233,7 +233,7 @@ struct RepositoryAddPresentationState {
 }
 
 /// 判据优先级:没输入且已点过新增 > 格式不合法 > 地址已建档 > 「将创建」预览;View 只按 `style` 着色。
-/// 空框且没点过按钮时 `text` 为**空串**,调用方据此收掉整一行——地址框占位词已说了"粘贴 Git 仓库地址",复述是噪声。
+/// 空框且没点过按钮时 `text` 为**空串**,调用方据此收掉整一行——框的占位词已说了"粘贴 Git 仓库地址",复述是噪声。
 struct RepositoryAddFieldHint: Equatable {
     enum Style: Equatable {
         case neutral
@@ -243,7 +243,7 @@ struct RepositoryAddFieldHint: Equatable {
         case error
     }
 
-    static let missingInputText = "请先在地址框粘贴 Git 仓库地址。"
+    static let missingInputText = "请先粘贴 Git 仓库地址。"
 
     let style: Style
     let text: String

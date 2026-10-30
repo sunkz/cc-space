@@ -248,14 +248,6 @@ struct SettingsView: View {
                 .ccspacePrimaryActionButton()
                 .ccspaceQuickHelp("更改工作区存储位置")
             }
-            .ccspaceInsetPanel(
-                background: savedPath.isEmpty || rootDirectoryMissing
-                    ? Color.orange.opacity(0.03)
-                    : Color.primary.opacity(0.02),
-                cornerRadius: 12,
-                padding: 10,
-                borderOpacity: savedPath.isEmpty || rootDirectoryMissing ? 0.08 : 0.04
-            )
 
             if let shownFeedback = saveFeedback {
                 CCSpaceFeedbackBanner(feedback: shownFeedback, onClose: { saveFeedback = nil })

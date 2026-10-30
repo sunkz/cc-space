@@ -58,10 +58,17 @@ private struct CCSpacePopoverModifier<PopoverContent: View>: ViewModifier {
     @Binding var isPresented: Bool
     let arrowEdge: Edge
     @ViewBuilder let build: () -> PopoverContent
+    /// README 截图场景:弹窗要能被脚本稳定截到,不随焦点变化自动收起。
+    @Environment(\.ccspaceScreenshotBranchRepo) private var screenshotBranchRepo
 
     func body(content: Content) -> some View {
         content.background(
-            CCSpacePopoverAnchor(isPresented: $isPresented, arrowEdge: arrowEdge, build: build)
+            CCSpacePopoverAnchor(
+                isPresented: $isPresented,
+                arrowEdge: arrowEdge,
+                pinsOpen: screenshotBranchRepo != nil,
+                build: build
+            )
         )
     }
 }
@@ -69,6 +76,7 @@ private struct CCSpacePopoverModifier<PopoverContent: View>: ViewModifier {
 private struct CCSpacePopoverAnchor<Content: View>: NSViewRepresentable {
     @Binding var isPresented: Bool
     let arrowEdge: Edge
+    let pinsOpen: Bool
     @ViewBuilder let build: () -> Content
 
     func makeNSView(context: Context) -> AnchorView {
@@ -79,12 +87,16 @@ private struct CCSpacePopoverAnchor<Content: View>: NSViewRepresentable {
 
     func updateNSView(_ view: AnchorView, context: Context) {
         view.onDismiss = { isPresented = false }
+        // 先写标记再 apply:show() 按它决定 behavior,否则截图脚本一动焦点面板就收起。
+        view.pinsOpen = pinsOpen
         view.apply(isPresented: isPresented, arrowEdge: arrowEdge, build: build)
     }
 
     /// 锚点 NSView:承载 popover 并跟随宿主 bounds 定位。
     final class AnchorView: NSView, NSPopoverDelegate {
         var onDismiss: (() -> Void)?
+        /// 截图场景:为真时弹窗按 applicationDefined 呈现,不随失焦/点外部自动收起。
+        var pinsOpen = false
         private var popover: NSPopover?
         /// 呈现请求代际号:每次 apply 递增。延迟一帧的重试只有仍是最新请求、
         /// 且弹窗状态仍为展示中才真正 show,避免"快速开→关"时旧回调弹出
@@ -157,12 +169,17 @@ private struct CCSpacePopoverAnchor<Content: View>: NSViewRepresentable {
             popover = nil
 
             let popover = NSPopover()
-            popover.behavior = .transient
+            popover.behavior = pinsOpen ? .applicationDefined : .transient
             popover.delegate = self
             let controller = NSHostingController(rootView: injectedRootView(build))
             controller.sizingOptions = [.preferredContentSize]
             popover.contentViewController = controller
             popover.show(relativeTo: bounds, of: self, preferredEdge: preferredEdge(for: arrowEdge))
+            if pinsOpen {
+                // 截图场景:面板里的搜索框会抢下第一响应者,插入符一闪一闪,
+                // 脚本的"连续几帧像素一致"就绪判据永远收敛不了(实测差异就是那条 4×27px 的竖线)。
+                popover.contentViewController?.view.window?.makeFirstResponder(nil)
+            }
             self.popover = popover
         }
 

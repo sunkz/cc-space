@@ -69,9 +69,24 @@ private struct CCSpaceQuickHelpModifier: ViewModifier {
     let label: String?
     let hint: String?
 
+    @Environment(\.ccspaceQuickHelpEnabled) private var isEnabled
+
     @ViewBuilder
     func body(content: Content) -> some View {
         attached(content)
+    }
+
+    /// 关掉时只撤掉桥接视图,无障碍属性照常挂:截图场景不要气泡,但 AX 语义不能跟着丢。
+    @ViewBuilder
+    private func bridge(_ content: Content) -> some View {
+        if isEnabled {
+            content
+                .overlay {
+                    CCSpaceQuickHelpBridge(text: text)
+                }
+        } else {
+            content
+        }
     }
 
     @ViewBuilder
@@ -84,25 +99,28 @@ private struct CCSpaceQuickHelpModifier: ViewModifier {
             hint: hint
         )
         if let resolvedLabel = resolution.label, let resolvedHint = resolution.hint {
-            content
-                .overlay {
-                    CCSpaceQuickHelpBridge(text: text)
-                }
+            bridge(content)
                 .accessibilityLabel(resolvedLabel)
                 .accessibilityHint(resolvedHint)
         } else if let resolvedLabel = resolution.label {
-            content
-                .overlay {
-                    CCSpaceQuickHelpBridge(text: text)
-                }
+            bridge(content)
                 .accessibilityLabel(resolvedLabel)
         } else if let resolvedHint = resolution.hint {
-            content
-                .overlay {
-                    CCSpaceQuickHelpBridge(text: text)
-                }
+            bridge(content)
                 .accessibilityHint(resolvedHint)
         }
+    }
+}
+
+private struct CCSpaceQuickHelpEnabledKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
+extension EnvironmentValues {
+    /// 悬停气泡总开关。README 截图场景置假——指针停在控件上时气泡会被一起截进图里。
+    var ccspaceQuickHelpEnabled: Bool {
+        get { self[CCSpaceQuickHelpEnabledKey.self] }
+        set { self[CCSpaceQuickHelpEnabledKey.self] = newValue }
     }
 }
 

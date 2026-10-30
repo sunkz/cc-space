@@ -46,6 +46,8 @@ struct WorkplaceDetailActions {
 
 struct WorkplaceDetailView: View {
     @Environment(\.scenePhase) private var scenePhase
+    /// README 截图场景:该名字的仓库行挂载后自动展开分支面板(见 `CCSpaceLaunchConfiguration.branchPanelRepositoryName`)。
+    @Environment(\.ccspaceScreenshotBranchRepo) private var screenshotBranchRepo
     let workplace: Workplace
     let repositories: [RepositoryConfig]
     let syncStates: [RepositorySyncState]
@@ -686,6 +688,7 @@ struct WorkplaceDetailView: View {
             currentBranch: branchSnapshot?.currentBranch,
             branchStatus: branchSnapshot?.status,
             availableBranches: branchSnapshot?.branches ?? [],
+            autoPresentsBranchPanel: screenshotBranchRepo == repositoryName,
             retryRepository: repository,
             pullRepository: repository,
             allowsDeleteRepository: workplace.selectedRepositoryIDs.count > 1,

@@ -8,6 +8,8 @@ struct WorkplaceRepositoryRowView: View {
     let currentBranch: String?
     let branchStatus: GitBranchStatusSnapshot?
     let availableBranches: [String]
+    /// 仅 README 截图场景为真:挂载后自动展开本行的分支面板。
+    let autoPresentsBranchPanel: Bool
     let retryRepository: RepositoryConfig?
     let pullRepository: RepositoryConfig?
     let allowsDeleteRepository: Bool
@@ -498,6 +500,13 @@ struct WorkplaceRepositoryRowView: View {
                 }
             }
         }
+        .onAppear {
+            // 截图场景:与手动入口走同一条延迟呈现路径,锚点没布局完就 present 会被系统丢弃。
+            // 800ms 是为了排在截图窗口的定尺(约 200ms)之后——改窗口尺寸会重建行视图,
+            // 先弹出来的面板会被那次重建直接关掉。
+            guard autoPresentsBranchPanel else { return }
+            presentPopoverDeferred({ showingBranchMenu = true }, after: 0.8)
+        }
         .onDisappear {
             remoteBranchesTask?.cancel()
             remoteBranchesTask = nil
@@ -525,12 +534,16 @@ struct WorkplaceRepositoryRowView: View {
         )
     }
 
-    /// 菜单收起动画结束后再弹 popover:过早呈现会被系统丢弃;句柄可在视图消失时取消,避免迟到写回。
-    private func presentPopoverAfterMenuDismissal(_ present: @escaping @MainActor () -> Void) {
+    /// 延后一拍再弹 popover:过早呈现会被系统丢弃(菜单收起动画未完、或行刚挂载锚点还没布局完);
+    /// 句柄可在视图消失时取消,避免迟到写回。
+    private func presentPopoverDeferred(
+        _ present: @escaping @MainActor () -> Void,
+        after delay: TimeInterval = 0.15
+    ) {
         popoverPresentationTask?.cancel()
         // 任务必须标 @MainActor:延迟回来后要写 @State 并调 present(present 本就以 @MainActor 传入)。
         popoverPresentationTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(150))
+            try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else { return }
             popoverPresentationTask = nil
             present()
@@ -734,7 +747,7 @@ struct WorkplaceRepositoryRowView: View {
         .disabled(!rowState.canPushToRemote)
         Divider()
         Button {
-            presentPopoverAfterMenuDismissal { showingBranchMenu = true }
+            presentPopoverDeferred { showingBranchMenu = true }
         } label: {
             Label("切换分支…", systemImage: "arrow.triangle.branch")
         }
@@ -824,7 +837,7 @@ struct WorkplaceRepositoryRowView: View {
         .disabled(!rowState.canStashChanges)
         .ccspaceQuickHelp(stashMenuHelp)
         Button {
-            presentPopoverAfterMenuDismissal {
+            presentPopoverDeferred {
                 loadStashList()
                 showingStashList = true
             }

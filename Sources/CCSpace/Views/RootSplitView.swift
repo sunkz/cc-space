@@ -187,6 +187,8 @@ struct RootSplitView: View {
     /// 生命周期/定时刷新修饰单独成链:body 单条修饰链过长会触发类型检查超时。
     private func rootLifecycleModifiers(_ content: some View) -> some View {
         content
+            // 截图场景关掉悬停气泡:指针恰好停在某个控件上时,气泡会跟着一起被截进 README 图。
+            .environment(\.ccspaceQuickHelpEnabled, launchConfiguration.screenshotScene == nil)
             .task {
                 await updateChecker.check()
             }
@@ -866,6 +868,7 @@ struct RootSplitView: View {
                 }
             }
         )
+        .environment(\.ccspaceScreenshotBranchRepo, launchConfiguration.branchPanelRepositoryName)
         .id(workplace.id)
     }
 
@@ -1156,6 +1159,12 @@ struct RootSplitView: View {
                 )
             )
         }
+
+        // 路由切完再定尺:窗口此刻才真正存在,早一帧拿到的是旧 frame 或被 SwiftUI 覆写。
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(200))
+            resizeScreenshotWindowIfNeeded()
+        }
     }
 
     @MainActor
@@ -1165,6 +1174,22 @@ struct RootSplitView: View {
             let window = NSApp.windows.first { $0.isVisible && $0.canBecomeKey }
             window?.makeFirstResponder(nil)
         }
+    }
+
+    /// 截图场景显式定尺:`.defaultSize` 只在"没有存档 frame"时生效,而 SwiftUI 会把窗口 frame
+    /// 写进偏好(`NSWindow Frame …`),实测三个场景拿到的都是恢复来的尺寸,脚本传的
+    /// `CCSPACE_WINDOW_SIZE` 一直是空转——详情页要把分支面板往下摊开,没有这块高度就必然翻到上方压住列表。
+    @MainActor
+    private func resizeScreenshotWindowIfNeeded() {
+        guard launchConfiguration.screenshotScene != nil else { return }
+        guard let window = NSApp.windows.first(where: { $0.isVisible && $0.canBecomeKey }) else { return }
+        window.setContentSize(
+            NSSize(
+                width: launchConfiguration.windowSize.width,
+                height: launchConfiguration.windowSize.height
+            )
+        )
+        window.center()
     }
 
     /// 路由持久化回调必须在 onAppear 而不是 init 绑定:init 拿不到 SwiftUI 实际持有的 SettingsStore

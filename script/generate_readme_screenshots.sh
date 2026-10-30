@@ -12,7 +12,12 @@ APP_BUNDLE="${ROOT_DIR}/dist/${APP_NAME}.app"
 DEFAULT_WINDOW_SIZE="960x640"
 # 设置页区块较多,加高窗口避免底部区块被底边截断。
 SETTINGS_WINDOW_SIZE="960x800"
+# 详情页 10 行仓库要全部实例化(懒容器只建视口内的行,分支面板挂在最后一行上),
+# 又不能留大片空白把画面拉散——按"表头 + 10 行"的高度收在 760。
+DETAIL_WINDOW_SIZE="960x760"
 SCREENSHOT_WORKPLACE_NAME="analytics-sprint"
+# 分支面板固定展开在这一行上:写死名字而不是"最后一行",换演示数据时不会悄悄换主角。
+BRANCH_PANEL_REPOSITORY_NAME="shared-ui"
 CREATE_WORKPLACE_NAME="checkout-redesign"
 CREATE_WORKPLACE_BRANCH="feature/checkout-redesign"
 CREATE_SELECTED_REPOSITORIES="api-gateway,docs-portal,growth-dashboard,ios-app"
@@ -84,7 +89,9 @@ trap cleanup EXIT
 # 演示数据放在每次运行独立的临时目录:固定路径 + 反复 rm -rf 既留垃圾,
 # 又会和并发/上一次未退出的运行互相踩。必须晚于上面的 trap:任何退出路径
 # (含参数错误 / require_commands 失败)都已被 cleanup 覆盖,不会泄漏临时目录。
-DEMO_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/CCSpaceDemo.XXXXXX")"
+# 模板写死 /tmp 而不是 $TMPDIR:后者是 /var/folders/<哈希>/T,路径会原样出现在
+# 设置页与详情页截图里,长到中间被省略号截断,读不出"这是一个工作区根目录"。
+DEMO_ROOT="$(mktemp -d "/tmp/CCSpaceDemo.XXXXXX")"
 APP_SUPPORT_DIR="${DEMO_ROOT}/app-support"
 
 build_app_bundle() {
@@ -186,6 +193,8 @@ launch_for_scenario() {
     local window_size="${DEFAULT_WINDOW_SIZE}"
     if [[ "${scenario}" == "settings-overview" ]]; then
         window_size="${SETTINGS_WINDOW_SIZE}"
+    elif [[ "${scenario}" == "workplace-detail" ]]; then
+        window_size="${DETAIL_WINDOW_SIZE}"
     fi
     local -a open_command=(
         open
@@ -202,6 +211,10 @@ launch_for_scenario() {
             --env "CCSPACE_SCREENSHOT_CREATE_NAME=${CREATE_WORKPLACE_NAME}"
             --env "CCSPACE_SCREENSHOT_CREATE_BRANCH=${CREATE_WORKPLACE_BRANCH}"
             --env "CCSPACE_SCREENSHOT_CREATE_SELECTED_REPOSITORIES=${CREATE_SELECTED_REPOSITORIES}"
+        )
+    elif [[ "${scenario}" == "workplace-detail" ]]; then
+        open_command+=(
+            --env "CCSPACE_SCREENSHOT_BRANCH_REPO=${BRANCH_PANEL_REPOSITORY_NAME}"
         )
     fi
 
@@ -221,6 +234,11 @@ import Foundation
 let ownerName = ProcessInfo.processInfo.environment["OWNER_NAME"] ?? ""
 let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
 
+// 取面积最大的 layer 0 窗口:弹窗(NSPopover)同样是 layer 0 的独立窗口,
+// 且排在主窗口之前——按"第一个命中"取会把弹窗当成主窗口,截出来只有一块面板。
+var bestID = 0
+var bestArea = 0.0
+
 for window in windows {
     let windowOwner = window[kCGWindowOwnerName as String] as? String ?? ""
     let windowLayer = window[kCGWindowLayer as String] as? Int ?? 0
@@ -229,10 +247,18 @@ for window in windows {
         continue
     }
 
-    if let windowID = window[kCGWindowNumber as String] as? Int {
-        print(windowID)
-        break
+    let bounds = window[kCGWindowBounds as String] as? [String: Any] ?? [:]
+    let width = bounds["Width"] as? Double ?? 0
+    let height = bounds["Height"] as? Double ?? 0
+    guard let windowID = window[kCGWindowNumber as String] as? Int, width * height > bestArea else {
+        continue
     }
+    bestArea = width * height
+    bestID = windowID
+}
+
+if bestID != 0 {
+    print(bestID)
 }
 '
 }

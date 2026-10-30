@@ -69,5 +69,52 @@
     ],
     "repoName": "shared-ui",
     "updatedAt": "2026-04-18T00:00:00Z"
+  },
+  {
+    "createdAt": "2026-04-18T00:00:00Z",
+    "defaultBranch": "main",
+    "gitURL": "git@cc:notification-service.git",
+    "id": "77777777-7777-7777-7777-777777777777",
+    "mrTargetBranches": [
+      "main",
+      "release/1.0"
+    ],
+    "repoName": "notification-service",
+    "updatedAt": "2026-04-18T00:00:00Z"
+  },
+  {
+    "createdAt": "2026-04-18T00:00:00Z",
+    "defaultBranch": "main",
+    "gitURL": "git@cc:admin-console.git",
+    "id": "88888888-8888-8888-8888-888888888888",
+    "mrTargetBranches": [
+      "main"
+    ],
+    "repoName": "admin-console",
+    "updatedAt": "2026-04-18T00:00:00Z"
+  },
+  {
+    "createdAt": "2026-04-18T00:00:00Z",
+    "defaultBranch": "develop",
+    "gitURL": "git@cc:data-pipeline.git",
+    "id": "99999999-9999-9999-9999-999999999999",
+    "mrTargetBranches": [
+      "develop",
+      "release/2024"
+    ],
+    "repoName": "data-pipeline",
+    "updatedAt": "2026-04-18T00:00:00Z"
+  },
+  {
+    "createdAt": "2026-04-18T00:00:00Z",
+    "defaultBranch": "main",
+    "gitURL": "git@cc:search-indexer.git",
+    "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "mrTargetBranches": [
+      "main",
+      "release/1.0"
+    ],
+    "repoName": "search-indexer",
+    "updatedAt": "2026-04-18T00:00:00Z"
   }
 ]

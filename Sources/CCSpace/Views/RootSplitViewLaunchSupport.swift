@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import SwiftUI
 
 enum CCSpaceScreenshotScene: String, Equatable {
     case settingsOverview = "settings-overview"
@@ -92,6 +93,8 @@ struct CCSpaceLaunchConfiguration {
     let createWorkplaceName: String?
     let createWorkplaceBranch: String?
     let createSelectedRepositoryNames: [String]
+    /// README 工作区详情截图:分支面板展开在这条仓库行上(仅 workplace-detail 场景非空)。
+    let branchPanelRepositoryName: String?
     let windowSize: CGSize
 
     init(environment: [String: String] = ProcessInfo.processInfo.environment) {
@@ -111,6 +114,9 @@ struct CCSpaceLaunchConfiguration {
         createSelectedRepositoryNames = Self.csvValues(
             environment["CCSPACE_SCREENSHOT_CREATE_SELECTED_REPOSITORIES"]
         )
+        branchPanelRepositoryName = scene == .workplaceDetail
+            ? Self.trimmedValue(environment["CCSPACE_SCREENSHOT_BRANCH_REPO"])
+            : nil
         windowSize =
             Self.windowSize(from: environment)
             ?? (scene != nil ? Self.screenshotWindowSize : Self.defaultWindowSize)
@@ -200,5 +206,17 @@ struct CCSpaceLaunchConfiguration {
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+    }
+}
+
+private struct CCSpaceScreenshotBranchRepoKey: EnvironmentKey {
+    static let defaultValue: String? = nil
+}
+
+extension EnvironmentValues {
+    /// README 截图场景注入:非空时该名字的仓库行挂载后自动展开分支面板,且面板不随焦点自动关闭。
+    var ccspaceScreenshotBranchRepo: String? {
+        get { self[CCSpaceScreenshotBranchRepoKey.self] }
+        set { self[CCSpaceScreenshotBranchRepoKey.self] = newValue }
     }
 }
